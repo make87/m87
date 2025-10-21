@@ -1,0 +1,29 @@
+[package]
+name = "m87"
+version = "0.1.0"
+edition = "2021"
+authors = ["make87 team"]
+description = "Unified CLI and agent for connecting edge systems to the make87 platform"
+license = "MIT"
+
+[[bin]]
+name = "m87"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.41", features = ["full"] }
+clap = { version = "4.5", features = ["derive", "cargo"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+self_update = { version = "0.41", features = ["archive-tar", "compression-flate2"] }
+anyhow = "1.0"
+thiserror = "1.0"
+dirs = "5.0"
+
+[dev-dependencies]
+tempfile = "3.13"
+mockito = "1.5"
