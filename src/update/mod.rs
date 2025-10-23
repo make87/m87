@@ -1,39 +1,57 @@
 use anyhow::Result;
-use tracing::{info, warn};
 use self_update::cargo_crate_version;
+use tracing::{error, info, warn};
 
-pub async fn update() -> Result<()> {
+/// Check for updates and apply them if available.
+///
+/// Used both by the CLI (`m87 update`) and the daemon’s self-check.
+pub async fn update(interactive: bool) -> Result<bool> {
     info!("Checking for updates...");
-    
-    // Placeholder for actual update logic
-    // In a real implementation with proper releases, this would use self_update
-    
-    warn!("Self-update functionality not yet fully implemented");
-    println!("Current version: {}", cargo_crate_version!());
-    println!("Checking for updates...");
-    println!("You are running the latest version (placeholder)");
-    
-    // Example of how self_update would be used when releases are available:
-    // let status = self_update::backends::github::Update::configure()
-    //     .repo_owner("make87")
-    //     .repo_name("make87-client")
-    //     .bin_name("m87")
-    //     .current_version(cargo_crate_version!())
-    //     .build()?
-    //     .update()?;
-    //
-    // println!("Update status: `{}`!", status.version());
-    
-    Ok(())
+    let current_version = cargo_crate_version!();
+
+    // Replace this once you have tagged releases on GitHub
+    let maybe_status = self_update::backends::github::Update::configure()
+        .repo_owner("make87")
+        .repo_name("make87-client")
+        .bin_name("m87")
+        .current_version(current_version)
+        .no_confirm(!interactive)
+        .build()
+        .and_then(|u| u.update());
+
+    match maybe_status {
+        Ok(status) => {
+            let new_version = status.version();
+            if new_version != current_version {
+                info!("Updated from {} → {}", current_version, new_version);
+                if interactive {
+                    info!("Updated from {} → {}", current_version, new_version);
+                }
+                return Ok(true);
+            } else if interactive {
+                info!("You are running the latest version ({})", current_version);
+            }
+        }
+        Err(e) => {
+            warn!("Self-update failed: {}", e);
+            if interactive {
+                warn!("Failed to check for updates: {}", e);
+            }
+        }
+    }
+
+    Ok(false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_update() {
-        let result = update().await;
-        assert!(result.is_ok());
+/// Helper for daemon use — silently apply and exit if updated.
+pub async fn daemon_check_and_update() -> Result<()> {
+    match update(false).await {
+        Ok(true) => {
+            info!("Agent updated; exiting for restart via systemd");
+            std::process::exit(0);
+        }
+        Ok(false) => {}
+        Err(e) => error!("Update check failed: {:?}", e),
     }
+    Ok(())
 }

@@ -1,13 +1,14 @@
 use clap::{Parser, Subcommand};
-use tracing_subscriber;
+use tracing_subscriber::{fmt, EnvFilter};
 
 mod agent;
 mod app;
-mod backend;
+mod auth;
 mod config;
-mod logs;
+mod server;
 mod stack;
 mod update;
+mod util;
 
 #[derive(Parser)]
 #[command(name = "m87")]
@@ -22,29 +23,22 @@ enum Commands {
     /// Agent management commands
     #[command(subcommand)]
     Agent(AgentCommands),
-    
+
     /// Application management commands
     #[command(subcommand)]
     App(AppCommands),
-    
+
     /// Stack management commands
     #[command(subcommand)]
     Stack(StackCommands),
-    
+
     /// Update the m87 CLI to the latest version
     Update,
-    
-    /// View and manage logs
-    Logs {
-        /// Follow log output
-        #[arg(short, long)]
-        follow: bool,
-        
-        /// Number of lines to show
-        #[arg(short, long, default_value = "100")]
-        lines: usize,
-    },
-    
+
+    /// Authentication commands
+    #[command(subcommand)]
+    Auth(AuthCommands),
+
     /// Show version information
     Version,
 }
@@ -53,17 +47,26 @@ enum Commands {
 enum AgentCommands {
     /// Run the agent daemon
     Run {
-        /// Run in foreground mode
+        /// Run the agent in headless mode
+        #[arg(long, default_value_t = false)]
+        headless: bool,
         #[arg(short, long)]
-        foreground: bool,
+        user_email: Option<String>,
+        #[arg(short, long)]
+        organization_id: Option<String>,
     },
-    
+
     /// Install the agent as a system service
-    Install,
-    
+    Install {
+        #[arg(short, long)]
+        user_email: Option<String>,
+        #[arg(short, long)]
+        organization_id: Option<String>,
+    },
+
     /// Uninstall the agent service
     Uninstall,
-    
+
     /// Check agent status
     Status,
 }
@@ -76,22 +79,22 @@ enum AppCommands {
         #[arg(default_value = ".")]
         path: String,
     },
-    
+
     /// Push an application to the registry
     Push {
         /// Application name
         name: String,
-        
+
         /// Application version
         #[arg(short, long)]
         version: Option<String>,
     },
-    
+
     /// Run an application
     Run {
         /// Application name
         name: String,
-        
+
         /// Additional arguments to pass to the application
         #[arg(last = true)]
         args: Vec<String>,
@@ -105,7 +108,7 @@ enum StackCommands {
         /// Stack name
         name: String,
     },
-    
+
     /// Watch for stack changes
     Watch {
         /// Stack name
@@ -113,13 +116,32 @@ enum StackCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Log in to the platform
+    Login,
+
+    /// Register a new account
+    Register {
+        #[arg(short, long)]
+        user_email: Option<String>,
+        #[arg(short, long)]
+        organization_id: Option<String>,
+    },
+
+    /// Check authentication status
+    Status,
+
+    /// Log out of the platform
+    Logout,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
-    tracing_subscriber::fmt()
+    fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
@@ -127,8 +149,33 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Agent(cmd) => match cmd {
-            AgentCommands::Run { foreground } => agent::run(foreground).await?,
-            AgentCommands::Install => agent::install().await?,
+            AgentCommands::Run {
+                headless,
+                user_email,
+                organization_id,
+            } => {
+                let owner_ref = match user_email.is_some() {
+                    true => user_email,
+                    false => match organization_id.is_some() {
+                        true => organization_id,
+                        false => None,
+                    },
+                };
+                agent::run(headless, owner_ref).await?
+            }
+            AgentCommands::Install {
+                user_email,
+                organization_id,
+            } => {
+                let owner_ref = match user_email.is_some() {
+                    true => user_email,
+                    false => match organization_id.is_some() {
+                        true => organization_id,
+                        false => None,
+                    },
+                };
+                agent::install(owner_ref).await?
+            }
             AgentCommands::Uninstall => agent::uninstall().await?,
             AgentCommands::Status => agent::status().await?,
         },
@@ -141,12 +188,39 @@ async fn main() -> anyhow::Result<()> {
             StackCommands::Pull { name } => stack::pull(&name).await?,
             StackCommands::Watch { name } => stack::watch(&name).await?,
         },
-        Commands::Update => update::update().await?,
-        Commands::Logs { follow, lines } => logs::view(follow, lines).await?,
+        Commands::Update => {
+            let success = update::update(true).await?;
+            if success {
+                println!("Update successful");
+            } else {
+                println!("Update failed");
+            }
+        }
+        Commands::Auth(cmd) => match cmd {
+            AuthCommands::Login => {
+                // Inline the previous backend::auth wrapper behavior and call the auth manager directly.
+                auth::login().await?
+            }
+            AuthCommands::Register {
+                user_email,
+                organization_id,
+            } => {
+                let owner_ref = match user_email.is_some() {
+                    true => user_email,
+                    false => match organization_id.is_some() {
+                        true => organization_id,
+                        false => None,
+                    },
+                };
+                auth::register(owner_ref).await?
+            }
+            AuthCommands::Status => auth::status().await?,
+            AuthCommands::Logout => auth::logout().await?,
+        },
         Commands::Version => {
             println!("m87 version {}", env!("CARGO_PKG_VERSION"));
         }
     }
-    
+
     Ok(())
 }

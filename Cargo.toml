@@ -2,16 +2,18 @@
 name = "m87"
 version = "0.1.0"
 edition = "2021"
-authors = ["make87 team"]
+authors = ["Phillip Thomas <phillip@make87.com>"]
 description = "Unified CLI and agent for connecting edge systems to the make87 platform"
-license = "MIT"
+license = "Apache-2.0"
 
 [[bin]]
 name = "m87"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1.41", features = ["full"] }
+async-trait = "0.1.89"
+hostname = "0.3"
+tokio = { version = "1.48", features = ["full"] }
 clap = { version = "4.5", features = ["derive", "cargo"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -23,6 +25,18 @@ self_update = { version = "0.41", features = ["archive-tar", "compression-flate2
 anyhow = "1.0"
 thiserror = "1.0"
 dirs = "5.0"
+libmacchina = "7"
+openidconnect = { version = "3.5.0", features = ["accept-rfc3339-timestamps"] }
+reqwest = { version = "0.12.5", default-features = false, features = ["json", "rustls-tls"] }
+sysinfo = "0.36.1"
+webbrowser = "1.0.6"
+sha1 = "0.10.6"
+warp = { version = "0.4", features = ["server", "websocket"] }
+futures = "0.3.31"
+dashmap = "6.1.0"
+jsonwebtoken = "9"
+pty-process = { version = "0.5.3", features = ["async"] }
+once_cell = "1.21.3"
 
 [dev-dependencies]
 tempfile = "3.13"

@@ -1,30 +1,52 @@
 mod daemon;
-mod service;
+mod heartbeat;
+pub mod services;
+mod system_metrics;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use tracing::info;
 
-pub async fn run(foreground: bool) -> Result<()> {
-    info!("Starting agent daemon (foreground: {})", foreground);
-    
-    if foreground {
-        daemon::run_foreground().await
-    } else {
-        daemon::run_background().await
+use crate::config::Config;
+
+pub async fn run(headless: bool, owner_ref: Option<String>) -> Result<()> {
+    info!("Running agent");
+    match owner_ref {
+        Some(owner) => {
+            Config::add_owner_reference(owner)?;
+        }
+        None => {
+            if !Config::has_owner_reference()? {
+                return Err(anyhow!(
+                    "No owner reference found. Pass a valid user email or organization id!"
+                ));
+            }
+        }
     }
+    daemon::run(headless).await
 }
 
-pub async fn install() -> Result<()> {
+pub async fn install(owner_ref: Option<String>) -> Result<()> {
     info!("Installing agent service");
-    service::install().await
+    match owner_ref {
+        Some(owner) => {
+            Config::add_owner_reference(owner)?;
+        }
+        None => {
+            if !Config::has_owner_reference()? {
+                return Err(anyhow!(
+                    "No owner reference found. Pass a valid user email or organization id!"
+                ));
+            }
+        }
+    }
+    daemon::install_service().await
 }
 
 pub async fn uninstall() -> Result<()> {
     info!("Uninstalling agent service");
-    service::uninstall().await
+    daemon::uninstall_service().await
 }
 
 pub async fn status() -> Result<()> {
-    info!("Checking agent status");
-    service::status().await
+    daemon::status_service().await
 }

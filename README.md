@@ -93,6 +93,7 @@ The project is organized into the following modules:
 ## Configuration
 
 The agent stores its configuration in:
+
 - Linux/macOS: `~/.config/m87/config.json`
 - Windows: `%APPDATA%\m87\config.json`
 
@@ -125,16 +126,3 @@ cargo test
 ```bash
 cargo run -- [command]
 ```
-
-## Dependencies
-
-- **tokio**: Async runtime
-- **clap**: Command-line argument parsing
-- **tracing**: Logging and instrumentation
-- **serde**: Serialization/deserialization
-- **self_update**: Self-update functionality
-- **tokio-tungstenite**: WebSocket client
-
-## License
-
-MIT
