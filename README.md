@@ -1,7 +1,3 @@
-<file_path>
-gravity/README.md
-</file_path>
-
 # gravity
 
 Unified CLI and agent for the **make87** platform — enabling secure remote access, monitoring, and container orchestration for edge systems anywhere.
