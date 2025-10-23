@@ -1,5 +1,5 @@
 [package]
-name = "m87"
+name = "gravity"
 version = "0.1.0"
 edition = "2021"
 authors = ["Phillip Thomas <phillip@make87.com>"]
@@ -7,7 +7,7 @@ description = "Unified CLI and agent for connecting edge systems to the make87 p
 license = "Apache-2.0"
 
 [[bin]]
-name = "m87"
+name = "gravity"
 path = "src/main.rs"
 
 [dependencies]
