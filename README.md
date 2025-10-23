@@ -1,14 +1,18 @@
-# make87-client
+<file_path>
+gravity/README.md
+</file_path>
 
-Unified CLI and agent for connecting edge systems to the make87 platform. Provides secure remote access, monitoring, and container orchestration for nodes running anywhere.
+# gravity
+
+Unified CLI and agent for the **make87** platform — enabling secure remote access, monitoring, and container orchestration for edge systems anywhere.
 
 ## Features
 
-- **Agent Management**: Run a background daemon that connects to the make87 backend via WebSocket
-- **Application Management**: Build, push, and run containerized applications
-- **Stack Management**: Pull and watch stack configurations
-- **Self-Update**: Update the CLI to the latest version
-- **Log Management**: View and follow agent logs
+- **Agent Management** – Run or install the background agent daemon that connects to the make87 backend
+- **Application Management** – Build, push, and run containerized applications
+- **Stack Management** – Pull and run versioned Docker Compose files that you define on make87
+- **Authentication** – Log in, register, and manage credentials
+- **Self-Update** – Seamlessly update the CLI to the latest release
 
 ## Installation
 
@@ -16,112 +20,132 @@ Unified CLI and agent for connecting edge systems to the make87 platform. Provid
 
 ```bash
 cargo build --release
-sudo cp target/release/m87 /usr/local/bin/
+sudo cp target/release/gravity /usr/local/bin/
 ```
 
 ## Usage
 
 ### Agent Commands
 
-The agent runs as a background daemon, connecting to the make87 backend via WebSocket to sync instructions, updates, and logs.
+The agent runs as a background daemon connecting to the make87 backend via WebSocket to sync instructions, logs, and updates.
 
 ```bash
-# Run the agent in foreground mode
-m87 agent run --foreground
+# Run the agent interactively
+gravity agent run
 
-# Run the agent in background mode
-m87 agent run
+# Run the agent in headless mode (non-interactive)
+gravity agent run --headless
 
 # Install the agent as a system service
-m87 agent install
+gravity agent install
 
-# Check agent status
-m87 agent status
+# Check service status
+gravity agent status
 
 # Uninstall the agent service
-m87 agent uninstall
+gravity agent uninstall
+```
+
+Optional flags for `run` and `install`:
+
+```bash
+--user-email <email>
+--organization-id <org_id>
 ```
 
 ### Application Commands
 
 ```bash
-# Build an application
-m87 app build [path]
+# Build an application (defaults to current directory)
+gravity app build [path]
 
 # Push an application to the registry
-m87 app push <name> [--version <version>]
+gravity app push <name> [--version <version>]
 
-# Run an application
-m87 app run <name> [-- args...]
+# Run an application with optional args
+gravity app run <name> [-- args...]
 ```
 
 ### Stack Commands
 
 ```bash
-# Pull a stack configuration
-m87 stack pull <name>
+# Pull a compose by reference (name:version)
+gravity stack pull <name>:<version>
 
-# Watch for stack changes
-m87 stack watch <name>
+# Run and watch a compose (apply updates)
+gravity stack watch <name>
+```
+
+### Authentication Commands
+
+```bash
+# Log in via OAuth or stored credentials
+gravity auth login
+
+# Register a new user or organization
+gravity auth register [--user-email <email>] [--organization-id <org_id>]
+
+# Show authentication status
+gravity auth status
+
+# Log out and clear credentials
+gravity auth logout
 ```
 
 ### Other Commands
 
 ```bash
-# Update the CLI to the latest version
-m87 update
+# Update gravity to the latest version
+gravity update
 
-# View logs
-m87 logs [--follow] [--lines <count>]
-
-# Show version information
-m87 version
+# Show version info
+gravity version
 ```
 
 ## Architecture
 
-The project is organized into the following modules:
+Modules overview:
 
-- **agent**: Agent daemon and service management
-- **app**: Application build, push, and run functionality
-- **stack**: Stack configuration management
-- **update**: Self-update functionality
-- **logs**: Log viewing and management
-- **config**: Configuration file management
-- **backend**: WebSocket communication with the make87 backend
+- **agent** – Agent runtime and system service logic
+- **app** – Application build/push/run handling
+- **stack** – Stack synchronization and watcher
+- **auth** – Login, registration, and token management
+- **update** – Self-update logic
+- **config** – Config file management
+- **server / util** – Shared backend and helper utilities
 
 ## Configuration
 
-The agent stores its configuration in:
+Configuration is stored in:
 
-- Linux/macOS: `~/.config/m87/config.json`
-- Windows: `%APPDATA%\m87\config.json`
+- **Linux/macOS**: `~/.config/gravity/config.json`
+- **Windows**: `%APPDATA%\gravity\config.json`
 
-Example configuration:
+Example:
 
 ```json
 {
-  "backend_url": "wss://api.make87.io/ws",
-  "agent_id": null,
+  "api_url": "https://api.make87.com",
+  "node_id": null,
   "log_level": "info"
 }
 ```
 
 ## Development
 
-### Building
+### Build
 
 ```bash
 cargo build
 ```
 
-### Testing
+### Test
 
 ```bash
 cargo test
 ```
 
-### Running
+### Run
 
 ```bash
 cargo run -- [command]

@@ -22,14 +22,14 @@ use crate::{
 use crate::agent::heartbeat::send_heartbeat;
 use crate::util::logging::init_tracing_with_log_layer;
 
-const SERVICE_NAME: &str = "m87-agent";
-const SERVICE_FILE: &str = "/etc/systemd/system/m87-agent.service";
+const SERVICE_NAME: &str = "gravity-agent";
+const SERVICE_FILE: &str = "/etc/systemd/system/gravity-agent.service";
 
 pub async fn install_service() -> Result<()> {
     let exe_path = std::env::current_exe().context("Unable to resolve binary path")?;
     let service_content = format!(
         "[Unit]
-Description=make87 Agent Service
+Description=gravity Agent Service for make87
 After=network.target
 
 [Service]
@@ -75,7 +75,7 @@ pub async fn uninstall_service() -> Result<()> {
             .args(["daemon-reload"])
             .status()
             .ok();
-        info!("Uninstalled make87 agent service");
+        info!("Uninstalled gravity agent service");
     } else {
         info!("Service not found, nothing to uninstall");
     }

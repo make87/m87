@@ -100,7 +100,7 @@ impl Config {
 
     fn config_file_path() -> Result<PathBuf> {
         let config_dir = dirs::config_dir().context("Failed to get config directory")?;
-        Ok(config_dir.join("m87").join("config.json"))
+        Ok(config_dir.join("gravity").join("config.json"))
     }
 
     pub fn add_owner_reference(owner_reference: String) -> Result<()> {
