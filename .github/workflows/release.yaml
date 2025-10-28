@@ -1,0 +1,9 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g., 1.2.3 or 1.2.3-rc1)"
+        required: true
+        type: string
