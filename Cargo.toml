@@ -38,3 +38,11 @@ once_cell = "1.21.3"
 # Cryptography and auth
 jsonwebtoken = "9"
 sha1 = "0.10.6"
+
+[profile.release]
+# Optimize for performance and minimal resource footprint
+# While maintaining safety for long-running edge agents
+opt-level = 3              # Maximum optimization
+lto = "fat"                # Full link-time optimization for better dead code elimination
+codegen-units = 1          # Better optimization at the cost of compile time
+strip = true               # Strip debug symbols from binary

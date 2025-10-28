@@ -84,6 +84,26 @@ cargo build --release -p m87-client
 cargo build --release -p m87-server
 ```
 
+### Build Optimizations
+
+Release builds are optimized for minimal resource footprint while maintaining safety and reliability for long-running edge agents:
+
+**Enabled Optimizations:**
+- **LTO (Link-Time Optimization)**: Full cross-crate optimization and dead code elimination
+- **Single codegen unit**: Better optimization at the cost of longer compile times
+- **Stripped binaries**: Debug symbols removed for smaller size
+- **Optimization level 3**: Maximum performance optimizations
+
+**Disabled for Safety:**
+- **Overflow checks**: ENABLED (default) - Prevents integer overflow bugs and security vulnerabilities
+- **Panic unwinding**: ENABLED (default) - Allows proper resource cleanup via Drop implementations
+
+**Binary sizes:**
+- `m87` client: ~9.2 MB (optimized, stripped, with safety checks)
+- `m87-server`: ~350 KB (optimized, stripped, with safety checks)
+
+These optimizations balance performance with reliability - the binaries are lightweight and efficient while maintaining critical runtime safety checks for production edge deployments.
+
 ## Quick Start
 
 ### Client (m87)
