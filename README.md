@@ -23,6 +23,27 @@ Server component for the make87 platform.
 
 ## Installation
 
+### Quick Install (Recommended)
+
+Install the m87 client with a single command:
+
+```bash
+curl -fsSL https://github.com/make87/make87/releases/latest/download/install.sh | bash
+```
+
+This will automatically:
+- Detect your system architecture (x86_64 or ARM64)
+- Download the latest release
+- Verify the binary checksum
+- Install to `/usr/local/bin/m87`
+
+**Pin to a specific version:**
+```bash
+curl -fsSL https://github.com/make87/make87/releases/download/v1.2.3/install.sh | bash
+```
+
+> **Coming soon:** `curl -fsSL get.make87.com | bash`
+
 ### Pre-built Binaries
 
 Download the latest release for your platform from the [Releases](../../releases) page:

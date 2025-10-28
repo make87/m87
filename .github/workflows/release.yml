@@ -151,6 +151,19 @@ jobs:
           find artifacts -type f -exec cp {} release-assets/ \;
           ls -lh release-assets/
 
+      - name: Add install script to release
+        run: |
+          cp install.sh release-assets/
+          echo "Added install.sh to release assets"
+          ls -lh release-assets/install.sh
+
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          sha256sum * > checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
+
       - name: Determine if this is the highest version
         id: version-compare
         run: |
