@@ -33,7 +33,7 @@ once_cell = { workspace = true }
 # Client-specific dependencies
 hostname = "0.3"
 clap = { version = "4.5", features = ["derive", "cargo"] }
-self_update = { version = "0.41", features = ["archive-tar", "compression-flate2"] }
+self_update = { version = "0.41", default-features = false, features = ["archive-tar", "compression-flate2", "rustls"] }
 dirs = "5.0"
 libmacchina = "7"
 openidconnect = { version = "3.5.0", default-features = false, features = ["accept-rfc3339-timestamps", "rustls-tls"] }
