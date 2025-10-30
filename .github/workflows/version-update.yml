@@ -1,0 +1,70 @@
+name: Version Update
+
+on:
+  push:
+    branches:
+      - 'release/**'
+
+permissions:
+  contents: write
+
+jobs:
+  update-version:
+    name: Update Version - ${{ steps.extract-version.outputs.version }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract and validate version from branch name
+        id: extract-version
+        run: |
+          BRANCH_NAME="${{ github.ref_name }}"
+          echo "Branch name: $BRANCH_NAME"
+
+          # Extract version from branch name (release/x.y.z or release/x.y.z-suffix)
+          if [[ $BRANCH_NAME =~ ^release/([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?)$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+            echo "Extracted version: $VERSION"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "Error: Branch name does not match expected pattern 'release/x.y.z' or 'release/x.y.z-prerelease'"
+            echo "Branch name was: $BRANCH_NAME"
+            exit 1
+          fi
+
+      - name: Update version in m87-client/Cargo.toml
+        run: |
+          VERSION="${{ steps.extract-version.outputs.version }}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" m87-client/Cargo.toml
+          echo "Updated m87-client/Cargo.toml to version $VERSION"
+          cat m87-client/Cargo.toml | grep "^version"
+
+      - name: Update version in m87-server/Cargo.toml
+        run: |
+          VERSION="${{ steps.extract-version.outputs.version }}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" m87-server/Cargo.toml
+          echo "Updated m87-server/Cargo.toml to version $VERSION"
+          cat m87-server/Cargo.toml | grep "^version"
+
+      - name: Update version in install.sh
+        run: |
+          VERSION="${{ steps.extract-version.outputs.version }}"
+          sed -i "s/^VERSION=\"__VERSION__\"/VERSION=\"$VERSION\"/" install.sh
+          echo "Updated install.sh to version $VERSION"
+          grep "^VERSION=" install.sh
+
+      - name: Update Cargo.lock
+        run: |
+          cargo update --workspace
+
+      - name: Commit version updates
+        run: |
+          VERSION="${{ steps.extract-version.outputs.version }}"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add m87-client/Cargo.toml m87-server/Cargo.toml install.sh Cargo.lock
+          git commit -m "chore: bump version to $VERSION" || echo "No changes to commit"
+          git push || echo "No changes to push"

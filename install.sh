@@ -6,12 +6,12 @@ set -e
 # This script installs the m87 client binary to /usr/local/bin
 #
 # Usage:
-#   curl -fsSL https://github.com/make87/make87/releases/latest/download/install.sh | bash
-#   curl -fsSL get.make87.com | bash
+#   curl -fsSL https://github.com/make87/make87/releases/download/v0.0.1/install.sh | bash
+#   curl -fsSL get.make87.com/v0.0.1 | bash
 #
 # What it does:
 #   - Detects OS (Linux) and architecture (x86_64/aarch64)
-#   - Downloads latest m87 binary from GitHub releases
+#   - Downloads specific version of m87 binary from GitHub releases
 #   - Verifies SHA256 checksum
 #   - Installs to /usr/local/bin/m87
 
@@ -26,6 +26,8 @@ NC='\033[0m' # No Color
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="m87"
 GITHUB_REPO="make87/make87"  # TODO: use final repo name
+# This version is set during release - do not change manually
+VERSION="__VERSION__"
 
 # Helper functions
 info() {
@@ -181,25 +183,19 @@ main() {
 
     check_dependencies
 
-    # Step 2: Fetch latest release info
-    info "Fetching latest release..."
+    # Step 2: Verify version is set
+    if [ "$VERSION" = "__VERSION__" ]; then
+        error "This install script has not been properly configured with a version."
+        error "Please download the install.sh from a specific release:"
+        error "  https://github.com/$GITHUB_REPO/releases"
+        exit 1
+    fi
+
+    info "Installing version: v$VERSION"
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' EXIT
-
-    # Get latest release version and download URL
-    local release_info="$tmp_dir/release.json"
-    download "https://api.github.com/repos/$GITHUB_REPO/releases/latest" "$release_info"
-
-    VERSION=$(grep -o '"tag_name": *"[^"]*"' "$release_info" | sed 's/"tag_name": *"v\?\(.*\)"/\1/')
-
-    if [ -z "$VERSION" ]; then
-        error "Failed to fetch latest release version"
-        exit 1
-    fi
-
-    success "Latest version: v$VERSION"
 
     # Step 3: Download binary
     local binary_name="${BINARY_NAME}-${TARGET}"
@@ -212,8 +208,8 @@ main() {
 
     # Step 4: Download and verify checksum
     info "Verifying checksum..."
-    local checksums_url="https://github.com/$GITHUB_REPO/releases/download/v${VERSION}/checksums.txt"
-    local checksums_file="$tmp_dir/checksums.txt"
+    local checksums_url="https://github.com/$GITHUB_REPO/releases/download/v${VERSION}/SHA256SUMS"
+    local checksums_file="$tmp_dir/SHA256SUMS"
 
     if download "$checksums_url" "$checksums_file" 2>/dev/null; then
         local expected_checksum
@@ -222,10 +218,10 @@ main() {
         if [ -n "$expected_checksum" ]; then
             verify_checksum "$binary_path" "$expected_checksum"
         else
-            warning "Checksum not found in checksums.txt, skipping verification"
+            warning "Checksum not found in SHA256SUMS, skipping verification"
         fi
     else
-        warning "Could not download checksums.txt, skipping verification"
+        warning "Could not download SHA256SUMS, skipping verification"
     fi
 
     # Step 5: Install
