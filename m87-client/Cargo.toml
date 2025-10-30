@@ -2,7 +2,7 @@
 name = "m87-client"
 version = "0.0.0-dev0"
 edition = "2021"
-authors = ["Phillip Thomas <phillip@make87.com>"]
+authors = ["Phillip Thomas <phillip@make87.com>", "Nisse Knudsen <nisse@make87.com>"]
 description = "Unified CLI and agent for connecting edge systems to the make87 platform"
 license = "Apache-2.0"
 
