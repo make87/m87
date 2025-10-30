@@ -43,15 +43,24 @@ jobs:
     strategy:
       matrix:
         include:
+          # AMD64 builds
           - runner: ubuntu-24.04-amd64-2
             target: x86_64-unknown-linux-gnu
             arch: amd64
+            package: m87-client
+          - runner: ubuntu-24.04-amd64-2
+            target: x86_64-unknown-linux-gnu
+            arch: amd64
+            package: m87-server
+          # ARM64 builds
           - runner: ubuntu-24.04-arm64-2
             target: aarch64-unknown-linux-gnu
             arch: arm64
-        package:
-          - m87-client
-          - m87-server
+            package: m87-client
+          - runner: ubuntu-24.04-arm64-2
+            target: aarch64-unknown-linux-gnu
+            arch: arm64
+            package: m87-server
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
