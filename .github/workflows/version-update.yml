@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   update-version:
-    name: Update Version - ${{ steps.extract-version.outputs.version }}
+    name: Update Version Files
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
