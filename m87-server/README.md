@@ -19,8 +19,7 @@ Stateless reverse TCP relay for secure remote access. Bridges outbound tunnels f
 ## Usage
 
 ```bash
-# Start the server
-m87-server
+docker compose up --build
 ```
 
 ## Configuration
@@ -34,7 +33,7 @@ For build and test instructions, see the [main README](../README.md#development)
 To run the server locally:
 
 ```bash
-cargo run -p m87-server
+todo
 ```
 
 ## API Documentation
