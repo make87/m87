@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   read-version:
@@ -112,9 +113,52 @@ jobs:
           path: dist/${{ steps.binary-info.outputs.binary_name }}-${{ matrix.target }}
           if-no-files-found: error
 
+  docker-build:
+    name: Build Docker Image - ${{ matrix.arch }}
+    needs: [read-version, build]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04-amd64-2
+            arch: amd64
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm64-2
+            arch: arm64
+            platform: linux/arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Pull latest changes
+        run: git pull origin ${{ github.ref_name }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image for ${{ matrix.arch }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: m87-server/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ghcr.io/make87/m87-server:${{ needs.read-version.outputs.version }}-${{ matrix.arch }}
+          cache-from: type=registry,ref=ghcr.io/make87/m87-server:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=ghcr.io/make87/m87-server:buildcache-${{ matrix.arch }},mode=max
+
   release:
     name: Release - ${{ needs.read-version.outputs.version }}
-    needs: [read-version, build]
+    needs: [read-version, build, docker-build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -213,5 +257,53 @@ jobs:
             - `m87-server-aarch64-unknown-linux-gnu` - ARM64 architecture
 
             Download the appropriate binary for your system architecture.
+
+            ### Docker Images
+            Multi-arch Docker images are available at `ghcr.io/make87/m87-server` with the following tags:
+            - `${{ needs.read-version.outputs.version }}` - This specific version${{ steps.version-compare.outputs.is_highest == 'true' && ', :latest' || '' }}${{ !contains(needs.read-version.outputs.version, '-') && format(', :{0}.{1}', split(needs.read-version.outputs.version, '.')[0], split(needs.read-version.outputs.version, '.')[1]) || '' }}
+
+            Supported architectures: linux/amd64, linux/arm64
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch Docker manifest
+        run: |
+          VERSION="${{ needs.read-version.outputs.version }}"
+          IS_HIGHEST="${{ steps.version-compare.outputs.is_highest }}"
+
+          echo "Creating multi-arch manifest for version: $VERSION"
+
+          # Base tags that always get created
+          TAGS="ghcr.io/make87/m87-server:$VERSION"
+
+          # Add major.minor tag for stable versions (no suffix)
+          if [[ ! $VERSION == *-* ]]; then
+            MAJOR_MINOR=$(echo $VERSION | cut -d. -f1,2)
+            TAGS="$TAGS ghcr.io/make87/m87-server:$MAJOR_MINOR"
+            echo "Adding major.minor tag: $MAJOR_MINOR"
+          fi
+
+          # Add latest tag only if this is the highest stable version
+          if [[ $IS_HIGHEST == "true" ]]; then
+            TAGS="$TAGS ghcr.io/make87/m87-server:latest"
+            echo "Adding :latest tag"
+          fi
+
+          echo "All tags: $TAGS"
+
+          # Create and push manifest for each tag
+          for TAG in $TAGS; do
+            echo "Creating manifest for: $TAG"
+            docker buildx imagetools create -t $TAG \
+              ghcr.io/make87/m87-server:$VERSION-amd64 \
+              ghcr.io/make87/m87-server:$VERSION-arm64
+          done
+
+          echo "Docker manifests created and pushed successfully"
