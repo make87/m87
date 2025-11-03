@@ -9,13 +9,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /workspace
 
-# Cache dependencies
+# Copy workspace files
 COPY Cargo.toml Cargo.lock ./
-# Copy real source
-COPY src ./src
-RUN cargo build --release
+
+# Copy both workspace members (required by workspace manifest)
+COPY m87-client ./m87-client
+COPY m87-server ./m87-server
+
+# Build the m87-server binary
+RUN cargo build --release --package m87-server
 
 # ===========================
 # Runtime Stage
@@ -34,7 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy compiled binary from builder
-COPY --from=builder /app/target/release/m87-server /app/m87-server
+COPY --from=builder /workspace/target/release/m87-server /app/m87-server
 
 
 # Default entrypoint

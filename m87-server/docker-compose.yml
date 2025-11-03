@@ -1,8 +1,9 @@
 services:
   m87-server:
+    image: ghcr.io/make87/m87-server:latest
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: m87-server/Dockerfile
     container_name: m87-server
     restart: always
     environment:
@@ -24,8 +25,6 @@ services:
       - "8081:8081"
     volumes:
       - backend-data:/app/certs
-    profiles:
-      - default
 
   mongo:
     image: mongo:7
@@ -36,9 +35,6 @@ services:
       - mongo-data:/data/db
     networks:
       - nexus-network
-    profiles:
-      - default
-      - mongo-only
 
 networks:
   nexus-network:
