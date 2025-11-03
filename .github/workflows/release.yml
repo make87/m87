@@ -115,7 +115,7 @@ jobs:
 
   docker-build:
     name: Build Docker Image - ${{ matrix.arch }}
-    needs: [read-version, build]
+    needs: [read-version]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
