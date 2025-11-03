@@ -8,8 +8,8 @@ services:
     environment:
       - MONGO_URI=mongodb://mongo:27017
       - MONGO_DB=m87-server
-      - OAUTH_ISSUER=${OAUTH_ISSUER:-https://auth.make87.com}
-      - OAUTH_AUDIENCE=${OAUTH_AUDIENCE:-https://api.make87.com}
+      - OAUTH_ISSUER=${OAUTH_ISSUER:-https://auth.make87.com/}
+      - OAUTH_AUDIENCE=${OAUTH_AUDIENCE:-https://auth.make87.com}
       - PUBLIC_ADDRESS=${PUBLIC_ADDRESS:-localhost}
       - FORWARD_SECRET=${FORWARD_SECRET:-dev_secret_change_me}
       - UNIFIED_PORT=${UNIFIED_PORT:-8080}

@@ -13,6 +13,10 @@ fn default_update_check_interval() -> u64 {
     3600 // 1h
 }
 
+fn default_server_port() -> u16 {
+    8337
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub api_url: String,
@@ -26,13 +30,19 @@ pub struct Config {
     pub auth_domain: String,
     pub auth_audience: String,
     pub auth_client_id: String,
+    #[serde(default = "default_server_port")]
     pub server_port: u16,
+    #[serde(default)]
+    pub trust_invalid_server_cert: bool,
+    #[serde(default)]
+    /// If the client should lookup its public ip and geo location based on the ip and report to the server
+    pub enable_geo_lookup: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            api_url: "https://api.make87.com".to_string(),
+            api_url: "https://free.make87.com".to_string(),
             node_id: Config::deterministic_node_id(),
             log_level: "info".to_string(),
             heartbeat_interval_secs: default_heartbeat_interval(),
@@ -42,6 +52,8 @@ impl Default for Config {
             auth_audience: "https://auth.make87.com".to_string(),
             auth_client_id: "E2J7xfFLgexzvhHhz4YqaJBy8Ys82SmM".to_string(),
             server_port: 8337,
+            trust_invalid_server_cert: false,
+            enable_geo_lookup: true,
         }
     }
 }
@@ -100,7 +112,7 @@ impl Config {
 
     fn config_file_path() -> Result<PathBuf> {
         let config_dir = dirs::config_dir().context("Failed to get config directory")?;
-        Ok(config_dir.join("gravity").join("config.json"))
+        Ok(config_dir.join("m87").join("config.json"))
     }
 
     pub fn add_owner_reference(owner_reference: String) -> Result<()> {
@@ -133,7 +145,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.api_url, "https://api.make87.com");
+        assert_eq!(config.api_url, "https://free.make87.com");
         assert_eq!(config.log_level, "info");
     }
 

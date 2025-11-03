@@ -30,6 +30,10 @@ dashmap = { workspace = true }
 jsonwebtoken = { workspace = true }
 once_cell = { workspace = true }
 
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-yamux = { workspace = true }
+
 # Client-specific dependencies
 hostname = "0.3"
 clap = { version = "4.5", features = ["derive", "cargo"] }
@@ -40,6 +44,7 @@ openidconnect = { version = "3.5.0", default-features = false, features = ["acce
 sysinfo = "0.36.1"
 webbrowser = "1.0.6"
 pty-process = { version = "0.5.3", features = ["async"] }
+webpki-roots = "1.0.3"
 
 [dev-dependencies]
 tempfile = "3.13"

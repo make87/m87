@@ -53,13 +53,13 @@ async fn get_nodes(
     pagination: RequestPagination,
 ) -> NexusAppResult<Vec<PublicNode>> {
     let nodes_col = state.db.nodes();
-    let nodes_fut = claims.list_with_access(&nodes_col, &pagination);
-    let count_fut = claims.count_with_access(&nodes_col);
+    let nodes = claims.list_with_access(&nodes_col, &pagination).await?;
+    let total_count = claims.count_with_access(&nodes_col).await?;
 
-    let (nodes_res, count_res) = join!(nodes_fut, count_fut);
+    //let (nodes_res, count_res) = join!(nodes_fut, count_fut);
 
-    let nodes = nodes_res?;
-    let total_count = count_res?;
+    //let nodes = nodes_res?;
+    //let total_count = count_res?;
     let nodes = PublicNode::from_nodes(&nodes);
 
     Ok(NexusResponse::builder()

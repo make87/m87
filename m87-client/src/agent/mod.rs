@@ -6,9 +6,10 @@ mod system_metrics;
 use anyhow::{anyhow, Result};
 use tracing::info;
 
+use crate::auth::AuthManager;
 use crate::config::Config;
 
-pub async fn run(headless: bool, owner_ref: Option<String>) -> Result<()> {
+pub async fn run(owner_ref: Option<String>) -> Result<()> {
     info!("Running agent");
     match owner_ref {
         Some(owner) => {
@@ -22,7 +23,7 @@ pub async fn run(headless: bool, owner_ref: Option<String>) -> Result<()> {
             }
         }
     }
-    daemon::run(headless).await
+    daemon::run().await
 }
 
 pub async fn install(owner_ref: Option<String>) -> Result<()> {

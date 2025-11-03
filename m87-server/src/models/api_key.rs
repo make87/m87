@@ -46,7 +46,7 @@ impl ApiKeyDoc {
 
         // 3. Build document
         let doc = ApiKeyDoc {
-            id: None,
+            id: Some(ObjectId::new()),
             key_id: key_id.clone(),
             key_hash: hashed_secret,
             name: req.name,

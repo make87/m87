@@ -19,7 +19,6 @@ pub struct AppConfig {
     pub cert_contact: String,
     pub unified_port: u16,
     pub rest_port: u16,
-    pub control_port: u16,
     pub forward_secret: String,
     pub is_staging: bool,
 }
@@ -31,9 +30,9 @@ impl AppConfig {
             std::env::var("MONGO_URI").unwrap_or_else(|_| "mongodb://localhost:27017".into());
         let mongo_db = std::env::var("MONGO_DB").unwrap_or_else(|_| "m87-server".into());
         let issuer =
-            std::env::var("OAUTH_ISSUER").unwrap_or_else(|_| "https://auth.make87.com".into());
+            std::env::var("OAUTH_ISSUER").unwrap_or_else(|_| "https://auth.make87.com/".into());
         let audience =
-            std::env::var("OAUTH_AUDIENCE").unwrap_or_else(|_| "https://api.make87.com".into());
+            std::env::var("OAUTH_AUDIENCE").unwrap_or_else(|_| "https://auth.make87.com".into());
 
         let public_address = std::env::var("PUBLIC_ADDRESS").unwrap_or_else(|_| "localhost".into());
         let forward_secret =
@@ -49,10 +48,6 @@ impl AppConfig {
             .unwrap_or_else(|_| "8081".into())
             .parse()
             .unwrap();
-        let control_port = std::env::var("CONTROL_PORT")
-            .unwrap_or_else(|_| "8082".into())
-            .parse()
-            .unwrap();
 
         let cert_contact =
             std::env::var("CERT_CONTACT").unwrap_or_else(|_| "admin@make87.com".into());
@@ -65,7 +60,6 @@ impl AppConfig {
             cert_contact,
             unified_port,
             rest_port,
-            control_port,
             forward_secret,
             is_staging,
         })

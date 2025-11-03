@@ -3,9 +3,13 @@ use axum_extra::TypedHeader;
 use futures::TryStreamExt;
 use headers::{authorization::Bearer, Authorization};
 use mongodb::{bson::Document, options::FindOptions, Collection};
+use tracing::info;
 
 use crate::{
-    auth::{access_control::AccessControlled, jwk::validate_token},
+    auth::{
+        access_control::AccessControlled,
+        jwk::{get_email_from_token, validate_token},
+    },
     models::{
         api_key::ApiKeyDoc,
         roles::{Role, RoleDoc},
@@ -38,7 +42,19 @@ impl FromRequestParts<AppState> for Claims {
             // Handle JWT
             let claims = validate_token(token, &state.config).await?;
             // Optional: map claims.sub to roles or user
-            let roles = RoleDoc::list_for_reference(&state.db, &claims.sub).await?;
+
+            let email = get_email_from_token(token, &state.config).await?;
+            let reference_id = email.unwrap_or(claims.sub);
+            let mut roles = RoleDoc::list_for_reference(&state.db, &reference_id).await?;
+            // add user:reference_id role as owner
+            info!("reference id: {}", reference_id);
+            roles.push(RoleDoc {
+                id: None,
+                reference_id: reference_id.clone(),
+                scope: format!("user:{}", reference_id),
+                role: Role::Owner,
+                created_at: None,
+            });
             Ok(Self { roles })
         } else {
             // Handle API key

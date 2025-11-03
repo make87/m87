@@ -52,19 +52,17 @@ impl Default for NodeClientConfig {
 pub struct NodeSystemInfo {
     pub hostname: String,
     pub public_ip_address: Option<String>,
-    pub node_info: Option<String>,
     pub operating_system: String,
-    pub client_version: String,
-    pub target_client_version: String,
-    pub is_managed_node: bool,
-    pub icon_url: String,
     #[serde(default = "default_architecture")]
     pub architecture: String,
     #[serde(default)]
     pub cores: Option<u32>,
+    pub cpu_name: String,
     #[serde(default)]
     /// Memory in GB
     pub memory: Option<f64>,
+    #[serde(default)]
+    pub gpus: Vec<String>,
     #[serde(default)]
     pub latitude: Option<f64>,
     #[serde(default)]
@@ -83,12 +81,7 @@ impl Hash for NodeSystemInfo {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.hostname.hash(state);
         self.public_ip_address.hash(state);
-        self.node_info.hash(state);
         self.operating_system.hash(state);
-        self.client_version.hash(state);
-        self.target_client_version.hash(state);
-        self.is_managed_node.hash(state);
-        self.icon_url.hash(state);
         self.architecture.hash(state);
         if let Some(cores) = &self.cores {
             cores.hash(state);
@@ -103,6 +96,8 @@ impl Hash for NodeSystemInfo {
             longitude.to_bits().hash(state);
         }
         self.country_code.hash(state);
+        self.cpu_name.hash(state);
+        self.gpus.hash(state);
     }
 }
 
@@ -110,7 +105,6 @@ impl Hash for NodeSystemInfo {
 pub struct UpdateNodeBody {
     pub system_info: Option<NodeSystemInfo>,
     pub client_version: Option<String>,
-    pub managed_node_reference: Option<String>,
     pub target_client_version: Option<String>,
     #[serde(default)]
     pub client_config: Option<NodeClientConfig>,
@@ -138,10 +132,6 @@ impl UpdateNodeBody {
 
         if let Some(client_version) = &self.client_version {
             update_fields.insert("client_version", client_version);
-        }
-
-        if let Some(managed_node_reference) = &self.managed_node_reference {
-            update_fields.insert("managed_node_reference", managed_node_reference);
         }
 
         if let Some(target_client_version) = &self.target_client_version {

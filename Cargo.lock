@@ -2276,6 +2276,7 @@ dependencies = [
  "openidconnect",
  "pty-process",
  "reqwest 0.12.24",
+ "rustls 0.23.33",
  "self_update",
  "serde",
  "serde_json",
@@ -2284,11 +2285,14 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-tungstenite 0.24.0",
+ "tokio-yamux",
  "tracing",
  "tracing-subscriber",
  "warp",
  "webbrowser",
+ "webpki-roots 1.0.3",
 ]
 
 [[package]]

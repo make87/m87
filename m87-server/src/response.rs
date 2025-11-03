@@ -7,6 +7,7 @@ use hex::FromHexError;
 use hmac::digest::MacError;
 use serde::Serialize;
 use std::{fmt::Display, num::ParseIntError, string::FromUtf8Error};
+use tracing::error;
 
 #[derive(Debug)]
 pub struct NexusResponse<T: Serialize> {
@@ -325,6 +326,8 @@ impl IntoResponse for NexusError {
             NexusError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             NexusError::NotFound(message) => (StatusCode::NOT_FOUND, message),
         };
+
+        error!("Returning error response {} {}", status, message);
 
         let response = (
             status,

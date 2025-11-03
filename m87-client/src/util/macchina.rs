@@ -1,5 +1,14 @@
 use libmacchina::{GeneralReadout, MemoryReadout};
 
+pub struct Readout {
+    pub cpu_cores: u32,
+    pub cpu: String,
+    pub name: String,
+    pub distribution: String,
+    pub gpus: Vec<String>,
+    pub memory: u64,
+}
+
 pub fn get_detailed_printout() -> String {
     use libmacchina::traits::GeneralReadout as _;
 
@@ -47,13 +56,24 @@ pub fn get_detailed_printout() -> String {
     system_info
 }
 
-pub fn get_operating_system() -> String {
+pub fn get_readout() -> Readout {
     use libmacchina::traits::GeneralReadout as _;
-
+    use libmacchina::traits::MemoryReadout as _;
     let general_readout = GeneralReadout::new();
-    let distribution = general_readout
-        .distribution()
-        .unwrap_or("not found".to_string());
-
-    distribution
+    let memory_readout = MemoryReadout::new();
+    let memory = memory_readout.total().unwrap_or(0);
+    Readout {
+        cpu_cores: general_readout.cpu_cores().unwrap_or(0) as u32,
+        cpu: general_readout
+            .cpu_model_name()
+            .unwrap_or("not found".to_string()),
+        name: general_readout
+            .hostname()
+            .unwrap_or("not found".to_string()),
+        distribution: general_readout
+            .distribution()
+            .unwrap_or("not found".to_string()),
+        gpus: general_readout.gpus().unwrap_or(vec![]),
+        memory,
+    }
 }

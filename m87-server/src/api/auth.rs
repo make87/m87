@@ -10,8 +10,8 @@ use crate::auth::claims::Claims;
 use crate::models::api_key::{ApiKeyDoc, CreateApiKey};
 use crate::models::node::{CreateNodeBody, NodeDoc};
 use crate::models::node_auth_request::{
-    AuthRequestAction, NodeAuthRequestBody, NodeAuthRequestCheckResponse, NodeAuthRequestDoc,
-    PublicNodeAuthRequest,
+    AuthRequestAction, CheckAuthRequest, NodeAuthRequestBody, NodeAuthRequestCheckResponse,
+    NodeAuthRequestDoc, PublicNodeAuthRequest,
 };
 use crate::models::roles::Role;
 use crate::models::ssh_key::{SSHPubKeyCreateRequest, SSHPubKeyDoc};
@@ -22,10 +22,8 @@ use crate::util::pagination::RequestPagination;
 pub fn create_route() -> Router<AppState> {
     Router::new()
         .route("/request", get(get_auth_requests).post(post_auth_request))
-        .route(
-            "/request/{id}",
-            get(check_auth_request).post(handle_auth_request),
-        )
+        .route("/request/check", post(check_auth_request))
+        .route("/request/approve", post(handle_auth_request))
         .route("/ssh", post(add_ssh_pub_key).get(get_ssh_keys))
 }
 
@@ -68,12 +66,12 @@ async fn get_auth_requests(
 
 async fn check_auth_request(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Json(payload): Json<CheckAuthRequest>,
 ) -> NexusAppResult<NodeAuthRequestCheckResponse> {
     let requests_col = state.db.node_auth_requests();
 
     let request = requests_col
-        .find_one(doc! { "request_id": &id })
+        .find_one(doc! { "request_id": &payload.request_id })
         .await
         .map_err(|_| NexusError::internal_error("DB lookup failed"))?;
 
@@ -96,7 +94,7 @@ async fn check_auth_request(
 
     // Delete the request now that it's processed
     let _ = requests_col
-        .delete_one(doc! { "request_id": &id })
+        .delete_one(doc! { "request_id": &payload.request_id })
         .await
         .map_err(|_| NexusError::internal_error("Failed to delete request"))?;
 
@@ -143,13 +141,12 @@ async fn check_auth_request(
 async fn handle_auth_request(
     claims: Claims,
     State(state): State<AppState>,
-    Path(id): Path<String>,
     Json(payload): Json<AuthRequestAction>,
 ) -> NexusAppResult<()> {
     let requests_col = state.db.node_auth_requests();
 
     let _ = claims
-        .find_one_with_access(&requests_col, doc! { "request_id": &id })
+        .find_one_with_access(&requests_col, doc! { "request_id": &payload.request_id })
         .await?
         .ok_or_else(|| NexusError::not_found("Auth request not found"))?;
 
@@ -159,7 +156,7 @@ async fn handle_auth_request(
             claims
                 .update_one_with_access(
                     &requests_col,
-                    doc! { "request_id": &id },
+                    doc! { "request_id": &payload.request_id },
                     doc! { "$set": { "approved": true } },
                 )
                 .await?;
@@ -168,7 +165,7 @@ async fn handle_auth_request(
         false => {
             // Delete or mark declined
             claims
-                .delete_one_with_access(&requests_col, doc! { "request_id": &id })
+                .delete_one_with_access(&requests_col, doc! { "request_id": &payload.request_id })
                 .await?;
             Ok(NexusResponse::builder().ok().build())
         }

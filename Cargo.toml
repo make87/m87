@@ -39,6 +39,11 @@ once_cell = "1.21.3"
 jsonwebtoken = "9"
 sha1 = "0.10.6"
 
+
+tokio-yamux = "0.3.17"
+tokio-rustls = "0.26"
+rustls = { version = "0.23.33", default-features = false, features = ["ring", "std", "tls12", "log", "logging"] }
+
 [profile.release]
 # Optimize for performance and minimal resource footprint
 # While maintaining safety for long-running edge agents

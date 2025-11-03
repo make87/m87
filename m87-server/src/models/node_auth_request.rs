@@ -102,4 +102,10 @@ pub struct NodeAuthRequestCheckResponse {
 #[derive(Deserialize)]
 pub struct AuthRequestAction {
     pub accept: bool,
+    pub request_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct CheckAuthRequest {
+    pub request_id: String,
 }

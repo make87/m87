@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use tokio::sync::broadcast;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
-use tracing_subscriber::prelude::*;
+use tracing_subscriber::{prelude::*, EnvFilter};
 
 static LOG_TX: OnceLock<broadcast::Sender<String>> = OnceLock::new();
 
@@ -32,11 +32,15 @@ where
 }
 
 /// Initialize global tracing with both fmt and WebSocket broadcast layers.
-pub fn init_tracing_with_log_layer() -> broadcast::Sender<String> {
+pub fn init_tracing_with_log_layer(log_level: &str) -> broadcast::Sender<String> {
     let (tx, _rx) = broadcast::channel(1000);
     LOG_TX.set(tx.clone()).ok();
 
+    // Parse the desired log level, e.g. "info", "debug", "trace"
+    let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info")); // fallback if invalid
+
     tracing_subscriber::registry()
+        .with(filter)
         .with(tracing_subscriber::fmt::layer())
         .with(LogBroadcastLayer::new(tx.clone()))
         .init();

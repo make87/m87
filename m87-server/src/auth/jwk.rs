@@ -74,3 +74,35 @@ pub async fn validate_token(token: &str, config: &Arc<AppConfig>) -> NexusResult
 
     Ok(decoded.claims)
 }
+
+pub async fn get_email_from_token(
+    token: &str,
+    config: &Arc<AppConfig>,
+) -> NexusResult<Option<String>> {
+    let issuer = config.oauth.issuer.trim_end_matches('/').to_string();
+    let userinfo_url = format!("{}/userinfo", issuer);
+
+    let resp = Client::new()
+        .get(&userinfo_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| NexusError::internal_error(&format!("Failed to call userinfo: {}", e)))?;
+
+    if !resp.status().is_success() {
+        return Err(NexusError::invalid_token(&format!(
+            "userinfo endpoint returned {}",
+            resp.status()
+        )));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| NexusError::internal_error(&format!("Failed to parse userinfo: {}", e)))?;
+
+    Ok(json
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string()))
+}

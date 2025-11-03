@@ -1,6 +1,5 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
     pin, signal,
@@ -11,25 +10,20 @@ use tracing::{error, info};
 use std::path::Path;
 use std::process::Command;
 
-use crate::auth::{login, register};
-use crate::{
-    auth::AuthManager,
-    config::Config,
-    server::serve_server,
-    util::macchina::{self, get_operating_system},
-};
+use crate::{auth::login_agent, server};
+use crate::{auth::AuthManager, config::Config, rest::serve_server, util::macchina};
 
 use crate::agent::heartbeat::send_heartbeat;
 use crate::util::logging::init_tracing_with_log_layer;
 
-const SERVICE_NAME: &str = "gravity-agent";
-const SERVICE_FILE: &str = "/etc/systemd/system/gravity-agent.service";
+const SERVICE_NAME: &str = "m87-agent";
+const SERVICE_FILE: &str = "/etc/systemd/system/m87-agent.service";
 
 pub async fn install_service() -> Result<()> {
     let exe_path = std::env::current_exe().context("Unable to resolve binary path")?;
     let service_content = format!(
         "[Unit]
-Description=gravity Agent Service for make87
+Description=Agent Service for make87
 After=network.target
 
 [Service]
@@ -75,7 +69,7 @@ pub async fn uninstall_service() -> Result<()> {
             .args(["daemon-reload"])
             .status()
             .ok();
-        info!("Uninstalled gravity agent service");
+        info!("Uninstalled m87 agent service");
     } else {
         info!("Service not found, nothing to uninstall");
     }
@@ -97,13 +91,13 @@ pub async fn status_service() -> Result<()> {
     Ok(())
 }
 
-pub async fn run(headless: bool) -> Result<()> {
-    let _log_tx = init_tracing_with_log_layer();
+pub async fn run() -> Result<()> {
+    let _log_tx = init_tracing_with_log_layer("info");
     info!("Running agent");
     let shutdown = signal::ctrl_c();
     pin!(shutdown);
     tokio::select! {
-        _ = login_and_run(headless) => {},
+        _ = login_and_run() => {},
         _ = &mut shutdown => {
             info!("Received shutdown signal, stopping agent");
         }
@@ -112,22 +106,25 @@ pub async fn run(headless: bool) -> Result<()> {
     Ok(())
 }
 
-async fn login_and_run(headless: bool) -> Result<()> {
+async fn login_and_run() -> Result<()> {
     // retry login/register until wit works, then call agent_loop
     loop {
-        let success = match headless {
-            true => register(None).await,
-            false => login().await,
-        };
+        let success = login_agent(None).await;
         if success.is_ok() {
             break;
         }
         sleep(Duration::from_secs(1)).await;
     }
     let config = Config::load().context("Failed to load configuration")?;
-    let mut manager = AuthManager::from_default_path()?;
-    let token = manager.get_token().await?;
-    let res = report_node_details(&config.api_url, &config.node_id, &token).await;
+    let token = AuthManager::get_agent_token()?;
+    let res = report_node_details(
+        &config.api_url,
+        &config.node_id,
+        &token,
+        config.enable_geo_lookup,
+        config.trust_invalid_server_cert,
+    )
+    .await;
 
     tokio::task::spawn_local(async move {
         loop {
@@ -136,6 +133,18 @@ async fn login_and_run(headless: bool) -> Result<()> {
                 eprintln!("Log server crashed with error: {e}. Restarting in 2 seconds...");
             } else {
                 eprintln!("Log server exited normally. Restarting in 2 seconds...");
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+
+    tokio::task::spawn_local(async move {
+        loop {
+            println!("Starting control tunnel...");
+            if let Err(e) = server::connect_control_tunnel().await {
+                eprintln!("Control tunnel crashed with error: {e}. Restarting in 2 seconds...");
+            } else {
+                eprintln!("Control tunnel exited normally. Restarting in 2 seconds...");
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
@@ -164,8 +173,7 @@ async fn sync_with_backend() -> Result<()> {
     let config = Config::load().context("Failed to load configuration")?;
     let last_instruciotn_hash = "";
 
-    let mut manager = AuthManager::from_default_path()?;
-    let token = manager.get_token().await?;
+    let token = AuthManager::get_agent_token()?;
     let _instruction = send_heartbeat(
         last_instruciotn_hash,
         &config.node_id,
@@ -173,77 +181,67 @@ async fn sync_with_backend() -> Result<()> {
         &token,
     )
     .await?;
-    // TODO: settings update, reverse proxy, compose secrets, ssh keys/
-    // update::daemon_check_and_update().await?;
     info!("Sync complete");
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone)]
-pub struct UpdateNodeBody {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub operating_system: Option<String>,
+pub async fn report_node_details(
+    api_url: &str,
+    node_id: &str,
+    token: &str,
+    enable_geo_lookup: bool,
+    trust_invalid_server_cert: bool,
+) -> Result<()> {
+    info!("Reporting node details");
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_version: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub managed_node_reference: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_ip_address: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connection_info: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub architecture: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_info: Option<String>, // or structured type if you have one
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub peripherals: Option<Vec<String>>, // or Vec<Peripheral> if defined
+    // Build update body
+    let body = server::UpdateNodeBody {
+        client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        system_info: Some(get_system_info(enable_geo_lookup).await?),
+    };
+    server::report_node_details(api_url, token, node_id, body, trust_invalid_server_cert).await
 }
 
-pub async fn report_node_details(api_url: &str, node_id: &str, token: &str) -> Result<()> {
-    info!("Reporting node details");
+async fn get_system_info(enable_geo_lookup: bool) -> Result<server::NodeSystemInfo> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()?;
 
-    let node_info = macchina::get_detailed_printout();
-
-    // Try to detect DigitalOcean managed node ID
-    let managed_node_id = match client
-        .get("http://169.254.169.254/metadata/v1/id")
-        .send()
-        .await
-    {
-        Ok(resp) => match resp.text().await {
-            Ok(text) => Some(text),
-            Err(_) => None,
-        },
-        Err(_) => None,
+    let mut sys_info = server::NodeSystemInfo {
+        ..Default::default()
     };
-
-    // We use this to find the geographically closest nexus to oyur node for faster tunneling.
-    let (public_ip, connection_info) = match client.get("http://ip-api.com/json").send().await {
-        Ok(resp) => {
-            let text = resp.text().await?;
-            let parsed: Value = serde_json::from_str(&text)?;
-            let ip = parsed
-                .get("query")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            if ip.is_some() {
-                (ip, Some(text))
-            } else {
-                (None, None)
+    if enable_geo_lookup {
+        match client.get("http://ip-api.com/json").send().await {
+            Ok(resp) => {
+                // example: {"status":"success","country":"Germany","countryCode":"DE","region":"BW","regionName":"Baden-Wurttemberg","city":"Karlsruhe","zip":"76185","lat":49.0099,"lon":8.3592,"timezone":"Europe/Berlin","isp":"Deutsche Telekom AG","org":"Deutsche Telekom AG","as":"AS3320 Deutsche Telekom AG","query":"84.150.209.224"}
+                let text = resp.text().await?;
+                let parsed: Value = serde_json::from_str(&text)?;
+                let ip = parsed
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if ip.is_some() {
+                    sys_info.public_ip_address = ip;
+                }
+                let country_code = parsed
+                    .get("countryCode")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if country_code.is_some() {
+                    sys_info.country_code = country_code;
+                }
+                let latitude = parsed.get("lat").and_then(|v| v.as_f64()).map(|f| f as f64);
+                if latitude.is_some() {
+                    sys_info.latitude = latitude;
+                }
+                let longitude = parsed.get("lon").and_then(|v| v.as_f64()).map(|f| f as f64);
+                if longitude.is_some() {
+                    sys_info.longitude = longitude;
+                }
             }
-        }
-        Err(_) => (None, None),
-    };
+            Err(_) => {}
+        };
+    }
 
     // Determine architecture
     let arch = Command::new("uname")
@@ -257,35 +255,15 @@ pub async fn report_node_details(api_url: &str, node_id: &str, token: &str) -> R
             s => s.to_string(),
         })
         .unwrap_or_else(|| "unknown".to_string());
+    sys_info.architecture = arch;
 
-    // Build update body
-    let body = UpdateNodeBody {
-        operating_system: Some(get_operating_system()),
-        client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        managed_node_reference: managed_node_id,
-        public_ip_address: public_ip,
-        connection_info,
-        architecture: Some(arch),
-        node_info: Some(node_info),
-        ..Default::default()
-    };
+    let readout = macchina::get_readout();
+    sys_info.cores = Some(readout.cpu_cores);
+    sys_info.cpu_name = readout.cpu;
+    sys_info.memory = Some((readout.memory as f64) / 1024. / 1024.);
+    sys_info.gpus = readout.gpus;
+    sys_info.hostname = readout.name;
+    sys_info.operating_system = readout.distribution;
 
-    // Send request
-    let res = client
-        .post(format!(
-            "{}/api/v0/nodes/{}",
-            api_url.trim_end_matches('/'),
-            node_id
-        ))
-        .bearer_auth(token)
-        .json(&body)
-        .send()
-        .await?;
-
-    if !res.status().is_success() {
-        let text = res.text().await.unwrap_or_default();
-        return Err(anyhow!("Failed to update node: {}", text));
-    }
-
-    Ok(())
+    Ok(sys_info)
 }
