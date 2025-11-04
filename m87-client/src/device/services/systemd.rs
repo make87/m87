@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::time::Duration;
 use tracing::warn;
 
-use crate::agent::services::service_info::{ServiceInfo, ServiceKind};
+use crate::device::services::service_info::{ServiceInfo, ServiceKind};
 use crate::util::command::{binary_exists, safe_run_command};
 
 pub async fn collect_systemd_services() -> Result<Vec<ServiceInfo>> {

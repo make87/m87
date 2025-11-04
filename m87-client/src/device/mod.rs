@@ -5,11 +5,10 @@ pub mod system_metrics;
 use anyhow::{anyhow, Result};
 use tracing::info;
 
-use crate::auth::AuthManager;
 use crate::config::Config;
 
 pub async fn run(owner_ref: Option<String>) -> Result<()> {
-    info!("Running agent");
+    info!("Running device");
     match owner_ref {
         Some(owner) => {
             Config::add_owner_reference(owner)?;
@@ -26,7 +25,7 @@ pub async fn run(owner_ref: Option<String>) -> Result<()> {
 }
 
 pub async fn install(owner_ref: Option<String>) -> Result<()> {
-    info!("Installing agent service");
+    info!("Installing device service");
     match owner_ref {
         Some(owner) => {
             Config::add_owner_reference(owner)?;
@@ -43,7 +42,7 @@ pub async fn install(owner_ref: Option<String>) -> Result<()> {
 }
 
 pub async fn uninstall() -> Result<()> {
-    info!("Uninstalling agent service");
+    info!("Uninstalling device service");
     daemon::uninstall_service().await
 }
 

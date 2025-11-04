@@ -244,7 +244,7 @@ main() {
     echo "Get started with:"
     echo "  $BINARY_NAME --help          # Show all commands"
     echo "  $BINARY_NAME login           # Authenticate with make87"
-    echo "  $BINARY_NAME agent install   # Install as system service"
+    echo "  $BINARY_NAME device install   # Install as system service"
     echo ""
 }
 

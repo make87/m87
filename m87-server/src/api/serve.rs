@@ -26,14 +26,14 @@ use tower_http::{
 use tracing::{info, warn};
 
 use crate::{
-    api::{agent, auth},
+    api::{auth, device},
     config::AppConfig,
     db::Mongo,
     relay::relay_state::RelayState,
     response::{ServerError, ServerResult},
     util::{app_state::AppState, tcp_proxy::proxy_bidirectional},
 };
-use rcgen::{generate_simple_self_signed, Certificate, CertificateParams};
+use rcgen::generate_simple_self_signed;
 use tokio_yamux::{Config as YamuxConfig, Session};
 
 async fn get_status() -> impl IntoResponse {
@@ -67,7 +67,7 @@ pub async fn serve(
 
     let app = Router::new()
         .nest("/auth", auth::create_route())
-        .nest("/agent", agent::create_route())
+        .nest("/device", device::create_route())
         .route("/status", get(get_status))
         .with_state(state.clone())
         .layer(cors)
@@ -226,24 +226,24 @@ pub async fn handle_control_tunnel(
     tls: TlsStream<tokio::net::TcpStream>,
     secret: &str,
 ) -> io::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::io::AsyncBufReadExt;
     let mut reader = BufReader::new(tls);
 
-    // Expect: "M87 agent_id=<id> token=<base64>\n"
+    // Expect: "M87 device_id=<id> token=<base64>\n"
     let mut line = String::new();
     if reader.read_line(&mut line).await? == 0 {
         warn!("control: empty handshake");
         return Ok(());
     }
-    let agent_id = extract_kv(&line, "agent_id").unwrap_or_default();
+    let device_id = extract_kv(&line, "device_id").unwrap_or_default();
     let token = extract_kv(&line, "token").unwrap_or_default();
-    if agent_id.is_empty() || token.is_empty() {
-        warn!("control: missing agent_id/token");
+    if device_id.is_empty() || token.is_empty() {
+        warn!("control: missing device_id/token");
         return Ok(());
     }
 
     match crate::auth::tunnel_token::verify_tunnel_token(&token, secret) {
-        Ok(id_ok) if id_ok == agent_id => {}
+        Ok(id_ok) if id_ok == device_id => {}
         _ => {
             warn!("control: token invalid or mismatched");
             return Ok(());
@@ -252,14 +252,14 @@ pub async fn handle_control_tunnel(
 
     {
         let mut tunnels = relay.tunnels.write().await;
-        tunnels.remove(&agent_id);
+        tunnels.remove(&device_id);
     }
 
     // Upgrade to Yamux
     let base = reader.into_inner();
     let sess = Session::new_server(base, YamuxConfig::default());
-    relay.register_tunnel(agent_id.clone(), sess).await;
-    info!(%agent_id, "control tunnel active");
+    relay.register_tunnel(device_id.clone(), sess).await;
+    info!(%device_id, "control tunnel active");
     Ok(())
 }
 
@@ -291,8 +291,8 @@ async fn handle_forward_connection(
         }
     };
 
-    let Some(conn_arc) = relay.get_tunnel(&meta.agent_id).await else {
-        warn!(%host, agent_id=%meta.agent_id, "tunnel not active");
+    let Some(conn_arc) = relay.get_tunnel(&meta.device_id).await else {
+        warn!(%host, device_id=%meta.device_id, "tunnel not active");
         let _ = inbound.shutdown().await;
         return Ok(());
     };

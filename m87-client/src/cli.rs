@@ -1,18 +1,17 @@
 use anyhow::Ok;
 use clap::{Parser, Subcommand};
-use tracing_subscriber::{fmt, EnvFilter};
 
-use crate::agent;
-use crate::agents;
 use crate::app;
 use crate::auth;
 use crate::config;
+use crate::device;
+use crate::devices;
 use crate::stack;
 use crate::update;
 
 #[derive(Parser)]
 #[command(name = "m87")]
-#[command(version, about = "Unified CLI and agent for the make87 platform", long_about = None)]
+#[command(version, about = "Unified CLI and device for the make87 platform", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -20,13 +19,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Local agent management commands
+    /// Local device management commands
     #[command(subcommand)]
-    Agent(AgentCommands),
+    Device(DeviceCommands),
 
-    /// Remote agents management commands
+    /// Remote devices management commands
     #[command(subcommand)]
-    Agents(AgentsCommands),
+    Devices(DevicesCommands),
 
     /// Application management commands
     #[command(subcommand)]
@@ -54,8 +53,8 @@ enum ConfigCommands {
 }
 
 #[derive(Subcommand)]
-enum AgentsCommands {
-    /// List all agents
+enum DevicesCommands {
+    /// List all devices
     List,
 
     /// SSH commands
@@ -70,7 +69,7 @@ enum AgentsCommands {
 
 #[derive(Subcommand)]
 enum SSHCommands {
-    /// Connect to a agent via SSH
+    /// Connect to a device via SSH
     Connect {
         #[arg(short, long)]
         id: String,
@@ -83,8 +82,8 @@ enum SSHCommands {
 }
 
 #[derive(Subcommand)]
-enum AgentCommands {
-    /// Run the agent daemon
+enum DeviceCommands {
+    /// Run the device daemon
     Run {
         #[arg(short, long)]
         user_email: Option<String>,
@@ -92,7 +91,7 @@ enum AgentCommands {
         organization_id: Option<String>,
     },
 
-    /// Install the agent as a system service
+    /// Install the device as a system service
     Install {
         #[arg(short, long)]
         user_email: Option<String>,
@@ -100,19 +99,19 @@ enum AgentCommands {
         organization_id: Option<String>,
     },
 
-    /// Uninstall the agent service
+    /// Uninstall the device service
     Uninstall,
 
-    /// Check agent status
+    /// Check device status
     Status,
-    /// Get credentials for the agent
+    /// Get credentials for the device
     Register {
         #[arg(short, long)]
         user_email: Option<String>,
         #[arg(short, long)]
         organization_id: Option<String>,
     },
-    /// Remove the credentials for the agent
+    /// Remove the credentials for the device
     Unregister,
 
     /// Configuration management commands
@@ -210,11 +209,11 @@ pub async fn cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Agent(cmd) => match cmd {
-            AgentCommands::Config(cmd) => match cmd {
+        Commands::Device(cmd) => match cmd {
+            DeviceCommands::Config(cmd) => match cmd {
                 ConfigCommands::Clear => config::Config::clear()?,
             },
-            AgentCommands::Run {
+            DeviceCommands::Run {
                 user_email,
                 organization_id,
             } => {
@@ -225,9 +224,9 @@ pub async fn cli() -> anyhow::Result<()> {
                         false => None,
                     },
                 };
-                agent::run(owner_ref).await?
+                device::run(owner_ref).await?
             }
-            AgentCommands::Install {
+            DeviceCommands::Install {
                 user_email,
                 organization_id,
             } => {
@@ -238,12 +237,12 @@ pub async fn cli() -> anyhow::Result<()> {
                         false => None,
                     },
                 };
-                agent::install(owner_ref).await?
+                device::install(owner_ref).await?
             }
-            AgentCommands::Uninstall => agent::uninstall().await?,
-            AgentCommands::Status => agent::status().await?,
-            AgentCommands::Unregister => auth::logout_agent().await?,
-            AgentCommands::Register {
+            DeviceCommands::Uninstall => device::uninstall().await?,
+            DeviceCommands::Status => device::status().await?,
+            DeviceCommands::Unregister => auth::logout_device().await?,
+            DeviceCommands::Register {
                 user_email,
                 organization_id,
             } => {
@@ -254,17 +253,17 @@ pub async fn cli() -> anyhow::Result<()> {
                         false => None,
                     },
                 };
-                auth::register_agent(owner_ref).await?
+                auth::register_device(owner_ref).await?
             }
         },
-        Commands::Agents(cmd) => match cmd {
-            AgentsCommands::List => {
-                let agents = agents::list_agents().await?;
-                println!("{:?}", agents);
+        Commands::Devices(cmd) => match cmd {
+            DevicesCommands::List => {
+                let devices = devices::list_devices().await?;
+                println!("{:?}", devices);
                 Ok(())
             }
-            AgentsCommands::Metrics { id } => agents::metrics(&id).await,
-            AgentsCommands::Ssh(cmd) => match cmd {
+            DevicesCommands::Metrics { id } => devices::metrics(&id).await,
+            DevicesCommands::Ssh(cmd) => match cmd {
                 SSHCommands::Connect { id } => Ok(()),
                 SSHCommands::Url { id } => Ok(()),
             },

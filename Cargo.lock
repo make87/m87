@@ -2271,6 +2271,7 @@ dependencies = [
  "hostname",
  "jsonwebtoken",
  "libmacchina",
+ "m87-shared",
  "mockito",
  "once_cell",
  "openidconnect",
@@ -2311,6 +2312,7 @@ dependencies = [
  "hex",
  "hmac",
  "jsonwebtoken",
+ "m87-shared",
  "mongodb",
  "once_cell",
  "rand 0.8.5",
@@ -2332,6 +2334,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "m87-shared"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

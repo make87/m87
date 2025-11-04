@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::time::Duration;
 use tracing::warn;
 
-use crate::agent::services::service_info::{ServiceInfo, ServiceKind};
+use crate::device::services::service_info::{ServiceInfo, ServiceKind};
 use crate::util::command::{binary_exists, safe_run_command};
 
 #[derive(Debug, Deserialize)]
@@ -15,23 +15,23 @@ struct ContainerJson {
     restart_count: Option<u32>,
 }
 
-pub async fn collect_podman_services() -> Result<Vec<ServiceInfo>> {
-    if !binary_exists("podman") {
+pub async fn collect_docker_services() -> Result<Vec<ServiceInfo>> {
+    if !binary_exists("docker") {
         return Ok(Vec::new());
     }
 
-    let mut cmd = tokio::process::Command::new("podman");
+    let mut cmd = tokio::process::Command::new("docker");
     cmd.args(&["ps", "--all", "--format", "{{json .}}"]);
 
     let output = safe_run_command(cmd, Duration::from_secs(3)).await?;
 
     if !output.status.success() {
-        warn!("`podman ps` exited with {:?}", output.status);
+        warn!("`docker ps` exited with {:?}", output.status);
         return Ok(Vec::new());
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_containers(stdout.as_ref(), ServiceKind::Podman))
+    Ok(parse_containers(stdout.as_ref(), ServiceKind::Docker))
 }
 
 fn parse_containers(output: &str, kind: ServiceKind) -> Vec<ServiceInfo> {

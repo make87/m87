@@ -47,7 +47,7 @@ pub async fn update(interactive: bool) -> Result<bool> {
 pub async fn daemon_check_and_update() -> Result<()> {
     match update(false).await {
         Ok(true) => {
-            info!("Agent updated; exiting for restart via systemd");
+            info!("Device updated; exiting for restart via systemd");
             std::process::exit(0);
         }
         Ok(false) => {}

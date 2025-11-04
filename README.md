@@ -7,8 +7,8 @@ Unified tooling for the **make87** platform — enabling secure remote access, m
 This repository contains two main components:
 
 ### 🖥️ m87 (Client)
-Command-line interface and agent for edge systems. Provides tools for:
-- Agent management and daemon operations
+Command-line interface and device for edge systems. Provides tools for:
+- Device management and daemon operations
 - Application building, pushing, and running
 - Stack synchronization and management
 - Authentication and credential management
@@ -107,7 +107,7 @@ cargo build --release -p m87-server
 
 ### Build Optimizations
 
-Release builds are optimized for minimal resource footprint while maintaining safety and reliability for long-running edge agents:
+Release builds are optimized for minimal resource footprint while maintaining safety and reliability for long-running edge devices:
 
 **Enabled Optimizations:**
 - **LTO (Link-Time Optimization)**: Full cross-crate optimization and dead code elimination
@@ -133,8 +133,8 @@ These optimizations balance performance with reliability - the binaries are ligh
 # Log in to make87
 m87 auth login
 
-# Run the agent
-m87 agent run
+# Run the device
+m87 device run
 
 # Check version
 m87 version
@@ -157,7 +157,7 @@ See [m87-server/README.md](./m87-server/README.md) for detailed configuration.
 
 ```
 make87/
-├── m87-client/         # Client CLI and agent
+├── m87-client/         # Client CLI and device
 ├── m87-server/         # Server component
 ├── Cargo.toml          # Workspace configuration
 └── README.md           # This file
