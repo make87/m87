@@ -9,14 +9,14 @@ use crate::response::{ServerError, ServerResult};
 
 #[derive(Clone, Debug)]
 pub struct ForwardMeta {
-    pub agent_id: String,
+    pub device_id: String,
     pub target_port: u16,
     pub allowed_ips: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
 pub struct RelayState {
-    /// agent_id -> yamux session for active tunnel
+    /// device_id -> yamux session for active tunnel
     pub tunnels: Arc<
         RwLock<HashMap<String, Arc<Mutex<Session<tokio_rustls::server::TlsStream<TcpStream>>>>>>,
     >,
@@ -33,40 +33,40 @@ impl RelayState {
         })
     }
 
-    // --- Tunnel management --- agent to nexus conenciton
+    // --- Tunnel management --- device to nexus connection
     pub async fn register_tunnel(
         &self,
-        agent_id: String,
+        device_id: String,
         connection: Session<tokio_rustls::server::TlsStream<TcpStream>>,
     ) {
         self.tunnels
             .write()
             .await
-            .insert(agent_id, Arc::new(Mutex::new(connection)));
+            .insert(device_id, Arc::new(Mutex::new(connection)));
     }
 
-    pub async fn remove_tunnel(&self, agent_id: &str) {
-        self.tunnels.write().await.remove(agent_id);
+    pub async fn remove_tunnel(&self, device_id: &str) {
+        self.tunnels.write().await.remove(device_id);
     }
 
     pub async fn get_tunnel(
         &self,
-        agent_id: &str,
+        device_id: &str,
     ) -> Option<Arc<Mutex<Session<tokio_rustls::server::TlsStream<TcpStream>>>>> {
-        self.tunnels.read().await.get(agent_id).cloned()
+        self.tunnels.read().await.get(device_id).cloned()
     }
 
-    // --- Forward management --- public to agent proxing
+    // --- Forward management --- public to device proxying
     /// `sni_host` is the hostname clients will connect to (e.g. camera1.nexus.make87.com)
     pub async fn register_forward(
         &self,
         sni_host: String,
-        agent_id: String,
+        device_id: String,
         target_port: u16,
         allowed_ips: Option<Vec<String>>,
     ) {
         let meta = ForwardMeta {
-            agent_id,
+            device_id,
             target_port,
             allowed_ips,
         };
@@ -81,13 +81,13 @@ impl RelayState {
         self.forwards.read().await.get(sni_host).cloned()
     }
 
-    pub async fn list_forwards_for_agent(&self, agent_id: &str) -> Vec<(String, ForwardMeta)> {
+    pub async fn list_forwards_for_device(&self, device_id: &str) -> Vec<(String, ForwardMeta)> {
         self.forwards
             .read()
             .await
             .iter()
             .filter_map(|(sni, meta)| {
-                if meta.agent_id == agent_id {
+                if meta.device_id == device_id {
                     Some((sni.clone(), meta.clone()))
                 } else {
                     None

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::{
     models::{
-        agent::AgentDoc, agent_auth_request::AgentAuthRequestDoc, api_key::ApiKeyDoc,
+        device::DeviceDoc, device_auth_request::DeviceAuthRequestDoc, api_key::ApiKeyDoc,
         roles::RoleDoc, ssh_key::SSHPubKeyDoc,
     },
     response::ServerResult,
@@ -31,12 +31,12 @@ impl Mongo {
         self.client.database(&self.db_name).collection(name)
     }
 
-    pub fn agents(&self) -> Collection<AgentDoc> {
-        self.col("agents")
+    pub fn devices(&self) -> Collection<DeviceDoc> {
+        self.col("devices")
     }
 
-    pub fn agent_auth_requests(&self) -> Collection<AgentAuthRequestDoc> {
-        self.col("agent_auth_requests")
+    pub fn device_auth_requests(&self) -> Collection<DeviceAuthRequestDoc> {
+        self.col("device_auth_requests")
     }
 
     pub fn roles(&self) -> Collection<RoleDoc> {
@@ -62,12 +62,12 @@ impl Mongo {
             )
             .await?;
 
-        self.agent_auth_requests()
+        self.device_auth_requests()
             .create_index(IndexModel::builder().keys(doc! { "request_id": 1 }).build())
             .await?;
 
-        // TTL index for NodeAuthRequestDoc (auto-delete after 24 hours)
-        self.agent_auth_requests()
+        // TTL index for DeviceAuthRequestDoc (auto-delete after 24 hours)
+        self.device_auth_requests()
             .create_index(
                 IndexModel::builder()
                     .keys(doc! { "created_at": 1 })
@@ -80,7 +80,7 @@ impl Mongo {
             )
             .await?;
 
-        self.agent_auth_requests()
+        self.device_auth_requests()
             .create_index(
                 IndexModel::builder()
                     .keys(doc! { "owner_scope": 1 })
@@ -88,14 +88,14 @@ impl Mongo {
             )
             .await?;
 
-        self.agents()
+        self.devices()
             .create_index(
                 IndexModel::builder()
                     .keys(doc! { "owner_scope": 1 })
                     .build(),
             )
             .await?;
-        self.agents()
+        self.devices()
             .create_index(
                 IndexModel::builder()
                     .keys(doc! { "allowed_scopes": 1 })

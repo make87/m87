@@ -7,7 +7,7 @@ This repository contains multiple components with different licenses:
 ### m87-client
 - **License**: Apache License 2.0
 - **License File**: [m87-client/LICENSE](m87-client/LICENSE)
-- **Description**: Unified CLI and agent for connecting edge systems to the make87 platform
+- **Description**: Unified CLI and device for connecting edge systems to the make87 platform
 
 ### m87-server
 - **License**: GNU Affero General Public License v3.0 (AGPL-3.0)

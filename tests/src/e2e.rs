@@ -6,7 +6,7 @@ use testcontainers::{
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
 
-use m87_client::{agent, auth, config::Config};
+use m87_client::{device, auth, config::Config};
 
 async fn start_mongo() -> (String, testcontainers::ContainerAsync<GenericImage>) {
     let image = GenericImage::new("mongo", "7.0.5")
@@ -33,7 +33,7 @@ async fn start_server(mongo_uri: &str, rest_port: u16) -> std::process::Child {
 }
 
 #[tokio::test]
-async fn e2e_clear_and_run_agent() {
+async fn e2e_clear_and_run_device() {
     let (mongo_uri, _mongo) = start_mongo().await;
     let rest_port = 8085;
     let mut server = start_server(&mongo_uri, rest_port).await;
@@ -45,8 +45,8 @@ async fn e2e_clear_and_run_agent() {
     cfg.save().unwrap();
 
     let owner_ref = Some("test@example.com".to_string());
-    let result = agent::run(owner_ref).await;
-    assert!(result.is_ok(), "Agent run failed: {:?}", result);
+    let result = device::run(owner_ref).await;
+    assert!(result.is_ok(), "Device run failed: {:?}", result);
 
     let _ = server.kill();
 }
@@ -63,7 +63,7 @@ async fn e2e_auth_login_status() {
     cfg.trust_invalid_server_cert = true;
     cfg.save().unwrap();
 
-    let result = auth::login_agent(Some("tester@example.com".into())).await;
+    let result = auth::register_device(Some("tester@example.com".into())).await;
     assert!(result.is_ok(), "Login failed: {:?}", result);
 
     let status = auth::status().await;

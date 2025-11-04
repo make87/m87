@@ -1,6 +1,6 @@
 // === Core modules ===
-pub mod agent;
-pub mod agents;
+pub mod device;
+pub mod devices;
 pub mod app;
 pub mod auth;
 pub mod config;

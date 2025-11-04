@@ -20,7 +20,7 @@ fn default_server_port() -> u16 {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub api_url: String,
-    pub agent_id: String,
+    pub device_id: String,
     pub log_level: String,
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_secs: u64,
@@ -43,7 +43,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             api_url: "https://free.make87.com".to_string(),
-            agent_id: Config::deterministic_agent_id(),
+            device_id: Config::deterministic_device_id(),
             log_level: "info".to_string(),
             heartbeat_interval_secs: default_heartbeat_interval(),
             update_check_interval_secs: default_update_check_interval(),
@@ -72,7 +72,7 @@ impl Config {
     }
 
     /// Create a deterministic BSON-style ObjectId string from hostname and MAC address.
-    pub fn deterministic_agent_id() -> String {
+    pub fn deterministic_device_id() -> String {
         let hostname = hostname::get()
             .unwrap_or_default()
             .to_string_lossy()

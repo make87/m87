@@ -6,26 +6,26 @@ use tracing::info;
 
 use crate::server;
 
-pub struct AgentAuthRequestHandler {
+pub struct DeviceAuthRequestHandler {
     pub api_url: String,
-    pub agent_info: Option<String>,
+    pub device_info: Option<String>,
     pub hostname: String,
-    pub agent_id: String,
+    pub device_id: String,
     pub owner_scope: String,
     pub request_id: Option<String>,
     pub trust_invalid_server_cert: bool,
 }
 
-impl AgentAuthRequestHandler {
+impl DeviceAuthRequestHandler {
     pub async fn send_auth_request(&mut self) -> Result<()> {
-        let agent_info = self.agent_info.as_ref().expect(
-            "Agent info not set. This is needed for the user to know which agent to authenticate",
+        let device_info = self.device_info.as_ref().expect(
+            "Device info not set. This is needed for the user to know which device to authenticate",
         );
-        let body = server::AgentAuthRequestBody {
-            agent_info: agent_info.clone(),
+        let body = server::DeviceAuthRequestBody {
+            device_info: device_info.clone(),
             hostname: self.hostname.clone(),
             owner_scope: self.owner_scope.clone(),
-            agent_id: self.agent_id.clone(),
+            device_id: self.device_id.clone(),
         };
         let request_id =
             server::set_auth_request(&self.api_url, body, self.trust_invalid_server_cert).await?;

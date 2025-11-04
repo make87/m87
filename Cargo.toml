@@ -65,7 +65,7 @@ rustls = { version = "0.23.33", default-features = false, features = ["ring", "s
 
 [profile.release]
 # Optimize for performance and minimal resource footprint
-# While maintaining safety for long-running edge agents
+# While maintaining safety for long-running edge devices
 opt-level = 3              # Maximum optimization
 lto = "fat"                # Full link-time optimization for better dead code elimination
 codegen-units = 1          # Better optimization at the cost of compile time

@@ -15,7 +15,7 @@ pub fn verify_tunnel_token(token_b64: &str, secret: &str) -> ServerResult<String
         return Err(ServerError::invalid_token("invalid token format"));
     }
 
-    let agent_id = parts[0];
+    let device_id = parts[0];
     let expiry: i64 = parts[1]
         .parse()
         .map_err(|_| ServerError::invalid_token("invalid expiry"))?;
@@ -25,12 +25,12 @@ pub fn verify_tunnel_token(token_b64: &str, secret: &str) -> ServerResult<String
         return Err(ServerError::invalid_token("token expired"));
     }
 
-    let payload = format!("{}|{}", agent_id, expiry);
+    let payload = format!("{}|{}", device_id, expiry);
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
         .map_err(|_| ServerError::invalid_token("invalid secret"))?;
     mac.update(payload.as_bytes());
     mac.verify_slice(&hex::decode(sig_hex)?)?;
-    Ok(agent_id.to_string())
+    Ok(device_id.to_string())
 }
 
 pub fn issue_tunnel_token(node_id: &str, ttl_secs: u64, secret: &str) -> ServerResult<String> {

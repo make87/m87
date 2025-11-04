@@ -7,10 +7,10 @@ use mongodb::bson::doc;
 use tokio::join;
 
 use crate::auth::claims::Claims;
-use crate::models::agent::{AgentDoc, CreateAgentBody};
-use crate::models::agent_auth_request::{
-    AgentAuthRequestBody, AgentAuthRequestCheckResponse, AgentAuthRequestDoc, AuthRequestAction,
-    CheckAuthRequest, PublicAgentAuthRequest,
+use crate::models::device::{DeviceDoc, CreateDeviceBody};
+use crate::models::device_auth_request::{
+    DeviceAuthRequestBody, DeviceAuthRequestCheckResponse, DeviceAuthRequestDoc, AuthRequestAction,
+    CheckAuthRequest, PublicDeviceAuthRequest,
 };
 use crate::models::api_key::{ApiKeyDoc, CreateApiKey};
 use crate::models::roles::Role;
@@ -29,9 +29,9 @@ pub fn create_route() -> Router<AppState> {
 
 async fn post_auth_request(
     State(state): State<AppState>,
-    Json(payload): Json<AgentAuthRequestBody>,
+    Json(payload): Json<DeviceAuthRequestBody>,
 ) -> ServerAppResult<String> {
-    let request_id = AgentAuthRequestDoc::create(&state.db, payload).await?;
+    let request_id = DeviceAuthRequestDoc::create(&state.db, payload).await?;
     Ok(ServerResponse::builder()
         .body(request_id)
         .status_code(axum::http::StatusCode::OK)
@@ -42,19 +42,19 @@ async fn get_auth_requests(
     claims: Claims,
     State(state): State<AppState>,
     pagination: RequestPagination,
-) -> ServerAppResult<Vec<PublicAgentAuthRequest>> {
-    let agents_col = state.db.agent_auth_requests();
-    let agents_fut = claims.list_with_access(&agents_col, &pagination);
-    let count_fut = claims.count_with_access(&agents_col);
+) -> ServerAppResult<Vec<PublicDeviceAuthRequest>> {
+    let devices_col = state.db.device_auth_requests();
+    let devices_fut = claims.list_with_access(&devices_col, &pagination);
+    let count_fut = claims.count_with_access(&devices_col);
 
-    let (agents_res, count_res) = join!(agents_fut, count_fut);
+    let (devices_res, count_res) = join!(devices_fut, count_fut);
 
-    let agents = agents_res?;
+    let devices = devices_res?;
     let total_count = count_res?;
-    let agents = PublicAgentAuthRequest::from_vec(agents);
+    let devices = PublicDeviceAuthRequest::from_vec(devices);
 
     Ok(ServerResponse::builder()
-        .body(agents)
+        .body(devices)
         .status_code(axum::http::StatusCode::OK)
         .pagination(ResponsePagination {
             count: total_count,
@@ -67,8 +67,8 @@ async fn get_auth_requests(
 async fn check_auth_request(
     State(state): State<AppState>,
     Json(payload): Json<CheckAuthRequest>,
-) -> ServerAppResult<AgentAuthRequestCheckResponse> {
-    let requests_col = state.db.agent_auth_requests();
+) -> ServerAppResult<DeviceAuthRequestCheckResponse> {
+    let requests_col = state.db.device_auth_requests();
 
     let request = requests_col
         .find_one(doc! { "request_id": &payload.request_id })
@@ -84,7 +84,7 @@ async fn check_auth_request(
     // if request not yet approved, return pending
     if !request.approved {
         return Ok(ServerResponse::builder()
-            .body(AgentAuthRequestCheckResponse {
+            .body(DeviceAuthRequestCheckResponse {
                 state: "pending".to_string(),
                 api_key: None,
             })
@@ -104,10 +104,10 @@ async fn check_auth_request(
     let (api_key_doc, api_key) = ApiKeyDoc::create(
         &state.db,
         CreateApiKey {
-            name: format!("{}-agent", request.hostname),
+            name: format!("{}-device", request.hostname),
             ttl_secs: None, // for now never expire
             scopes: vec![
-                format!("agent:{}", request.agent_id.clone()),
+                format!("device:{}", request.device_id.clone()),
                 // grant access to all the owners pub ssh keys
                 format!("ssh:{}", owner_id),
             ],
@@ -115,11 +115,11 @@ async fn check_auth_request(
     )
     .await?;
 
-    // request approved -> create agent + API key, then delete request
-    let _ = AgentDoc::create_from(
+    // request approved -> create device + API key, then delete request
+    let _ = DeviceDoc::create_from(
         &state.db,
-        CreateAgentBody {
-            id: Some(request.agent_id.clone()),
+        CreateDeviceBody {
+            id: Some(request.device_id.clone()),
             name: request.hostname.clone(),
             owner_scope: request.owner_scope.clone(),
             allowed_scopes: vec![],
@@ -130,7 +130,7 @@ async fn check_auth_request(
     .await?;
 
     Ok(ServerResponse::builder()
-        .body(AgentAuthRequestCheckResponse {
+        .body(DeviceAuthRequestCheckResponse {
             state: "approved".to_string(),
             api_key: Some(api_key),
         })
@@ -143,7 +143,7 @@ async fn handle_auth_request(
     State(state): State<AppState>,
     Json(payload): Json<AuthRequestAction>,
 ) -> ServerAppResult<()> {
-    let requests_col = state.db.agent_auth_requests();
+    let requests_col = state.db.device_auth_requests();
 
     let _ = claims
         .find_one_with_access(&requests_col, doc! { "request_id": &payload.request_id })
