@@ -21,7 +21,7 @@ m87-shared = { path = "../m87-shared" }
 
 # Workspace dependencies
 async-trait = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net", "time", "fs", "process", "signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
