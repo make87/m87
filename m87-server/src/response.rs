@@ -10,7 +10,7 @@ use std::{fmt::Display, num::ParseIntError, string::FromUtf8Error};
 use tracing::error;
 
 #[derive(Debug)]
-pub struct NexusResponse<T: Serialize> {
+pub struct ServerResponse<T: Serialize> {
     pub body: Option<T>,
     pub headers: HeaderMap,
     pub status_code: StatusCode,
@@ -42,14 +42,14 @@ impl IntoResponseParts for ResponsePagination {
 }
 
 #[derive(Debug)]
-pub struct NexusResponseBuilder<T: Serialize> {
+pub struct ServerResponseBuilder<T: Serialize> {
     pub body: Option<T>,
     pub headers: Option<HeaderMap>,
     pub status_code: Option<StatusCode>,
     pub pagination: Option<ResponsePagination>,
 }
 
-impl<T> NexusResponseBuilder<T>
+impl<T> ServerResponseBuilder<T>
 where
     T: Serialize,
 {
@@ -118,8 +118,8 @@ where
         self
     }
 
-    pub fn build(self) -> NexusResponse<T> {
-        NexusResponse {
+    pub fn build(self) -> ServerResponse<T> {
+        ServerResponse {
             body: self.body,
             headers: self.headers.unwrap_or_default(),
             status_code: self.status_code.unwrap_or(StatusCode::OK),
@@ -137,13 +137,13 @@ where
     }
 }
 
-impl<T: Serialize> NexusResponse<T> {
-    pub fn builder() -> NexusResponseBuilder<T> {
-        NexusResponseBuilder::new()
+impl<T: Serialize> ServerResponse<T> {
+    pub fn builder() -> ServerResponseBuilder<T> {
+        ServerResponseBuilder::new()
     }
 }
 
-impl<T: Serialize> IntoResponse for NexusResponse<T>
+impl<T: Serialize> IntoResponse for ServerResponse<T>
 where
     axum::Json<T>: IntoResponse,
 {
@@ -193,7 +193,7 @@ impl Display for AuthError {
 }
 
 #[derive(Debug)]
-pub enum NexusError {
+pub enum ServerError {
     // The request body contained invalid JSON
     InternalError(String),
     AuthError(AuthError),
@@ -201,101 +201,101 @@ pub enum NexusError {
     NotFound(String),
 }
 
-impl Display for NexusError {
+impl Display for ServerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NexusError::InternalError(message) => write!(f, "Internal Error: {}", message),
-            NexusError::AuthError(error) => write!(f, "Authentication Error: {}", error),
-            NexusError::BadRequest(message) => write!(f, "Bad Request: {}", message),
-            NexusError::NotFound(message) => write!(f, "Not Found: {}", message),
+            ServerError::InternalError(message) => write!(f, "Internal Error: {}", message),
+            ServerError::AuthError(error) => write!(f, "Authentication Error: {}", error),
+            ServerError::BadRequest(message) => write!(f, "Bad Request: {}", message),
+            ServerError::NotFound(message) => write!(f, "Not Found: {}", message),
         }
     }
 }
 
-impl From<ParseIntError> for NexusError {
+impl From<ParseIntError> for ServerError {
     fn from(error: ParseIntError) -> Self {
-        NexusError::InternalError(error.to_string())
+        ServerError::InternalError(error.to_string())
     }
 }
 
-impl From<mongodb::error::Error> for NexusError {
+impl From<mongodb::error::Error> for ServerError {
     fn from(error: mongodb::error::Error) -> Self {
-        NexusError::InternalError(error.to_string())
+        ServerError::InternalError(error.to_string())
     }
 }
 
-impl From<std::io::Error> for NexusError {
+impl From<std::io::Error> for ServerError {
     fn from(err: std::io::Error) -> Self {
-        NexusError::InternalError(err.to_string())
+        ServerError::InternalError(err.to_string())
     }
 }
 
-impl From<FromHexError> for NexusError {
+impl From<FromHexError> for ServerError {
     fn from(err: FromHexError) -> Self {
-        NexusError::InternalError(err.to_string())
+        ServerError::InternalError(err.to_string())
     }
 }
 
-impl From<MacError> for NexusError {
+impl From<MacError> for ServerError {
     fn from(err: MacError) -> Self {
-        NexusError::InternalError(err.to_string())
+        ServerError::InternalError(err.to_string())
     }
 }
 
-impl From<base64::DecodeError> for NexusError {
+impl From<base64::DecodeError> for ServerError {
     fn from(err: base64::DecodeError) -> Self {
-        NexusError::InternalError(err.to_string())
+        ServerError::InternalError(err.to_string())
     }
 }
 
-impl From<FromUtf8Error> for NexusError {
+impl From<FromUtf8Error> for ServerError {
     fn from(err: FromUtf8Error) -> Self {
-        NexusError::InternalError(err.to_string())
+        ServerError::InternalError(err.to_string())
     }
 }
 
-impl From<mongodb::bson::oid::Error> for NexusError {
+impl From<mongodb::bson::oid::Error> for ServerError {
     fn from(err: mongodb::bson::oid::Error) -> Self {
-        NexusError::InternalError(err.to_string())
+        ServerError::InternalError(err.to_string())
     }
 }
 
-impl NexusError {
+impl ServerError {
     pub fn internal_error(message: &str) -> Self {
-        NexusError::InternalError(message.to_string())
+        ServerError::InternalError(message.to_string())
     }
 
     pub fn invalid_token(message: &str) -> Self {
-        NexusError::AuthError(AuthError::InvalidToken(message.to_string()))
+        ServerError::AuthError(AuthError::InvalidToken(message.to_string()))
     }
 
     pub fn missing_token(message: &str) -> Self {
-        NexusError::AuthError(AuthError::MissingToken(message.to_string()))
+        ServerError::AuthError(AuthError::MissingToken(message.to_string()))
     }
 
     pub fn expired_token(message: &str) -> Self {
-        NexusError::AuthError(AuthError::ExpiredToken(message.to_string()))
+        ServerError::AuthError(AuthError::ExpiredToken(message.to_string()))
     }
 
     pub fn bad_request(message: &str) -> Self {
-        NexusError::BadRequest(message.to_string())
+        ServerError::BadRequest(message.to_string())
     }
 
     pub fn not_found(message: &str) -> Self {
-        NexusError::NotFound(message.to_string())
+        ServerError::NotFound(message.to_string())
     }
 
     pub fn unauthorized(message: &str) -> Self {
-        NexusError::AuthError(AuthError::Unauthorized(message.to_string()))
+        ServerError::AuthError(AuthError::Unauthorized(message.to_string()))
     }
 
     pub fn forbidden(message: &str) -> Self {
-        NexusError::AuthError(AuthError::Forbidden(message.to_string()))
+        ServerError::AuthError(AuthError::Forbidden(message.to_string()))
     }
 }
 
 // Tell axum how `AppError` should be converted into a response.
-impl IntoResponse for NexusError {
+impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
         // How we want errors responses to be serialized
         #[derive(Serialize)]
@@ -304,34 +304,34 @@ impl IntoResponse for NexusError {
         }
 
         let (status, message) = match &self {
-            NexusError::InternalError(rejection) => {
+            ServerError::InternalError(rejection) => {
                 // This error is caused by bad user input so don't log it
                 (StatusCode::INTERNAL_SERVER_ERROR, rejection)
             }
-            NexusError::AuthError(AuthError::InvalidToken(message)) => {
+            ServerError::AuthError(AuthError::InvalidToken(message)) => {
                 (StatusCode::UNAUTHORIZED, message)
             }
-            NexusError::AuthError(AuthError::MissingToken(message)) => {
+            ServerError::AuthError(AuthError::MissingToken(message)) => {
                 (StatusCode::UNAUTHORIZED, message)
             }
-            NexusError::AuthError(AuthError::ExpiredToken(message)) => {
+            ServerError::AuthError(AuthError::ExpiredToken(message)) => {
                 (StatusCode::UNAUTHORIZED, message)
             }
-            NexusError::AuthError(AuthError::Unauthorized(message)) => {
+            ServerError::AuthError(AuthError::Unauthorized(message)) => {
                 (StatusCode::UNAUTHORIZED, message)
             }
-            NexusError::AuthError(AuthError::Forbidden(message)) => {
+            ServerError::AuthError(AuthError::Forbidden(message)) => {
                 (StatusCode::FORBIDDEN, message)
             }
-            NexusError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
-            NexusError::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            ServerError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            ServerError::NotFound(message) => (StatusCode::NOT_FOUND, message),
         };
 
         error!("Returning error response {} {}", status, message);
 
         let response = (
             status,
-            NexusResponse::<ErrorResponse>::builder()
+            ServerResponse::<ErrorResponse>::builder()
                 .body(ErrorResponse {
                     message: message.to_owned(),
                 })
@@ -348,5 +348,5 @@ impl IntoResponse for NexusError {
     }
 }
 
-pub type NexusResult<T> = Result<T, NexusError>;
-pub type NexusAppResult<T> = Result<NexusResponse<T>, NexusError>;
+pub type ServerResult<T> = Result<T, ServerError>;
+pub type ServerAppResult<T> = Result<ServerResponse<T>, ServerError>;

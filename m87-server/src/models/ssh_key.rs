@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     auth::access_control::AccessControlled,
     db::Mongo,
-    response::{NexusError, NexusResult},
+    response::{ServerError, ServerResult},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +28,7 @@ pub struct SSHPubKeyCreateRequest {
 }
 
 impl SSHPubKeyDoc {
-    pub async fn create(db: &Arc<Mongo>, body: SSHPubKeyCreateRequest) -> NexusResult<()> {
+    pub async fn create(db: &Arc<Mongo>, body: SSHPubKeyCreateRequest) -> ServerResult<()> {
         // split the owner scope by : and take second part as owner id. If ss:ownerid is not in allwerd scopes, add it
         let owner_id = body.owner_scope.split(':').nth(1).unwrap_or("").to_string();
         let self_access_scope = format!("ssh:{}", owner_id);
@@ -49,7 +49,7 @@ impl SSHPubKeyDoc {
         };
         let _ = db.ssh_keys().insert_one(request).await.map_err(|err| {
             tracing::error!("Failed to create SSH public key: {}", err);
-            NexusError::internal_error("Failed to create SSH public key")
+            ServerError::internal_error("Failed to create SSH public key")
         })?;
 
         Ok(())

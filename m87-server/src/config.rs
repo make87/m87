@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::response::NexusResult;
+use crate::response::ServerResult;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OAuthConfig {
@@ -21,10 +21,11 @@ pub struct AppConfig {
     pub rest_port: u16,
     pub forward_secret: String,
     pub is_staging: bool,
+    pub admin_emails: Vec<String>,
 }
 
 impl AppConfig {
-    pub fn from_env() -> NexusResult<Self> {
+    pub fn from_env() -> ServerResult<Self> {
         // Keep it simple: read from env; in prod you might use figment/envy.
         let mongo_uri =
             std::env::var("MONGO_URI").unwrap_or_else(|_| "mongodb://localhost:27017".into());
@@ -45,12 +46,19 @@ impl AppConfig {
             .parse()
             .unwrap();
         let rest_port = std::env::var("REST_PORT")
-            .unwrap_or_else(|_| "8081".into())
+            .unwrap_or_else(|_| "8085".into())
             .parse()
             .unwrap();
 
         let cert_contact =
             std::env::var("CERT_CONTACT").unwrap_or_else(|_| "admin@make87.com".into());
+
+        // no default
+        let admin_emails = std::env::var("ADMIN_EMAILS")
+            .unwrap_or_else(|_| "".to_string())
+            .split(',')
+            .map(|email| email.trim().to_string())
+            .collect();
 
         Ok(Self {
             mongo_uri,
@@ -62,6 +70,7 @@ impl AppConfig {
             rest_port,
             forward_secret,
             is_staging,
+            admin_emails,
         })
     }
 }

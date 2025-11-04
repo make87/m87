@@ -1,0 +1,25 @@
+use anyhow::{Context, Result};
+
+use crate::{auth::AuthManager, config::Config, server};
+
+pub async fn list_agents() -> Result<Vec<server::Agent>> {
+    let token = AuthManager::get_cli_token().await?;
+    let config = Config::load()?;
+    server::list_agents(&config.api_url, &token, config.trust_invalid_server_cert).await
+}
+
+pub async fn metrics(agent_id: &str) -> Result<()> {
+    Ok(())
+}
+
+pub async fn logs(agent_id: &str) -> Result<()> {
+    Ok(())
+}
+
+pub async fn get_ssh_url(agent_id: &str) -> Result<String> {
+    Ok(String::new())
+}
+
+pub async fn connect_ssh(agent_id: &str) -> Result<()> {
+    Ok(())
+}

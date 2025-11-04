@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use crate::{
     models::{
-        api_key::ApiKeyDoc, node::NodeDoc, node_auth_request::NodeAuthRequestDoc, roles::RoleDoc,
-        ssh_key::SSHPubKeyDoc,
+        agent::AgentDoc, agent_auth_request::AgentAuthRequestDoc, api_key::ApiKeyDoc,
+        roles::RoleDoc, ssh_key::SSHPubKeyDoc,
     },
-    response::NexusResult,
+    response::ServerResult,
 };
 use mongodb::{bson::doc, options::IndexOptions};
 use mongodb::{options::ClientOptions, Client, Collection, IndexModel};
@@ -17,7 +17,7 @@ pub struct Mongo {
 }
 
 impl Mongo {
-    pub async fn connect(url: &str, db_name: &str) -> NexusResult<Self> {
+    pub async fn connect(url: &str, db_name: &str) -> ServerResult<Self> {
         let mut opts = ClientOptions::parse(url).await?;
         opts.app_name = Some("nexus".into());
         let client = Client::with_options(opts)?;
@@ -31,12 +31,12 @@ impl Mongo {
         self.client.database(&self.db_name).collection(name)
     }
 
-    pub fn nodes(&self) -> Collection<NodeDoc> {
-        self.col("nodes")
+    pub fn agents(&self) -> Collection<AgentDoc> {
+        self.col("agents")
     }
 
-    pub fn node_auth_requests(&self) -> Collection<NodeAuthRequestDoc> {
-        self.col("node_auth_requests")
+    pub fn agent_auth_requests(&self) -> Collection<AgentAuthRequestDoc> {
+        self.col("agent_auth_requests")
     }
 
     pub fn roles(&self) -> Collection<RoleDoc> {
@@ -51,7 +51,7 @@ impl Mongo {
         self.col("ssh_keys")
     }
 
-    pub async fn ensure_indexes(&self) -> NexusResult<()> {
+    pub async fn ensure_indexes(&self) -> ServerResult<()> {
         // Add indexes as needed later (expires_at TTL, etc.)
         self.roles()
             .create_index(
@@ -62,12 +62,12 @@ impl Mongo {
             )
             .await?;
 
-        self.node_auth_requests()
+        self.agent_auth_requests()
             .create_index(IndexModel::builder().keys(doc! { "request_id": 1 }).build())
             .await?;
 
         // TTL index for NodeAuthRequestDoc (auto-delete after 24 hours)
-        self.node_auth_requests()
+        self.agent_auth_requests()
             .create_index(
                 IndexModel::builder()
                     .keys(doc! { "created_at": 1 })
@@ -80,7 +80,7 @@ impl Mongo {
             )
             .await?;
 
-        self.node_auth_requests()
+        self.agent_auth_requests()
             .create_index(
                 IndexModel::builder()
                     .keys(doc! { "owner_scope": 1 })
@@ -88,14 +88,14 @@ impl Mongo {
             )
             .await?;
 
-        self.nodes()
+        self.agents()
             .create_index(
                 IndexModel::builder()
                     .keys(doc! { "owner_scope": 1 })
                     .build(),
             )
             .await?;
-        self.nodes()
+        self.agents()
             .create_index(
                 IndexModel::builder()
                     .keys(doc! { "allowed_scopes": 1 })

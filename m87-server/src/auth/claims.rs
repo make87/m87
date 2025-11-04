@@ -14,7 +14,7 @@ use crate::{
         api_key::ApiKeyDoc,
         roles::{Role, RoleDoc},
     },
-    response::{NexusError, NexusResult},
+    response::{ServerError, ServerResult},
     util::{app_state::AppState, pagination::RequestPagination},
 };
 
@@ -24,7 +24,7 @@ pub struct Claims {
 }
 
 impl FromRequestParts<AppState> for Claims {
-    type Rejection = NexusError;
+    type Rejection = ServerError;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -33,7 +33,7 @@ impl FromRequestParts<AppState> for Claims {
         let TypedHeader(Authorization(bearer)) =
             TypedHeader::<Authorization<Bearer>>::from_request_parts(parts, state)
                 .await
-                .map_err(|_| NexusError::missing_token("missing API key"))?;
+                .map_err(|_| ServerError::missing_token("missing API key"))?;
 
         let token = bearer.token();
         let is_jwt = token.matches('.').count() == 2;
@@ -70,7 +70,7 @@ impl Claims {
         &self,
         coll: &Collection<T>,
         filter: Document,
-    ) -> NexusResult<Option<T>>
+    ) -> ServerResult<Option<T>>
     where
         T: AccessControlled + Unpin + Send + Sync + serde::de::DeserializeOwned,
     {
@@ -79,11 +79,11 @@ impl Claims {
         let doc = coll
             .find_one(combined)
             .await
-            .map_err(|_| NexusError::internal_error("DB query failed"))?;
+            .map_err(|_| ServerError::internal_error("DB query failed"))?;
         Ok(doc)
     }
 
-    pub async fn count_with_access<T>(&self, coll: &Collection<T>) -> NexusResult<u64>
+    pub async fn count_with_access<T>(&self, coll: &Collection<T>) -> ServerResult<u64>
     where
         T: AccessControlled + Unpin + Send + Sync + serde::de::DeserializeOwned,
     {
@@ -91,7 +91,7 @@ impl Claims {
         let count = coll
             .count_documents(filter)
             .await
-            .map_err(|_| NexusError::internal_error("Count failed"))?;
+            .map_err(|_| ServerError::internal_error("Count failed"))?;
         Ok(count)
     }
 
@@ -99,7 +99,7 @@ impl Claims {
         &self,
         coll: &Collection<T>,
         pagination: &RequestPagination,
-    ) -> NexusResult<Vec<T>>
+    ) -> ServerResult<Vec<T>>
     where
         T: AccessControlled + Unpin + Send + Sync + serde::de::DeserializeOwned,
     {
@@ -114,13 +114,13 @@ impl Claims {
             .find(filter)
             .with_options(options)
             .await
-            .map_err(|_| NexusError::internal_error("Query failed"))?;
+            .map_err(|_| ServerError::internal_error("Query failed"))?;
 
         // Collect all documents directly (futures::TryStreamExt)
         let results: Vec<T> = cursor
             .try_collect()
             .await
-            .map_err(|_| NexusError::internal_error("Cursor decode failed"))?;
+            .map_err(|_| ServerError::internal_error("Cursor decode failed"))?;
 
         Ok(results)
     }
@@ -131,7 +131,7 @@ impl Claims {
         coll: &Collection<T>,
         id_filter: Document,
         update: Document,
-    ) -> NexusResult<bool>
+    ) -> ServerResult<bool>
     where
         T: AccessControlled + Unpin + Send + Sync + serde::de::DeserializeOwned,
     {
@@ -140,9 +140,9 @@ impl Claims {
         let res = coll
             .update_one(filter, update)
             .await
-            .map_err(|_| NexusError::internal_error("Update failed"))?;
+            .map_err(|_| ServerError::internal_error("Update failed"))?;
         if res.matched_count == 0 {
-            return Err(NexusError::forbidden(
+            return Err(ServerError::forbidden(
                 "Not authorized or document not found",
             ));
         }
@@ -158,7 +158,7 @@ impl Claims {
         &self,
         coll: &Collection<T>,
         id_filter: Document,
-    ) -> NexusResult<bool>
+    ) -> ServerResult<bool>
     where
         T: AccessControlled + Unpin + Send + Sync + serde::de::DeserializeOwned,
     {
@@ -167,9 +167,9 @@ impl Claims {
         let res = coll
             .delete_one(filter)
             .await
-            .map_err(|_| NexusError::internal_error("Delete failed"))?;
+            .map_err(|_| ServerError::internal_error("Delete failed"))?;
         if res.deleted_count == 0 {
-            return Err(NexusError::forbidden(
+            return Err(ServerError::forbidden(
                 "Not authorized or document not found",
             ));
         }
@@ -181,7 +181,7 @@ impl Claims {
         coll: &Collection<T>,
         base_filter: Document,
         required_role: Role,
-    ) -> NexusResult<Option<T>>
+    ) -> ServerResult<Option<T>>
     where
         T: AccessControlled + serde::de::DeserializeOwned + Unpin + Send + Sync,
     {
@@ -194,7 +194,7 @@ impl Claims {
             .collect();
 
         if allowed_scopes.is_empty() {
-            return Err(NexusError::forbidden("Insufficient role for any scope"));
+            return Err(ServerError::forbidden("Insufficient role for any scope"));
         }
 
         let mut filter = base_filter.clone();
@@ -203,10 +203,10 @@ impl Claims {
         let doc = coll
             .find_one(filter)
             .await
-            .map_err(|_| NexusError::internal_error("DB query failed"))?;
+            .map_err(|_| ServerError::internal_error("DB query failed"))?;
 
         if doc.is_none() {
-            return Err(NexusError::forbidden("Not found or access denied"));
+            return Err(ServerError::forbidden("Not found or access denied"));
         }
 
         Ok(doc)

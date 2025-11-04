@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::info;
-mod node;
+mod agent;
 mod oauth;
 
 use serde::{Deserialize, Serialize};
@@ -180,7 +180,7 @@ impl AuthManager {
     }
 
     pub async fn login_agent(
-        auth_handler: &mut node::NodeAuthRequestHandler,
+        auth_handler: &mut agent::AgentAuthRequestHandler,
         timeout: Duration,
     ) -> Result<()> {
         match std::env::var(API_KEY_ENV_VAR) {
@@ -252,7 +252,7 @@ pub async fn login_cli() -> Result<()> {
     Ok(())
 }
 
-pub async fn login_agent(owner_scope: Option<String>) -> Result<()> {
+pub async fn register_agent(owner_scope: Option<String>) -> Result<()> {
     if AuthManager::has_agent_credentials()? {
         info!("Already registered");
         return Ok(());
@@ -275,11 +275,11 @@ pub async fn login_agent(owner_scope: Option<String>) -> Result<()> {
     };
     let node_info = macchina::get_detailed_printout();
     let host_name = get_host_name()?;
-    let mut report_handler = node::NodeAuthRequestHandler {
+    let mut report_handler = agent::AgentAuthRequestHandler {
         api_url: config.api_url.clone(),
-        node_info: Some(node_info),
+        agent_info: Some(node_info),
         hostname: host_name.clone(),
-        node_id: config.node_id,
+        agent_id: config.agent_id,
         owner_scope,
         request_id: None,
         trust_invalid_server_cert: config.trust_invalid_server_cert,
@@ -313,7 +313,7 @@ pub async fn logout_agent() -> Result<()> {
     AuthManager::delete_agent_credentials().await
 }
 
-pub async fn list_auth_requests() -> Result<Vec<server::NodeAuthRequest>> {
+pub async fn list_auth_requests() -> Result<Vec<server::AgentAuthRequest>> {
     let token = AuthManager::get_cli_token().await?;
     let config = Config::load()?;
     server::list_auth_requests(&config.api_url, &token, config.trust_invalid_server_cert).await

@@ -10,10 +10,14 @@ use tracing::{error, info};
 use std::path::Path;
 use std::process::Command;
 
-use crate::{auth::login_agent, server};
+use crate::{
+    agent::{services::collect_all_services, system_metrics::collect_system_metrics},
+    auth::register_agent,
+    server,
+};
 use crate::{auth::AuthManager, config::Config, rest::serve_server, util::macchina};
 
-use crate::agent::heartbeat::send_heartbeat;
+use crate::server::send_heartbeat;
 use crate::util::logging::init_tracing_with_log_layer;
 
 const SERVICE_NAME: &str = "m87-agent";
@@ -109,7 +113,7 @@ pub async fn run() -> Result<()> {
 async fn login_and_run() -> Result<()> {
     // retry login/register until wit works, then call agent_loop
     loop {
-        let success = login_agent(None).await;
+        let success = register_agent(None).await;
         if success.is_ok() {
             break;
         }
@@ -117,9 +121,9 @@ async fn login_and_run() -> Result<()> {
     }
     let config = Config::load().context("Failed to load configuration")?;
     let token = AuthManager::get_agent_token()?;
-    let res = report_node_details(
+    let res = report_agent_details(
         &config.api_url,
-        &config.node_id,
+        &config.agent_id,
         &token,
         config.enable_geo_lookup,
         config.trust_invalid_server_cert,
@@ -151,7 +155,7 @@ async fn login_and_run() -> Result<()> {
     });
 
     if res.is_err() {
-        error!("Failed to report node details: {:?}", res);
+        error!("Failed to report agent details: {:?}", res);
     }
 
     agent_loop().await?;
@@ -174,40 +178,44 @@ async fn sync_with_backend() -> Result<()> {
     let last_instruciotn_hash = "";
 
     let token = AuthManager::get_agent_token()?;
+    let metrics = collect_system_metrics().await?;
+    let services = collect_all_services().await?;
     let _instruction = send_heartbeat(
         last_instruciotn_hash,
-        &config.node_id,
+        &config.agent_id,
         &config.api_url,
         &token,
+        metrics,
+        services,
     )
     .await?;
     info!("Sync complete");
     Ok(())
 }
 
-pub async fn report_node_details(
+pub async fn report_agent_details(
     api_url: &str,
-    node_id: &str,
+    agent_id: &str,
     token: &str,
     enable_geo_lookup: bool,
     trust_invalid_server_cert: bool,
 ) -> Result<()> {
-    info!("Reporting node details");
+    info!("Reporting agent details");
 
     // Build update body
-    let body = server::UpdateNodeBody {
+    let body = server::UpdateAgentBody {
         client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         system_info: Some(get_system_info(enable_geo_lookup).await?),
     };
-    server::report_node_details(api_url, token, node_id, body, trust_invalid_server_cert).await
+    server::report_agent_details(api_url, token, agent_id, body, trust_invalid_server_cert).await
 }
 
-async fn get_system_info(enable_geo_lookup: bool) -> Result<server::NodeSystemInfo> {
+async fn get_system_info(enable_geo_lookup: bool) -> Result<server::AgentSystemInfo> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()?;
 
-    let mut sys_info = server::NodeSystemInfo {
+    let mut sys_info = server::AgentSystemInfo {
         ..Default::default()
     };
     if enable_geo_lookup {
@@ -256,6 +264,15 @@ async fn get_system_info(enable_geo_lookup: bool) -> Result<server::NodeSystemIn
         })
         .unwrap_or_else(|| "unknown".to_string());
     sys_info.architecture = arch;
+
+    // get current user name
+    let user = Command::new("whoami")
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    sys_info.username = user;
 
     let readout = macchina::get_readout();
     sys_info.cores = Some(readout.cpu_cores);

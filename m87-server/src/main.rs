@@ -11,10 +11,10 @@ use std::sync::Arc;
 use tracing::info;
 use util::logging::init_tracing;
 
-use crate::{relay::relay_state::RelayState, response::NexusResult};
+use crate::{relay::relay_state::RelayState, response::ServerResult};
 
 #[tokio::main]
-async fn main() -> NexusResult<()> {
+async fn main() -> ServerResult<()> {
     println!("Booting Nexus...");
     init_tracing();
     info!("Starting nexus");

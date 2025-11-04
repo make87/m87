@@ -2,9 +2,9 @@
 resolver = "2"
 members = [
     "m87-client",
-    "m87-server",
+    "m87-server"
 ]
-
+exclude = ["tests"]
 [workspace.dependencies]
 # Async runtime and utilities
 tokio = { version = "1.48", features = ["full"] }

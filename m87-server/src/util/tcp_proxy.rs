@@ -3,11 +3,11 @@ use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::{io::copy_bidirectional, net::TcpStream};
 use tracing::{info, warn};
 
-use crate::response::{NexusError, NexusResult};
+use crate::response::{ServerError, ServerResult};
 
 /// Bidirectional TCP proxy between inbound and reverse sockets.
 /// Adds TCP_NODELAY and keepalive for stability, and performs full cleanup on exit.
-pub async fn proxy_bidirectional_tcp(inbound: TcpStream, reverse: TcpStream) -> NexusResult<()> {
+pub async fn proxy_bidirectional_tcp(inbound: TcpStream, reverse: TcpStream) -> ServerResult<()> {
     let socket = Socket::from(inbound.into_std()?);
     let _ = socket.set_tcp_nodelay(true);
     let _ = socket.set_keepalive(true);
@@ -29,7 +29,7 @@ pub async fn proxy_bidirectional_tcp(inbound: TcpStream, reverse: TcpStream) -> 
             warn!(error=%e, "proxy error, shutting down sockets");
             t_inbound.shutdown().await.ok();
             t_reverse.shutdown().await.ok();
-            Err(NexusError::internal_error(&format!("{}", e)))
+            Err(ServerError::internal_error(&format!("{}", e)))
         }
     }
 }

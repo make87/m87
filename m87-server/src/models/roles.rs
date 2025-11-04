@@ -1,6 +1,6 @@
 use crate::{
     db::Mongo,
-    response::{NexusError, NexusResult},
+    response::{ServerError, ServerResult},
 };
 use futures::StreamExt;
 use mongodb::{
@@ -65,7 +65,7 @@ pub struct CreateRoleBinding {
 
 impl RoleDoc {
     /// Create or update a role binding for a user and scope
-    pub async fn create(db: &Arc<Mongo>, body: CreateRoleBinding) -> NexusResult<Self> {
+    pub async fn create(db: &Arc<Mongo>, body: CreateRoleBinding) -> ServerResult<Self> {
         let now = DateTime::now();
         // Avoid duplicates for same (user, scope)
         let filter = doc! {
@@ -91,7 +91,7 @@ impl RoleDoc {
             .find_one_and_update(filter, update)
             .with_options(options)
             .await
-            .map_err(|_| NexusError::internal_error("Failed to upsert role binding"))?;
+            .map_err(|_| ServerError::internal_error("Failed to upsert role binding"))?;
 
         // If Mongo didn’t return the new doc (shouldn’t happen with ReturnDocument::After),
         // synthesize it locally.
@@ -99,18 +99,18 @@ impl RoleDoc {
     }
 
     /// List all bindings (used for admin views)
-    pub async fn list_all(db: &Arc<Mongo>) -> NexusResult<Vec<RoleDoc>> {
+    pub async fn list_all(db: &Arc<Mongo>) -> ServerResult<Vec<RoleDoc>> {
         let mut cursor = db
             .roles()
             .find(doc! {})
             .await
-            .map_err(|_| NexusError::internal_error("Failed to list role bindings"))?;
+            .map_err(|_| ServerError::internal_error("Failed to list role bindings"))?;
 
         let mut items = Vec::new();
         while let Some(res) = cursor.next().await {
             match res {
                 Ok(doc) => items.push(doc),
-                Err(_) => return Err(NexusError::internal_error("Failed to decode role binding")),
+                Err(_) => return Err(ServerError::internal_error("Failed to decode role binding")),
             }
         }
         Ok(items)
@@ -120,29 +120,29 @@ impl RoleDoc {
     pub async fn list_for_reference(
         db: &Arc<Mongo>,
         reference_id: &str,
-    ) -> NexusResult<Vec<RoleDoc>> {
+    ) -> ServerResult<Vec<RoleDoc>> {
         let mut cursor = db
             .roles()
             .find(doc! { "reference_id": reference_id })
             .await
-            .map_err(|_| NexusError::internal_error("Failed to list user role bindings"))?;
+            .map_err(|_| ServerError::internal_error("Failed to list user role bindings"))?;
 
         let mut items = Vec::new();
         while let Some(res) = cursor.next().await {
             match res {
                 Ok(doc) => items.push(doc),
-                Err(_) => return Err(NexusError::internal_error("Failed to decode role binding")),
+                Err(_) => return Err(ServerError::internal_error("Failed to decode role binding")),
             }
         }
         Ok(items)
     }
 
     /// Delete a specific binding (admin)
-    pub async fn delete(db: &Arc<Mongo>, user_id: &str, scope: &str) -> NexusResult<()> {
+    pub async fn delete(db: &Arc<Mongo>, user_id: &str, scope: &str) -> ServerResult<()> {
         db.roles()
             .delete_one(doc! { "user_id": user_id, "scope": scope })
             .await
-            .map_err(|_| NexusError::internal_error("Failed to delete role binding"))?;
+            .map_err(|_| ServerError::internal_error("Failed to delete role binding"))?;
         Ok(())
     }
 }

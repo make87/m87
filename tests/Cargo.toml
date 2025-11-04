@@ -1,0 +1,12 @@
+[package]
+name = "tests"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time"] }
+testcontainers = "0.25.2"
+m87-client = { path = "../m87-client" }
+m87-server = { path = "../m87-server" }
+reqwest = "0.11"
+assert_cmd = "2"
+uuid = { version = "1", features = ["v4"] }

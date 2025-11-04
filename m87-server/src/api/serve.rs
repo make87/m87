@@ -26,11 +26,11 @@ use tower_http::{
 use tracing::{info, warn};
 
 use crate::{
-    api::{auth, node},
+    api::{agent, auth},
     config::AppConfig,
     db::Mongo,
     relay::relay_state::RelayState,
-    response::{NexusError, NexusResult},
+    response::{ServerError, ServerResult},
     util::{app_state::AppState, tcp_proxy::proxy_bidirectional},
 };
 use rcgen::{generate_simple_self_signed, Certificate, CertificateParams};
@@ -40,7 +40,11 @@ async fn get_status() -> impl IntoResponse {
     "ok".to_string()
 }
 
-pub async fn serve(db: Arc<Mongo>, relay: Arc<RelayState>, cfg: Arc<AppConfig>) -> NexusResult<()> {
+pub async fn serve(
+    db: Arc<Mongo>,
+    relay: Arc<RelayState>,
+    cfg: Arc<AppConfig>,
+) -> ServerResult<()> {
     // Ensure rustls has a crypto provider before anything touches TLS
     rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
         .expect("failed to install ring crypto provider");
@@ -63,7 +67,7 @@ pub async fn serve(db: Arc<Mongo>, relay: Arc<RelayState>, cfg: Arc<AppConfig>) 
 
     let app = Router::new()
         .nest("/auth", auth::create_route())
-        .nest("/node", node::create_route())
+        .nest("/agent", agent::create_route())
         .route("/status", get(get_status))
         .with_state(state.clone())
         .layer(cors)
@@ -98,7 +102,7 @@ async fn serve_tls_or_selfsigned(
     cfg: Arc<AppConfig>,
     state: AppState,
     relay: Arc<RelayState>,
-) -> NexusResult<()> {
+) -> ServerResult<()> {
     let cache_dir = "/app/certs";
     let public = cfg.public_address.clone();
     let control = format!("control.{public}");
@@ -110,7 +114,7 @@ async fn serve_tls_or_selfsigned(
     if cfg.is_staging {
         // === Self-signed localhost mode ===
         let ck = generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
-            .map_err(|err| NexusError::internal_error(&format!("{}", err,)))?;
+            .map_err(|err| ServerError::internal_error(&format!("{}", err,)))?;
 
         // 2) DER forms for rustls
         let cert_der: CertificateDer<'static> = ck.cert.der().clone().into();
@@ -124,10 +128,10 @@ async fn serve_tls_or_selfsigned(
         let provider = Arc::new(default_provider());
         let config = ServerConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-            .map_err(|err| NexusError::internal_error(&format!("{}", err,)))?
+            .map_err(|err| ServerError::internal_error(&format!("{}", err,)))?
             .with_no_client_auth()
             .with_single_cert(vec![cert_der], key_der)
-            .map_err(|err| NexusError::internal_error(&format!("{}", err,)))?;
+            .map_err(|err| ServerError::internal_error(&format!("{}", err,)))?;
         let acceptor = TlsAcceptor::from(Arc::new(config));
 
         tokio::spawn(async move {
@@ -225,21 +229,21 @@ pub async fn handle_control_tunnel(
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let mut reader = BufReader::new(tls);
 
-    // Expect: "M87 node_id=<id> token=<base64>\n"
+    // Expect: "M87 agent_id=<id> token=<base64>\n"
     let mut line = String::new();
     if reader.read_line(&mut line).await? == 0 {
         warn!("control: empty handshake");
         return Ok(());
     }
-    let node_id = extract_kv(&line, "node_id").unwrap_or_default();
+    let agent_id = extract_kv(&line, "agent_id").unwrap_or_default();
     let token = extract_kv(&line, "token").unwrap_or_default();
-    if node_id.is_empty() || token.is_empty() {
-        warn!("control: missing node_id/token");
+    if agent_id.is_empty() || token.is_empty() {
+        warn!("control: missing agent_id/token");
         return Ok(());
     }
 
     match crate::auth::tunnel_token::verify_tunnel_token(&token, secret) {
-        Ok(id_ok) if id_ok == node_id => {}
+        Ok(id_ok) if id_ok == agent_id => {}
         _ => {
             warn!("control: token invalid or mismatched");
             return Ok(());
@@ -248,14 +252,14 @@ pub async fn handle_control_tunnel(
 
     {
         let mut tunnels = relay.tunnels.write().await;
-        tunnels.remove(&node_id);
+        tunnels.remove(&agent_id);
     }
 
     // Upgrade to Yamux
     let base = reader.into_inner();
     let sess = Session::new_server(base, YamuxConfig::default());
-    relay.register_tunnel(node_id.clone(), sess).await;
-    info!(%node_id, "control tunnel active");
+    relay.register_tunnel(agent_id.clone(), sess).await;
+    info!(%agent_id, "control tunnel active");
     Ok(())
 }
 
@@ -263,7 +267,7 @@ async fn handle_forward_connection(
     relay: Arc<RelayState>,
     host: String,
     mut inbound: TlsStream<tokio::net::TcpStream>,
-) -> NexusResult<()> {
+) -> ServerResult<()> {
     // ACL
     if let Ok(peer) = inbound.get_ref().0.peer_addr() {
         if let Some(meta) = relay.forwards.read().await.get(&host).cloned() {
@@ -287,8 +291,8 @@ async fn handle_forward_connection(
         }
     };
 
-    let Some(conn_arc) = relay.get_tunnel(&meta.node_id).await else {
-        warn!(%host, node_id=%meta.node_id, "tunnel not active");
+    let Some(conn_arc) = relay.get_tunnel(&meta.agent_id).await else {
+        warn!(%host, agent_id=%meta.agent_id, "tunnel not active");
         let _ = inbound.shutdown().await;
         return Ok(());
     };
@@ -296,11 +300,11 @@ async fn handle_forward_connection(
     let mut sess = conn_arc.lock().await;
     let mut sub = sess
         .open_stream()
-        .map_err(|_| NexusError::internal_error("yamux open_stream failed"))?;
+        .map_err(|_| ServerError::internal_error("yamux open_stream failed"))?;
     let header = format!("{}\n", meta.target_port);
     sub.write_all(header.as_bytes())
         .await
-        .map_err(|e| NexusError::internal_error(&format!("yamux header send failed: {e}")))?;
+        .map_err(|e| ServerError::internal_error(&format!("yamux header send failed: {e}")))?;
 
     tokio::spawn(async move {
         let _ = proxy_bidirectional(&mut inbound, &mut sub).await;

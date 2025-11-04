@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::AppConfig,
-    response::{NexusError, NexusResult},
+    response::{ServerError, ServerResult},
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -32,7 +32,7 @@ struct Jwk {
     e: String,
 }
 
-pub async fn validate_token(token: &str, config: &Arc<AppConfig>) -> NexusResult<DecodedClaims> {
+pub async fn validate_token(token: &str, config: &Arc<AppConfig>) -> ServerResult<DecodedClaims> {
     let issuer = config.oauth.issuer.to_string();
     // add trailing / if missing
     let issuer = match issuer.ends_with('/') {
@@ -41,36 +41,37 @@ pub async fn validate_token(token: &str, config: &Arc<AppConfig>) -> NexusResult
     };
     let jwks_url = format!("{}.well-known/jwks.json", issuer);
 
-    let header = decode_header(token)
-        .map_err(|e| NexusError::invalid_token(&format!("Failed to decode token header: {}", e)))?;
+    let header = decode_header(token).map_err(|e| {
+        ServerError::invalid_token(&format!("Failed to decode token header: {}", e))
+    })?;
     let kid = header
         .kid
-        .ok_or_else(|| NexusError::invalid_token("Token missing 'kid' field"))?;
+        .ok_or_else(|| ServerError::invalid_token("Token missing 'kid' field"))?;
 
     let jwks: Jwks = Client::new()
         .get(&jwks_url)
         .send()
         .await
-        .map_err(|e| NexusError::internal_error(&format!("Failed to fetch JWKS: {}", e)))?
+        .map_err(|e| ServerError::internal_error(&format!("Failed to fetch JWKS: {}", e)))?
         .json()
         .await
-        .map_err(|e| NexusError::internal_error(&format!("Failed to parse JWKS: {}", e)))?;
+        .map_err(|e| ServerError::internal_error(&format!("Failed to parse JWKS: {}", e)))?;
 
     let key = jwks
         .keys
         .iter()
         .find(|k| k.kid == kid)
-        .ok_or_else(|| NexusError::invalid_token("No matching JWK found"))?;
+        .ok_or_else(|| ServerError::invalid_token("No matching JWK found"))?;
 
     let decoding_key = DecodingKey::from_rsa_components(&key.n, &key.e)
-        .map_err(|_| NexusError::invalid_token("Failed to create decoding key"))?;
+        .map_err(|_| ServerError::invalid_token("Failed to create decoding key"))?;
 
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_audience(&[config.oauth.audience.to_string()]);
     validation.set_issuer(&[config.oauth.issuer.to_string()]);
 
     let decoded = decode::<DecodedClaims>(token, &decoding_key, &validation)
-        .map_err(|e| NexusError::invalid_token(&format!("Token verification failed: {}", e)))?;
+        .map_err(|e| ServerError::invalid_token(&format!("Token verification failed: {}", e)))?;
 
     Ok(decoded.claims)
 }
@@ -78,7 +79,7 @@ pub async fn validate_token(token: &str, config: &Arc<AppConfig>) -> NexusResult
 pub async fn get_email_from_token(
     token: &str,
     config: &Arc<AppConfig>,
-) -> NexusResult<Option<String>> {
+) -> ServerResult<Option<String>> {
     let issuer = config.oauth.issuer.trim_end_matches('/').to_string();
     let userinfo_url = format!("{}/userinfo", issuer);
 
@@ -87,10 +88,10 @@ pub async fn get_email_from_token(
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| NexusError::internal_error(&format!("Failed to call userinfo: {}", e)))?;
+        .map_err(|e| ServerError::internal_error(&format!("Failed to call userinfo: {}", e)))?;
 
     if !resp.status().is_success() {
-        return Err(NexusError::invalid_token(&format!(
+        return Err(ServerError::invalid_token(&format!(
             "userinfo endpoint returned {}",
             resp.status()
         )));
@@ -99,7 +100,7 @@ pub async fn get_email_from_token(
     let json: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| NexusError::internal_error(&format!("Failed to parse userinfo: {}", e)))?;
+        .map_err(|e| ServerError::internal_error(&format!("Failed to parse userinfo: {}", e)))?;
 
     Ok(json
         .get("email")

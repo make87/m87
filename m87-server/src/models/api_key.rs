@@ -1,7 +1,7 @@
 use crate::{
     db::Mongo,
     models::roles::{CreateRoleBinding, Role, RoleDoc},
-    response::{NexusError, NexusResult},
+    response::{ServerError, ServerResult},
 };
 use argon2::password_hash::{Error as PasswordHashError, SaltString};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -33,10 +33,10 @@ pub struct CreateApiKey {
 }
 
 impl ApiKeyDoc {
-    pub async fn create(db: &Arc<Mongo>, req: CreateApiKey) -> NexusResult<(Self, String)> {
+    pub async fn create(db: &Arc<Mongo>, req: CreateApiKey) -> ServerResult<(Self, String)> {
         // 1. Generate key parts
-        let (key_id, full_key, hashed_secret) =
-            generate_api_key().map_err(|_| NexusError::internal_error("Failed to generate key"))?;
+        let (key_id, full_key, hashed_secret) = generate_api_key()
+            .map_err(|_| ServerError::internal_error("Failed to generate key"))?;
 
         // 2. Compute expiration
         let now = DateTime::now();
@@ -58,7 +58,7 @@ impl ApiKeyDoc {
         db.api_keys()
             .insert_one(&doc)
             .await
-            .map_err(|_| NexusError::internal_error("Failed to insert API key"))?;
+            .map_err(|_| ServerError::internal_error("Failed to insert API key"))?;
 
         // for each scope add a role in parallel
         let _ = futures::future::join_all(req.scopes.into_iter().map(|scope| {
@@ -77,32 +77,32 @@ impl ApiKeyDoc {
         Ok((doc, full_key))
     }
 
-    pub async fn delete(db: &Arc<Mongo>, key_id: &str) -> NexusResult<()> {
+    pub async fn delete(db: &Arc<Mongo>, key_id: &str) -> ServerResult<()> {
         db.api_keys()
             .delete_one(doc! { "key_id": key_id })
             .await
-            .map_err(|_| NexusError::internal_error("Failed to delete API key"))?;
+            .map_err(|_| ServerError::internal_error("Failed to delete API key"))?;
         Ok(())
     }
 
-    pub async fn find_and_validate_key(db: &Arc<Mongo>, api_key: &str) -> NexusResult<ApiKeyDoc> {
+    pub async fn find_and_validate_key(db: &Arc<Mongo>, api_key: &str) -> ServerResult<ApiKeyDoc> {
         let (key_id, secret) =
-            split_api_key(api_key).ok_or_else(|| NexusError::unauthorized("Malformed API key"))?;
+            split_api_key(api_key).ok_or_else(|| ServerError::unauthorized("Malformed API key"))?;
 
         let key_doc = db
             .api_keys()
             .find_one(doc! { "key_id": &key_id })
             .await
-            .map_err(|_| NexusError::internal_error("DB lookup failed"))?
-            .ok_or_else(|| NexusError::unauthorized("Invalid key ID"))?;
+            .map_err(|_| ServerError::internal_error("DB lookup failed"))?
+            .ok_or_else(|| ServerError::unauthorized("Invalid key ID"))?;
 
         if !verify_api_key(&secret, &key_doc.key_hash) {
-            return Err(NexusError::unauthorized("Invalid API key"));
+            return Err(ServerError::unauthorized("Invalid API key"));
         }
 
         if let Some(exp) = key_doc.expires_at {
             if exp < mongodb::bson::DateTime::now() {
-                return Err(NexusError::unauthorized("API key expired"));
+                return Err(ServerError::unauthorized("API key expired"));
             }
         }
 

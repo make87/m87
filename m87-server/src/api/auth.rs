@@ -7,15 +7,15 @@ use mongodb::bson::doc;
 use tokio::join;
 
 use crate::auth::claims::Claims;
-use crate::models::api_key::{ApiKeyDoc, CreateApiKey};
-use crate::models::node::{CreateNodeBody, NodeDoc};
-use crate::models::node_auth_request::{
-    AuthRequestAction, CheckAuthRequest, NodeAuthRequestBody, NodeAuthRequestCheckResponse,
-    NodeAuthRequestDoc, PublicNodeAuthRequest,
+use crate::models::agent::{AgentDoc, CreateAgentBody};
+use crate::models::agent_auth_request::{
+    AgentAuthRequestBody, AgentAuthRequestCheckResponse, AgentAuthRequestDoc, AuthRequestAction,
+    CheckAuthRequest, PublicAgentAuthRequest,
 };
+use crate::models::api_key::{ApiKeyDoc, CreateApiKey};
 use crate::models::roles::Role;
 use crate::models::ssh_key::{SSHPubKeyCreateRequest, SSHPubKeyDoc};
-use crate::response::{NexusAppResult, NexusError, NexusResponse, ResponsePagination};
+use crate::response::{ResponsePagination, ServerAppResult, ServerError, ServerResponse};
 use crate::util::app_state::AppState;
 use crate::util::pagination::RequestPagination;
 
@@ -29,10 +29,10 @@ pub fn create_route() -> Router<AppState> {
 
 async fn post_auth_request(
     State(state): State<AppState>,
-    Json(payload): Json<NodeAuthRequestBody>,
-) -> NexusAppResult<String> {
-    let request_id = NodeAuthRequestDoc::create(&state.db, payload).await?;
-    Ok(NexusResponse::builder()
+    Json(payload): Json<AgentAuthRequestBody>,
+) -> ServerAppResult<String> {
+    let request_id = AgentAuthRequestDoc::create(&state.db, payload).await?;
+    Ok(ServerResponse::builder()
         .body(request_id)
         .status_code(axum::http::StatusCode::OK)
         .build())
@@ -42,19 +42,19 @@ async fn get_auth_requests(
     claims: Claims,
     State(state): State<AppState>,
     pagination: RequestPagination,
-) -> NexusAppResult<Vec<PublicNodeAuthRequest>> {
-    let nodes_col = state.db.node_auth_requests();
-    let nodes_fut = claims.list_with_access(&nodes_col, &pagination);
-    let count_fut = claims.count_with_access(&nodes_col);
+) -> ServerAppResult<Vec<PublicAgentAuthRequest>> {
+    let agents_col = state.db.agent_auth_requests();
+    let agents_fut = claims.list_with_access(&agents_col, &pagination);
+    let count_fut = claims.count_with_access(&agents_col);
 
-    let (nodes_res, count_res) = join!(nodes_fut, count_fut);
+    let (agents_res, count_res) = join!(agents_fut, count_fut);
 
-    let nodes = nodes_res?;
+    let agents = agents_res?;
     let total_count = count_res?;
-    let nodes = PublicNodeAuthRequest::from_vec(nodes);
+    let agents = PublicAgentAuthRequest::from_vec(agents);
 
-    Ok(NexusResponse::builder()
-        .body(nodes)
+    Ok(ServerResponse::builder()
+        .body(agents)
         .status_code(axum::http::StatusCode::OK)
         .pagination(ResponsePagination {
             count: total_count,
@@ -67,24 +67,24 @@ async fn get_auth_requests(
 async fn check_auth_request(
     State(state): State<AppState>,
     Json(payload): Json<CheckAuthRequest>,
-) -> NexusAppResult<NodeAuthRequestCheckResponse> {
-    let requests_col = state.db.node_auth_requests();
+) -> ServerAppResult<AgentAuthRequestCheckResponse> {
+    let requests_col = state.db.agent_auth_requests();
 
     let request = requests_col
         .find_one(doc! { "request_id": &payload.request_id })
         .await
-        .map_err(|_| NexusError::internal_error("DB lookup failed"))?;
+        .map_err(|_| ServerError::internal_error("DB lookup failed"))?;
 
     if request.is_none() {
-        return Err(NexusError::not_found("Auth request not found"));
+        return Err(ServerError::not_found("Auth request not found"));
     }
 
     let request = request.unwrap();
 
     // if request not yet approved, return pending
     if !request.approved {
-        return Ok(NexusResponse::builder()
-            .body(NodeAuthRequestCheckResponse {
+        return Ok(ServerResponse::builder()
+            .body(AgentAuthRequestCheckResponse {
                 state: "pending".to_string(),
                 api_key: None,
             })
@@ -96,7 +96,7 @@ async fn check_auth_request(
     let _ = requests_col
         .delete_one(doc! { "request_id": &payload.request_id })
         .await
-        .map_err(|_| NexusError::internal_error("Failed to delete request"))?;
+        .map_err(|_| ServerError::internal_error("Failed to delete request"))?;
 
     // split owner_scope by : and take second part as owner_id
     let owner_id = request.owner_scope.split(':').nth(1).unwrap().to_string();
@@ -107,7 +107,7 @@ async fn check_auth_request(
             name: format!("{}-agent", request.hostname),
             ttl_secs: None, // for now never expire
             scopes: vec![
-                format!("node:{}", request.node_id.clone()),
+                format!("agent:{}", request.agent_id.clone()),
                 // grant access to all the owners pub ssh keys
                 format!("ssh:{}", owner_id),
             ],
@@ -115,11 +115,11 @@ async fn check_auth_request(
     )
     .await?;
 
-    // request approved -> create node + API key, then delete request
-    let _ = NodeDoc::create_from(
+    // request approved -> create agent + API key, then delete request
+    let _ = AgentDoc::create_from(
         &state.db,
-        CreateNodeBody {
-            id: Some(request.node_id.clone()),
+        CreateAgentBody {
+            id: Some(request.agent_id.clone()),
             name: request.hostname.clone(),
             owner_scope: request.owner_scope.clone(),
             allowed_scopes: vec![],
@@ -129,8 +129,8 @@ async fn check_auth_request(
     )
     .await?;
 
-    Ok(NexusResponse::builder()
-        .body(NodeAuthRequestCheckResponse {
+    Ok(ServerResponse::builder()
+        .body(AgentAuthRequestCheckResponse {
             state: "approved".to_string(),
             api_key: Some(api_key),
         })
@@ -142,13 +142,13 @@ async fn handle_auth_request(
     claims: Claims,
     State(state): State<AppState>,
     Json(payload): Json<AuthRequestAction>,
-) -> NexusAppResult<()> {
-    let requests_col = state.db.node_auth_requests();
+) -> ServerAppResult<()> {
+    let requests_col = state.db.agent_auth_requests();
 
     let _ = claims
         .find_one_with_access(&requests_col, doc! { "request_id": &payload.request_id })
         .await?
-        .ok_or_else(|| NexusError::not_found("Auth request not found"))?;
+        .ok_or_else(|| ServerError::not_found("Auth request not found"))?;
 
     match payload.accept {
         true => {
@@ -160,14 +160,14 @@ async fn handle_auth_request(
                     doc! { "$set": { "approved": true } },
                 )
                 .await?;
-            Ok(NexusResponse::builder().ok().build())
+            Ok(ServerResponse::builder().ok().build())
         }
         false => {
             // Delete or mark declined
             claims
                 .delete_one_with_access(&requests_col, doc! { "request_id": &payload.request_id })
                 .await?;
-            Ok(NexusResponse::builder().ok().build())
+            Ok(ServerResponse::builder().ok().build())
         }
     }
 }
@@ -176,23 +176,23 @@ async fn add_ssh_pub_key(
     claims: Claims,
     State(state): State<AppState>,
     Json(payload): Json<SSHPubKeyCreateRequest>,
-) -> NexusAppResult<()> {
+) -> ServerAppResult<()> {
     if !claims.has_scope_and_role(&payload.owner_scope, Role::Admin) {
-        return Err(NexusError::forbidden(
+        return Err(ServerError::forbidden(
             "You don't have admin role in this scope",
         ));
     }
 
     let _ = SSHPubKeyDoc::create(&state.db, payload).await?;
 
-    Ok(NexusResponse::builder().ok().build())
+    Ok(ServerResponse::builder().ok().build())
 }
 
 async fn get_ssh_keys(
     claims: Claims,
     State(state): State<AppState>,
     pagination: RequestPagination,
-) -> NexusAppResult<Vec<SSHPubKeyDoc>> {
+) -> ServerAppResult<Vec<SSHPubKeyDoc>> {
     let col = state.db.ssh_keys();
 
     let list_fut = claims.list_with_access(&col, &pagination);
@@ -203,7 +203,7 @@ async fn get_ssh_keys(
     let ssh_keys = list_res?;
     let total_count = count_res?;
 
-    Ok(NexusResponse::builder()
+    Ok(ServerResponse::builder()
         .body(ssh_keys)
         .pagination(ResponsePagination {
             count: total_count,

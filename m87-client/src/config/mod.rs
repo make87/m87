@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 use tracing::{info, warn};
 
 use crate::util::mac;
@@ -20,7 +20,7 @@ fn default_server_port() -> u16 {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub api_url: String,
-    pub node_id: String,
+    pub agent_id: String,
     pub log_level: String,
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_secs: u64,
@@ -43,7 +43,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             api_url: "https://free.make87.com".to_string(),
-            node_id: Config::deterministic_node_id(),
+            agent_id: Config::deterministic_agent_id(),
             log_level: "info".to_string(),
             heartbeat_interval_secs: default_heartbeat_interval(),
             update_check_interval_secs: default_update_check_interval(),
@@ -59,8 +59,20 @@ impl Default for Config {
 }
 
 impl Config {
+    // Removes all config from the system
+    pub fn clear() -> Result<()> {
+        let path = Self::config_file_path()?;
+        if path.exists() {
+            fs::remove_file(&path).context("Failed to delete config file")?;
+            tracing::info!("Deleted config file at {:?}", path);
+        } else {
+            tracing::warn!("No config file found at {:?}", path);
+        }
+        Ok(())
+    }
+
     /// Create a deterministic BSON-style ObjectId string from hostname and MAC address.
-    pub fn deterministic_node_id() -> String {
+    pub fn deterministic_agent_id() -> String {
         let hostname = hostname::get()
             .unwrap_or_default()
             .to_string_lossy()

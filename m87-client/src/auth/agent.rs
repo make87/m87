@@ -6,26 +6,26 @@ use tracing::info;
 
 use crate::server;
 
-pub struct NodeAuthRequestHandler {
+pub struct AgentAuthRequestHandler {
     pub api_url: String,
-    pub node_info: Option<String>,
+    pub agent_info: Option<String>,
     pub hostname: String,
-    pub node_id: String,
+    pub agent_id: String,
     pub owner_scope: String,
     pub request_id: Option<String>,
     pub trust_invalid_server_cert: bool,
 }
 
-impl NodeAuthRequestHandler {
+impl AgentAuthRequestHandler {
     pub async fn send_auth_request(&mut self) -> Result<()> {
-        let node_info = self.node_info.as_ref().expect(
-            "Node info not set. This is needed for the user to know which node to authenticate",
+        let agent_info = self.agent_info.as_ref().expect(
+            "Agent info not set. This is needed for the user to know which agent to authenticate",
         );
-        let body = server::NodeAuthRequestBody {
-            node_info: node_info.clone(),
+        let body = server::AgentAuthRequestBody {
+            agent_info: agent_info.clone(),
             hostname: self.hostname.clone(),
             owner_scope: self.owner_scope.clone(),
-            node_id: self.node_id.clone(),
+            agent_id: self.agent_id.clone(),
         };
         let request_id =
             server::set_auth_request(&self.api_url, body, self.trust_invalid_server_cert).await?;

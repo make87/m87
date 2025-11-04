@@ -1,7 +1,6 @@
 mod daemon;
-mod heartbeat;
 pub mod services;
-mod system_metrics;
+pub mod system_metrics;
 
 use anyhow::{anyhow, Result};
 use tracing::info;
