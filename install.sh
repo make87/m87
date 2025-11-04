@@ -25,7 +25,7 @@ NC='\033[0m' # No Color
 # Installation configuration
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="m87"
-GITHUB_REPO="make87/make87"  # TODO: use final repo name
+GITHUB_REPO="make87/make87"
 # This version is set during release - do not change manually
 VERSION="__VERSION__"
 
