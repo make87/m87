@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::{
     routing::{get, post},
     Json, Router,
@@ -7,12 +7,12 @@ use mongodb::bson::doc;
 use tokio::join;
 
 use crate::auth::claims::Claims;
-use crate::models::device::{DeviceDoc, CreateDeviceBody};
-use crate::models::device_auth_request::{
-    DeviceAuthRequestBody, DeviceAuthRequestCheckResponse, DeviceAuthRequestDoc, AuthRequestAction,
-    CheckAuthRequest, PublicDeviceAuthRequest,
-};
 use crate::models::api_key::{ApiKeyDoc, CreateApiKey};
+use crate::models::device::{CreateDeviceBody, DeviceDoc};
+use crate::models::device_auth_request::{
+    self, AuthRequestAction, CheckAuthRequest, DeviceAuthRequest, DeviceAuthRequestBody,
+    DeviceAuthRequestCheckResponse, DeviceAuthRequestDoc,
+};
 use crate::models::roles::Role;
 use crate::models::ssh_key::{SSHPubKeyCreateRequest, SSHPubKeyDoc};
 use crate::response::{ResponsePagination, ServerAppResult, ServerError, ServerResponse};
@@ -42,7 +42,7 @@ async fn get_auth_requests(
     claims: Claims,
     State(state): State<AppState>,
     pagination: RequestPagination,
-) -> ServerAppResult<Vec<PublicDeviceAuthRequest>> {
+) -> ServerAppResult<Vec<DeviceAuthRequest>> {
     let devices_col = state.db.device_auth_requests();
     let devices_fut = claims.list_with_access(&devices_col, &pagination);
     let count_fut = claims.count_with_access(&devices_col);
@@ -51,7 +51,7 @@ async fn get_auth_requests(
 
     let devices = devices_res?;
     let total_count = count_res?;
-    let devices = PublicDeviceAuthRequest::from_vec(devices);
+    let devices = device_auth_request::from_vec(devices);
 
     Ok(ServerResponse::builder()
         .body(devices)

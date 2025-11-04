@@ -5,6 +5,9 @@ edition = "2021"
 authors = ["Phillip Thomas <phillip@make87.com>"]
 
 [dependencies]
+# Local workspace crates
+m87-shared = { path = "../m87-shared" }
+
 # Common workspace dependencies
 tokio.workspace = true
 tokio-stream.workspace = true

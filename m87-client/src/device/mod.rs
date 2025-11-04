@@ -5,7 +5,6 @@ pub mod system_metrics;
 use anyhow::{anyhow, Result};
 use tracing::info;
 
-use crate::auth::AuthManager;
 use crate::config::Config;
 
 pub async fn run(owner_ref: Option<String>) -> Result<()> {

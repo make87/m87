@@ -1,12 +1,11 @@
 use anyhow::Ok;
 use clap::{Parser, Subcommand};
-use tracing_subscriber::{fmt, EnvFilter};
 
-use crate::device;
-use crate::devices;
 use crate::app;
 use crate::auth;
 use crate::config;
+use crate::device;
+use crate::devices;
 use crate::stack;
 use crate::update;
 

@@ -6,12 +6,8 @@ use rustls::{
     pki_types::{CertificateDer, ServerName, UnixTime},
     ClientConfig, RootCertStore, SignatureScheme,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::{
-    io::{self, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::{io, net::TcpStream};
 use tokio_rustls::{rustls, TlsConnector};
 use tokio_yamux::{Config as YamuxConfig, Session};
 use tracing::{error, info, warn};
@@ -21,19 +17,13 @@ use crate::device::services::service_info::ServiceInfo;
 use crate::device::system_metrics::SystemMetrics;
 use crate::{auth::AuthManager, config::Config, retry_async};
 
-#[derive(Serialize, Deserialize)]
-pub struct DeviceAuthRequestBody {
-    pub device_info: String,
-    pub hostname: String,
-    pub owner_scope: String,
-    pub device_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DeviceAuthRequestCheckResponse {
-    pub state: String,
-    pub api_key: Option<String>,
-}
+// Import shared types
+pub use m87_shared::auth::{
+    AuthRequestAction, CheckAuthRequest, DeviceAuthRequest, DeviceAuthRequestBody,
+    DeviceAuthRequestCheckResponse,
+};
+pub use m87_shared::device::{Device, DeviceSystemInfo, UpdateDeviceBody};
+pub use m87_shared::heartbeat::{Digests, HeartbeatRequest, HeartbeatResponse};
 
 pub async fn set_auth_request(
     api_url: &str,
@@ -52,11 +42,6 @@ pub async fn set_auth_request(
         }
         Err(e) => Err(anyhow!(e)),
     }
-}
-
-#[derive(Serialize)]
-pub struct CheckAuthRequest {
-    pub request_id: String,
 }
 
 pub async fn check_auth_request(
@@ -87,13 +72,6 @@ pub async fn check_auth_request(
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct DeviceAuthRequest {
-    pub request_id: String,
-    pub device_info: String,
-    pub created_at: String,
-}
-
 pub async fn list_auth_requests(
     api_url: &str,
     token: &str,
@@ -110,12 +88,6 @@ pub async fn list_auth_requests(
         }
         Err(e) => Err(anyhow!(e)),
     }
-}
-
-#[derive(Serialize)]
-pub struct AuthRequestAction {
-    pub accept: bool,
-    pub request_id: String,
 }
 
 pub async fn handle_auth_request(
@@ -146,20 +118,6 @@ pub async fn handle_auth_request(
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct Device {
-    pub id: String,
-    pub name: String,
-    pub updated_at: String,
-    pub created_at: String,
-    pub last_connection: String,
-    pub online: bool,
-    pub device_version: String,
-    pub target_device_version: String,
-    #[serde(default)]
-    pub system_info: DeviceSystemInfo,
-}
-
 pub async fn list_devices(
     api_url: &str,
     token: &str,
@@ -179,35 +137,6 @@ pub async fn list_devices(
         Ok(res) => Ok(res.json().await?),
         Err(e) => Err(anyhow!(e)),
     }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct DeviceSystemInfo {
-    pub hostname: String,
-    pub username: String,
-    pub public_ip_address: Option<String>,
-    pub operating_system: String,
-    pub architecture: String,
-    #[serde(default)]
-    pub cores: Option<u32>,
-    pub cpu_name: String,
-    #[serde(default)]
-    /// Memory in GB
-    pub memory: Option<f64>,
-    #[serde(default)]
-    pub gpus: Vec<String>,
-    #[serde(default)]
-    pub latitude: Option<f64>,
-    #[serde(default)]
-    pub longitude: Option<f64>,
-    #[serde(default)]
-    pub country_code: Option<String>,
-}
-
-#[derive(Deserialize, Serialize, Default)]
-pub struct UpdateDeviceBody {
-    pub system_info: Option<DeviceSystemInfo>,
-    pub client_version: Option<String>,
 }
 
 pub async fn report_device_details(
@@ -245,7 +174,11 @@ pub async fn request_control_tunnel_token(
     trust_invalid_server_cert: bool,
 ) -> Result<String> {
     let client = get_client(trust_invalid_server_cert)?;
-    let url = format!("{}/device/{}/token", api_url.trim_end_matches('/'), device_id);
+    let url = format!(
+        "{}/device/{}/token",
+        api_url.trim_end_matches('/'),
+        device_id
+    );
 
     let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send());
     if let Err(e) = res {
@@ -325,7 +258,10 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
 
     // 4. Send handshake line
     use tokio::io::AsyncWriteExt;
-    let line = format!("M87 device_id={} token={}\n", device_id, control_tunnel_token);
+    let line = format!(
+        "M87 device_id={} token={}\n",
+        device_id, control_tunnel_token
+    );
     tls.write_all(line.as_bytes()).await?;
     tls.flush().await?;
 
@@ -366,31 +302,6 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     });
     // register / run streams as needed
     Ok(())
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct HeartbeatRequest {
-    pub last_instruction_hash: String,
-    pub system: SystemMetrics,
-    pub services: Vec<ServiceInfo>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct HeartbeatResponse {
-    pub up_to_date: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compose_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub digests: Option<Digests>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Digests {
-    pub compose: Option<String>,
-    pub secrets: Option<String>,
-    pub ssh: Option<String>,
-    pub config: Option<String>,
-    pub combined: String,
 }
 
 pub async fn send_heartbeat(

@@ -26,14 +26,14 @@ use tower_http::{
 use tracing::{info, warn};
 
 use crate::{
-    api::{device, auth},
+    api::{auth, device},
     config::AppConfig,
     db::Mongo,
     relay::relay_state::RelayState,
     response::{ServerError, ServerResult},
     util::{app_state::AppState, tcp_proxy::proxy_bidirectional},
 };
-use rcgen::{generate_simple_self_signed, Certificate, CertificateParams};
+use rcgen::generate_simple_self_signed;
 use tokio_yamux::{Config as YamuxConfig, Session};
 
 async fn get_status() -> impl IntoResponse {
@@ -226,7 +226,7 @@ pub async fn handle_control_tunnel(
     tls: TlsStream<tokio::net::TcpStream>,
     secret: &str,
 ) -> io::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::io::AsyncBufReadExt;
     let mut reader = BufReader::new(tls);
 
     // Expect: "M87 device_id=<id> token=<base64>\n"
