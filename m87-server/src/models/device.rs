@@ -187,14 +187,8 @@ impl DeviceDoc {
     }
 
     pub async fn remove_device(&self, claims: &Claims, db: &Arc<Mongo>) -> ServerResult<()> {
-        let nodes_col = db.devices();
         let api_keys_col = db.api_keys();
         let roles_col = db.roles();
-
-        // Check access and delete node
-        claims
-            .delete_one_with_access(&nodes_col, doc! { "_id": self.id.clone().unwrap() })
-            .await?;
 
         // Delete associated API keys
         api_keys_col
@@ -208,11 +202,12 @@ impl DeviceDoc {
             .await
             .map_err(|_| ServerError::internal_error("Failed to delete roles"))?;
 
+        // Check access and delete device
         let success = claims
             .delete_one_with_access(&db.devices(), doc! { "_id": &self.id.clone().unwrap() })
             .await?;
 
-        if success {
+        if !success {
             return Err(ServerError::not_found(
                 "Node you are trying to remove does not exist",
             ));
