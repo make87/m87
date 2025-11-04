@@ -6,32 +6,23 @@ authors = ["Phillip Thomas <phillip@make87.com>"]
 
 [dependencies]
 # Common workspace dependencies
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "time", "fs", "process", "signal"] }
 tokio-stream.workspace = true
 tokio-util.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-bson.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 once_cell.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 hex.workspace = true
-hmac.workspace = true
-sha2.workspace = true
 base64.workspace = true
 chrono.workspace = true
-axum.workspace = true
-axum-extra.workspace = true
-tower-http.workspace = true
 reqwest.workspace = true
-headers.workspace = true
-argon2.workspace = true
 jsonwebtoken.workspace = true
-uuid.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 socket2.workspace = true
@@ -41,3 +32,20 @@ tokio-yamux.workspace = true
 mongodb = "3"
 tokio-rustls-acme = "0.8.0"
 rcgen = "0.14.5"
+
+# Server-specific serialization
+bson = { version = "3", features = ["serde_with-3", "chrono-0_4"] }
+
+# Server-specific web framework
+axum = { version = "0.8.6", features = ["ws", "macros"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower-http = { version = "0.6.1", features = ["cors", "trace", "timeout", "sensitive-headers", "compression-full"] }
+headers = "0.4.1"
+
+# Server-specific cryptography
+sha2 = "0.10"
+hmac = "0.12"
+argon2 = "0.5"
+
+# Server-specific utilities
+uuid = "1.18.1"

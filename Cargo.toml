@@ -7,7 +7,8 @@ members = [
 
 [workspace.dependencies]
 # Async runtime and utilities
-tokio = { version = "1.48", features = ["full"] }
+# Base tokio with common features - individual packages add more features as needed
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "io-util", "sync"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 async-trait = "0.1.89"
@@ -17,7 +18,6 @@ futures-util = "0.3"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bson = { version = "3", features = ["serde_with-3", "chrono-0_4"] }
 
 # Error handling
 anyhow = "1.0"
@@ -29,11 +29,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Web server and HTTP
 warp = { version = "0.4", features = ["server", "websocket"] }
-axum = { version = "0.8.6", features = ["ws", "macros"] }
-axum-extra = { version = "0.10", features = ["typed-header"] }
-tower-http = { version = "0.6.1", features = ["cors", "trace", "timeout", "sensitive-headers", "compression-full"] }
 reqwest = { version = "0.12.5", default-features = false, features = ["json", "rustls-tls"] }
-headers = "0.4.1"
 
 # WebSocket
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
@@ -45,9 +41,6 @@ once_cell = "1.21.3"
 # Cryptography and auth
 jsonwebtoken = "9"
 sha1 = "0.10.6"
-sha2 = "0.10"
-hmac = "0.12"
-argon2 = "0.5"
 
 # Utilities
 rand = "0.8"
@@ -55,7 +48,6 @@ rand_core = "0.6"
 hex = "0.4"
 base64 = "0.22.1"
 chrono = "0.4.42"
-uuid = "1.18.1"
 socket2 = "0.6.1"
 
 # TLS and networking
