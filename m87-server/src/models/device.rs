@@ -150,11 +150,7 @@ impl DeviceDoc {
             Some(id) => ObjectId::parse_str(&id)?,
             None => ObjectId::new(),
         };
-        // if format!("node:{}", device_id.to_string()) not in create_body.allowed_scopes add it
         let self_scope = format!("node:{}", device_id.to_string());
-        // if !create_body.allowed_scopes.contains(&self_scope) {
-        // create_body.allowed_scopes.push(self_scope);
-        // }
         let allowed_scopes = match create_body.allowed_scopes.contains(&self_scope) {
             true => create_body.allowed_scopes,
             false => {
