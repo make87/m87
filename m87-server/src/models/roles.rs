@@ -10,32 +10,12 @@ use mongodb::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    Owner,
-    Admin,
-    Editor,
-    Viewer,
-}
+// Import shared Role type
+pub use m87_shared::roles::Role;
 
-impl From<Role> for Bson {
-    fn from(role: Role) -> Self {
-        mongodb::bson::to_bson(&role).unwrap()
-    }
-}
-
-impl Role {
-    pub fn allows(have: &Role, need: &Role) -> bool {
-        use Role::*;
-        matches!(
-            (have, need),
-            (Owner, _)
-                | (Admin, Viewer | Editor | Admin)
-                | (Editor, Viewer | Editor)
-                | (Viewer, Viewer)
-        )
-    }
+// Helper function to convert Role to Bson (can't use From trait due to orphan rules)
+pub fn role_to_bson(role: &Role) -> Bson {
+    mongodb::bson::to_bson(role).unwrap()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +56,7 @@ impl RoleDoc {
         let update = doc! {
             "$set": {
                 "scope": &body.scope,
-                "role": &body.role,
+                "role": role_to_bson(&body.role),
                 "created_at": now,
             }
         };

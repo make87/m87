@@ -11,8 +11,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::{
-    agent::{services::collect_all_services, system_metrics::collect_system_metrics},
-    auth::register_agent,
+    device::{services::collect_all_services, system_metrics::collect_system_metrics},
+    auth::register_device,
     server,
 };
 use crate::{auth::AuthManager, config::Config, rest::serve_server, util::macchina};
@@ -20,18 +20,18 @@ use crate::{auth::AuthManager, config::Config, rest::serve_server, util::macchin
 use crate::server::send_heartbeat;
 use crate::util::logging::init_tracing_with_log_layer;
 
-const SERVICE_NAME: &str = "m87-agent";
-const SERVICE_FILE: &str = "/etc/systemd/system/m87-agent.service";
+const SERVICE_NAME: &str = "m87-device";
+const SERVICE_FILE: &str = "/etc/systemd/system/m87-device.service";
 
 pub async fn install_service() -> Result<()> {
     let exe_path = std::env::current_exe().context("Unable to resolve binary path")?;
     let service_content = format!(
         "[Unit]
-Description=Agent Service for make87
+Description=Device Service for make87
 After=network.target
 
 [Service]
-ExecStart={} agent run --headless
+ExecStart={} device run --headless
 Restart=always
 RestartSec=3
 User=root
@@ -73,7 +73,7 @@ pub async fn uninstall_service() -> Result<()> {
             .args(["daemon-reload"])
             .status()
             .ok();
-        info!("Uninstalled m87 agent service");
+        info!("Uninstalled m87 device service");
     } else {
         info!("Service not found, nothing to uninstall");
     }
@@ -97,13 +97,13 @@ pub async fn status_service() -> Result<()> {
 
 pub async fn run() -> Result<()> {
     let _log_tx = init_tracing_with_log_layer("info");
-    info!("Running agent");
+    info!("Running device");
     let shutdown = signal::ctrl_c();
     pin!(shutdown);
     tokio::select! {
         _ = login_and_run() => {},
         _ = &mut shutdown => {
-            info!("Received shutdown signal, stopping agent");
+            info!("Received shutdown signal, stopping device");
         }
     }
 
@@ -111,19 +111,19 @@ pub async fn run() -> Result<()> {
 }
 
 async fn login_and_run() -> Result<()> {
-    // retry login/register until wit works, then call agent_loop
+    // retry login/register until wit works, then call device_loop
     loop {
-        let success = register_agent(None).await;
+        let success = register_device(None).await;
         if success.is_ok() {
             break;
         }
         sleep(Duration::from_secs(1)).await;
     }
     let config = Config::load().context("Failed to load configuration")?;
-    let token = AuthManager::get_agent_token()?;
-    let res = report_agent_details(
+    let token = AuthManager::get_device_token()?;
+    let res = report_device_details(
         &config.api_url,
-        &config.agent_id,
+        &config.device_id,
         &token,
         config.enable_geo_lookup,
         config.trust_invalid_server_cert,
@@ -155,14 +155,14 @@ async fn login_and_run() -> Result<()> {
     });
 
     if res.is_err() {
-        error!("Failed to report agent details: {:?}", res);
+        error!("Failed to report device details: {:?}", res);
     }
 
-    agent_loop().await?;
+    device_loop().await?;
     Ok(())
 }
 
-async fn agent_loop() -> Result<()> {
+async fn device_loop() -> Result<()> {
     loop {
         if let Err(e) = sync_with_backend().await {
             error!("Sync failed: {:?}", e);
@@ -177,12 +177,12 @@ async fn sync_with_backend() -> Result<()> {
     let config = Config::load().context("Failed to load configuration")?;
     let last_instruciotn_hash = "";
 
-    let token = AuthManager::get_agent_token()?;
+    let token = AuthManager::get_device_token()?;
     let metrics = collect_system_metrics().await?;
     let services = collect_all_services().await?;
     let _instruction = send_heartbeat(
         last_instruciotn_hash,
-        &config.agent_id,
+        &config.device_id,
         &config.api_url,
         &token,
         metrics,
@@ -193,29 +193,29 @@ async fn sync_with_backend() -> Result<()> {
     Ok(())
 }
 
-pub async fn report_agent_details(
+pub async fn report_device_details(
     api_url: &str,
-    agent_id: &str,
+    device_id: &str,
     token: &str,
     enable_geo_lookup: bool,
     trust_invalid_server_cert: bool,
 ) -> Result<()> {
-    info!("Reporting agent details");
+    info!("Reporting device details");
 
     // Build update body
-    let body = server::UpdateAgentBody {
+    let body = server::UpdateDeviceBody {
         client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         system_info: Some(get_system_info(enable_geo_lookup).await?),
     };
-    server::report_agent_details(api_url, token, agent_id, body, trust_invalid_server_cert).await
+    server::report_device_details(api_url, token, device_id, body, trust_invalid_server_cert).await
 }
 
-async fn get_system_info(enable_geo_lookup: bool) -> Result<server::AgentSystemInfo> {
+async fn get_system_info(enable_geo_lookup: bool) -> Result<server::DeviceSystemInfo> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()?;
 
-    let mut sys_info = server::AgentSystemInfo {
+    let mut sys_info = server::DeviceSystemInfo {
         ..Default::default()
     };
     if enable_geo_lookup {

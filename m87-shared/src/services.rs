@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// General representation of any service the agent monitors:
+/// General representation of any service the device monitors:
 /// Docker container, Podman container, systemd unit, etc.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ServiceInfo {

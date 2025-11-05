@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::info;
-mod agent;
+mod device;
 mod oauth;
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub const API_KEY_ENV_VAR: &str = "M87_API_KEY";
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct APIConfig {
     pub credentials: Option<Credentials>,
-    pub agent_credentials: Option<APIKey>,
+    pub device_credentials: Option<APIKey>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -116,9 +116,9 @@ impl APIConfig {
         Ok(())
     }
 
-    pub fn save_agent_credentials(key: String) -> Result<()> {
+    pub fn save_device_credentials(key: String) -> Result<()> {
         let mut config = Self::load_or_create()?;
-        config.agent_credentials = Some(APIKey { api_key: key });
+        config.device_credentials = Some(APIKey { api_key: key });
         config.save()?;
         Ok(())
     }
@@ -130,9 +130,9 @@ impl APIConfig {
         Ok(())
     }
 
-    pub fn delete_agent_credentials() -> Result<()> {
+    pub fn delete_device_credentials() -> Result<()> {
         let mut config = Self::load_or_create()?;
-        config.agent_credentials = None;
+        config.device_credentials = None;
         config.save()?;
         Ok(())
     }
@@ -179,26 +179,26 @@ impl AuthManager {
         Ok(())
     }
 
-    pub async fn login_agent(
-        auth_handler: &mut agent::AgentAuthRequestHandler,
+    pub async fn login_device(
+        auth_handler: &mut device::DeviceAuthRequestHandler,
         timeout: Duration,
     ) -> Result<()> {
         match std::env::var(API_KEY_ENV_VAR) {
             Ok(api_key) => {
                 if api_key.len() != 0 {
-                    APIConfig::save_agent_credentials(api_key)?;
+                    APIConfig::save_device_credentials(api_key)?;
                 }
             }
             _ => {}
         };
 
-        if AuthManager::has_agent_credentials()? {
+        if AuthManager::has_device_credentials()? {
             return Ok(());
         }
 
         let api_key = auth_handler.handle_headless_auth(timeout).await?;
-        APIConfig::save_agent_credentials(api_key)?;
-        info!("Logged agent in successfully");
+        APIConfig::save_device_credentials(api_key)?;
+        info!("Logged device in successfully");
         Ok(())
     }
 
@@ -207,8 +207,8 @@ impl AuthManager {
         Ok(())
     }
 
-    pub async fn delete_agent_credentials() -> Result<()> {
-        APIConfig::delete_agent_credentials()?;
+    pub async fn delete_device_credentials() -> Result<()> {
+        APIConfig::delete_device_credentials()?;
         Ok(())
     }
 
@@ -220,10 +220,10 @@ impl AuthManager {
             .await
     }
 
-    pub fn get_agent_token() -> Result<String> {
+    pub fn get_device_token() -> Result<String> {
         Ok(APIConfig::load_or_create()?
-            .agent_credentials
-            .ok_or_else(|| anyhow!("agent credentials not found"))?
+            .device_credentials
+            .ok_or_else(|| anyhow!("device credentials not found"))?
             .api_key)
     }
 
@@ -231,8 +231,8 @@ impl AuthManager {
         Ok(APIConfig::load_or_create()?.credentials.is_some())
     }
 
-    pub fn has_agent_credentials() -> Result<bool> {
-        Ok(APIConfig::load_or_create()?.agent_credentials.is_some())
+    pub fn has_device_credentials() -> Result<bool> {
+        Ok(APIConfig::load_or_create()?.device_credentials.is_some())
     }
 }
 
@@ -252,8 +252,8 @@ pub async fn login_cli() -> Result<()> {
     Ok(())
 }
 
-pub async fn register_agent(owner_scope: Option<String>) -> Result<()> {
-    if AuthManager::has_agent_credentials()? {
+pub async fn register_device(owner_scope: Option<String>) -> Result<()> {
+    if AuthManager::has_device_credentials()? {
         info!("Already registered");
         return Ok(());
     }
@@ -275,18 +275,18 @@ pub async fn register_agent(owner_scope: Option<String>) -> Result<()> {
     };
     let node_info = macchina::get_detailed_printout();
     let host_name = get_host_name()?;
-    let mut report_handler = agent::AgentAuthRequestHandler {
+    let mut report_handler = device::DeviceAuthRequestHandler {
         api_url: config.api_url.clone(),
-        agent_info: Some(node_info),
+        device_info: Some(node_info),
         hostname: host_name.clone(),
-        agent_id: config.agent_id,
+        device_id: config.device_id,
         owner_scope,
         request_id: None,
         trust_invalid_server_cert: config.trust_invalid_server_cert,
     };
     // endless retry if it fails with Err(anyhow::anyhow!("API key not approved within timeout"))
     while let Err(err) =
-        AuthManager::login_agent(&mut report_handler, Duration::from_secs(3600)).await
+        AuthManager::login_device(&mut report_handler, Duration::from_secs(3600)).await
     {
         if err
             .to_string()
@@ -309,11 +309,11 @@ pub async fn logout_cli() -> Result<()> {
     AuthManager::delete_cli_credentials().await
 }
 
-pub async fn logout_agent() -> Result<()> {
-    AuthManager::delete_agent_credentials().await
+pub async fn logout_device() -> Result<()> {
+    AuthManager::delete_device_credentials().await
 }
 
-pub async fn list_auth_requests() -> Result<Vec<server::AgentAuthRequest>> {
+pub async fn list_auth_requests() -> Result<Vec<server::DeviceAuthRequest>> {
     let token = AuthManager::get_cli_token().await?;
     let config = Config::load()?;
     server::list_auth_requests(&config.api_url, &token, config.trust_invalid_server_cert).await

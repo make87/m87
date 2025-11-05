@@ -6,38 +6,28 @@ use rustls::{
     pki_types::{CertificateDer, ServerName, UnixTime},
     ClientConfig, RootCertStore, SignatureScheme,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::{
-    io::{self, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::{io, net::TcpStream};
 use tokio_rustls::{rustls, TlsConnector};
 use tokio_yamux::{Config as YamuxConfig, Session};
 use tracing::{error, info, warn};
 use webpki_roots::TLS_SERVER_ROOTS;
 
-use crate::agent::services::service_info::ServiceInfo;
-use crate::agent::system_metrics::SystemMetrics;
+use crate::device::services::service_info::ServiceInfo;
+use crate::device::system_metrics::SystemMetrics;
 use crate::{auth::AuthManager, config::Config, retry_async};
 
-#[derive(Serialize, Deserialize)]
-pub struct AgentAuthRequestBody {
-    pub agent_info: String,
-    pub hostname: String,
-    pub owner_scope: String,
-    pub agent_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct AgentAuthRequestCheckResponse {
-    pub state: String,
-    pub api_key: Option<String>,
-}
+// Import shared types
+pub use m87_shared::auth::{
+    AuthRequestAction, CheckAuthRequest, DeviceAuthRequest, DeviceAuthRequestBody,
+    DeviceAuthRequestCheckResponse,
+};
+pub use m87_shared::device::{Device, DeviceSystemInfo, UpdateDeviceBody};
+pub use m87_shared::heartbeat::{Digests, HeartbeatRequest, HeartbeatResponse};
 
 pub async fn set_auth_request(
     api_url: &str,
-    body: AgentAuthRequestBody,
+    body: DeviceAuthRequestBody,
     trust_invalid_server_cert: bool,
 ) -> Result<String> {
     let url = format!("{}/auth/request", api_url);
@@ -46,24 +36,19 @@ pub async fn set_auth_request(
     let res = retry_async!(3, 3, client.post(&url).json(&body).send())?;
     match res.error_for_status() {
         Ok(r) => {
-            // returns a string with agent id on success
-            let agent_id: String = r.json().await?;
-            Ok(agent_id)
+            // returns a string with device id on success
+            let device_id: String = r.json().await?;
+            Ok(device_id)
         }
         Err(e) => Err(anyhow!(e)),
     }
-}
-
-#[derive(Serialize)]
-pub struct CheckAuthRequest {
-    pub request_id: String,
 }
 
 pub async fn check_auth_request(
     api_url: &str,
     request_id: &str,
     trust_invalid_server_cert: bool,
-) -> Result<AgentAuthRequestCheckResponse> {
+) -> Result<DeviceAuthRequestCheckResponse> {
     let url = format!("{}/auth/request/check", api_url);
     let client = get_client(trust_invalid_server_cert)?;
 
@@ -79,43 +64,30 @@ pub async fn check_auth_request(
     )?;
     match res.error_for_status() {
         Ok(r) => {
-            // returns a string with agent id on success
-            let response: AgentAuthRequestCheckResponse = r.json().await?;
+            // returns a string with device id on success
+            let response: DeviceAuthRequestCheckResponse = r.json().await?;
             Ok(response)
         }
         Err(e) => Err(anyhow!(e)),
     }
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct AgentAuthRequest {
-    pub request_id: String,
-    pub agent_info: String,
-    pub created_at: String,
 }
 
 pub async fn list_auth_requests(
     api_url: &str,
     token: &str,
     trust_invalid_server_cert: bool,
-) -> Result<Vec<AgentAuthRequest>, anyhow::Error> {
+) -> Result<Vec<DeviceAuthRequest>, anyhow::Error> {
     let url = format!("{}/auth/request", api_url);
     let client = get_client(trust_invalid_server_cert)?;
 
     let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
     match res.error_for_status() {
         Ok(r) => {
-            let response: Vec<AgentAuthRequest> = r.json().await?;
+            let response: Vec<DeviceAuthRequest> = r.json().await?;
             Ok(response)
         }
         Err(e) => Err(anyhow!(e)),
     }
-}
-
-#[derive(Serialize)]
-pub struct AuthRequestAction {
-    pub accept: bool,
-    pub request_id: String,
 }
 
 pub async fn handle_auth_request(
@@ -146,32 +118,18 @@ pub async fn handle_auth_request(
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct Agent {
-    pub id: String,
-    pub name: String,
-    pub updated_at: String,
-    pub created_at: String,
-    pub last_connection: String,
-    pub online: bool,
-    pub agent_version: String,
-    pub target_agent_version: String,
-    #[serde(default)]
-    pub system_info: AgentSystemInfo,
-}
-
-pub async fn list_agents(
+pub async fn list_devices(
     api_url: &str,
     token: &str,
     trust_invalid_server_cert: bool,
-) -> Result<Vec<Agent>> {
+) -> Result<Vec<Device>> {
     let client = get_client(trust_invalid_server_cert)?;
 
     let res = retry_async!(
         3,
         3,
         client
-            .get(&format!("{}/agent", api_url))
+            .get(&format!("{}/device", api_url))
             .bearer_auth(token)
             .send()
     )?;
@@ -181,44 +139,15 @@ pub async fn list_agents(
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct AgentSystemInfo {
-    pub hostname: String,
-    pub username: String,
-    pub public_ip_address: Option<String>,
-    pub operating_system: String,
-    pub architecture: String,
-    #[serde(default)]
-    pub cores: Option<u32>,
-    pub cpu_name: String,
-    #[serde(default)]
-    /// Memory in GB
-    pub memory: Option<f64>,
-    #[serde(default)]
-    pub gpus: Vec<String>,
-    #[serde(default)]
-    pub latitude: Option<f64>,
-    #[serde(default)]
-    pub longitude: Option<f64>,
-    #[serde(default)]
-    pub country_code: Option<String>,
-}
-
-#[derive(Deserialize, Serialize, Default)]
-pub struct UpdateAgentBody {
-    pub system_info: Option<AgentSystemInfo>,
-    pub client_version: Option<String>,
-}
-
-pub async fn report_agent_details(
+pub async fn report_device_details(
     api_url: &str,
     token: &str,
-    agent_id: &str,
-    body: UpdateAgentBody,
+    device_id: &str,
+    body: UpdateDeviceBody,
     trust_invalid_server_cert: bool,
 ) -> Result<()> {
     let client = get_client(trust_invalid_server_cert)?;
-    let url = format!("{}/agent/{}", api_url.trim_end_matches('/'), agent_id);
+    let url = format!("{}/device/{}", api_url.trim_end_matches('/'), device_id);
 
     let res = retry_async!(
         3,
@@ -226,13 +155,13 @@ pub async fn report_agent_details(
         client.post(&url).bearer_auth(token).json(&body).send()
     );
     if let Err(e) = res {
-        eprintln!("[Agent] Error reporting agent details: {}", e);
+        eprintln!("[Device] Error reporting device details: {}", e);
         return Err(anyhow!(e));
     }
     match res.unwrap().error_for_status() {
         Ok(_) => Ok(()),
         Err(e) => {
-            eprintln!("[Agent] Error reporting agent details: {}", e);
+            eprintln!("[Device] Error reporting device details: {}", e);
             Err(anyhow!(e))
         }
     }
@@ -241,15 +170,19 @@ pub async fn report_agent_details(
 pub async fn request_control_tunnel_token(
     api_url: &str,
     token: &str,
-    agent_id: &str,
+    device_id: &str,
     trust_invalid_server_cert: bool,
 ) -> Result<String> {
     let client = get_client(trust_invalid_server_cert)?;
-    let url = format!("{}/agent/{}/token", api_url.trim_end_matches('/'), agent_id);
+    let url = format!(
+        "{}/device/{}/token",
+        api_url.trim_end_matches('/'),
+        device_id
+    );
 
     let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send());
     if let Err(e) = res {
-        eprintln!("[Agent] Error reporting agent details: {}", e);
+        eprintln!("[Device] Error reporting device details: {}", e);
         return Err(anyhow!(e));
     }
     match res.unwrap().error_for_status() {
@@ -258,7 +191,7 @@ pub async fn request_control_tunnel_token(
             Ok(control_token)
         }
         Err(e) => {
-            eprintln!("[Agent] Error reporting agent details: {}", e);
+            eprintln!("[Device] Error reporting device details: {}", e);
             Err(anyhow!(e))
         }
     }
@@ -266,13 +199,13 @@ pub async fn request_control_tunnel_token(
 
 pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     let config = Config::load().context("Failed to load configuration")?;
-    let token = AuthManager::get_agent_token()?;
+    let token = AuthManager::get_device_token()?;
 
-    let agent_id = config.agent_id.clone();
+    let device_id = config.device_id.clone();
     let control_tunnel_token = request_control_tunnel_token(
         &config.api_url,
         &token,
-        &agent_id,
+        &device_id,
         config.trust_invalid_server_cert,
     )
     .await?;
@@ -325,7 +258,10 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
 
     // 4. Send handshake line
     use tokio::io::AsyncWriteExt;
-    let line = format!("M87 agent_id={} token={}\n", agent_id, control_tunnel_token);
+    let line = format!(
+        "M87 device_id={} token={}\n",
+        device_id, control_tunnel_token
+    );
     tls.write_all(line.as_bytes()).await?;
     tls.flush().await?;
 
@@ -368,34 +304,9 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct HeartbeatRequest {
-    pub last_instruction_hash: String,
-    pub system: SystemMetrics,
-    pub services: Vec<ServiceInfo>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct HeartbeatResponse {
-    pub up_to_date: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compose_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub digests: Option<Digests>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Digests {
-    pub compose: Option<String>,
-    pub secrets: Option<String>,
-    pub ssh: Option<String>,
-    pub config: Option<String>,
-    pub combined: String,
-}
-
 pub async fn send_heartbeat(
     last_instruction_hash: &str,
-    agent_id: &str,
+    device_id: &str,
     api_url: &str,
     token: &str,
     metrics: SystemMetrics,
@@ -408,7 +319,7 @@ pub async fn send_heartbeat(
     };
 
     let client = reqwest::Client::new();
-    let url = format!("{}/agent/{}/heartbeat", api_url, agent_id);
+    let url = format!("{}/device/{}/heartbeat", api_url, device_id);
 
     let resp = client
         .post(&url)

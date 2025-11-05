@@ -263,7 +263,7 @@ jobs:
 
             Supported architectures: linux/amd64, linux/arm64
 
-            See available tags at: https://github.com/make87/make87-community/pkgs/container/m87-server
+            See available tags at: https://github.com/make87/make87/pkgs/container/m87-server
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
