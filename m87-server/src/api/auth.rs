@@ -104,7 +104,7 @@ async fn check_auth_request(
     let (api_key_doc, api_key) = ApiKeyDoc::create(
         &state.db,
         CreateApiKey {
-            name: format!("{}-device", request.hostname),
+            name: format!("{}-key", request.device_info.hostname),
             ttl_secs: None, // for now never expire
             scopes: vec![
                 format!("device:{}", request.device_id.clone()),
@@ -120,11 +120,12 @@ async fn check_auth_request(
         &state.db,
         CreateDeviceBody {
             id: Some(request.device_id.clone()),
-            name: request.hostname.clone(),
+            name: request.device_info.hostname.clone(),
             owner_scope: request.owner_scope.clone(),
             allowed_scopes: vec![],
-            target_client_version: Some("latest".to_string()),
+            target_version: Some("latest".to_string()),
             api_key_id: api_key_doc.id.clone().unwrap(),
+            system_info: request.device_info.clone(),
         },
     )
     .await?;

@@ -7,8 +7,7 @@ use mongodb::bson::oid::ObjectId;
 use crate::auth::claims::Claims;
 use crate::auth::tunnel_token::issue_tunnel_token;
 use crate::models::device::{
-    device_doc_to_public, device_docs_to_public, DeviceDoc, HeartbeatRequest, HeartbeatResponse,
-    PublicDevice, UpdateDeviceBody,
+    DeviceDoc, HeartbeatRequest, HeartbeatResponse, PublicDevice, UpdateDeviceBody,
 };
 use crate::models::roles::Role;
 use crate::response::{ResponsePagination, ServerAppResult, ServerError, ServerResponse};
@@ -52,14 +51,14 @@ async fn get_devices(
     State(state): State<AppState>,
     pagination: RequestPagination,
 ) -> ServerAppResult<Vec<PublicDevice>> {
-    let nodes_col = state.db.devices();
-    let nodes = claims.list_with_access(&nodes_col, &pagination).await?;
-    let total_count = claims.count_with_access(&nodes_col).await?;
+    let devices_col = state.db.devices();
+    let devices = claims.list_with_access(&devices_col, &pagination).await?;
+    let total_count = claims.count_with_access(&devices_col).await?;
 
-    let nodes = device_docs_to_public(&nodes);
+    let devices = DeviceDoc::to_public_devices(devices);
 
     Ok(ServerResponse::builder()
-        .body(nodes)
+        .body(devices)
         .status_code(axum::http::StatusCode::OK)
         .pagination(ResponsePagination {
             count: total_count,
@@ -77,15 +76,13 @@ async fn get_device_by_id(
     let device_id =
         ObjectId::parse_str(&id).map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
 
-    let node_opt = claims
+    let device_opt = claims
         .find_one_with_access(&state.db.devices(), doc! { "_id": device_id })
         .await?;
-    let node = node_opt.ok_or_else(|| ServerError::not_found("Device not found"))?;
-
-    let node = device_doc_to_public(&node);
+    let device = device_opt.ok_or_else(|| ServerError::not_found("Device not found"))?;
 
     Ok(ServerResponse::builder()
-        .body(node)
+        .body(device.into())
         .status_code(axum::http::StatusCode::OK)
         .build())
 }
@@ -107,20 +104,18 @@ async fn update_device_by_id(
         .update_one_with_access(&state.db.devices(), doc! { "_id": device_id }, update_doc)
         .await?;
 
-    // Fetch the updated node (using the same access filter)
-    let updated_node_opt = claims
+    // Fetch the updated device (using the same access filter)
+    let updated_device_opt = claims
         .find_one_with_access(&state.db.devices(), doc! { "_id": device_id })
         .await?;
 
-    let updated_node = match updated_node_opt {
-        Some(node) => node,
+    let updated_device = match updated_device_opt {
+        Some(device) => device,
         None => return Err(ServerError::not_found("Device not found after update")),
     };
 
-    let node = device_doc_to_public(&updated_node);
-
     Ok(ServerResponse::builder()
-        .body(node)
+        .body(updated_device.into())
         .status_code(axum::http::StatusCode::OK)
         .build())
 }
@@ -130,13 +125,13 @@ async fn delete_device(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ServerAppResult<()> {
-    let node_oid = ObjectId::parse_str(&id)?;
-    let node_opt = claims
-        .find_one_with_access(&state.db.devices(), doc! { "_id": node_oid })
+    let device_oid = ObjectId::parse_str(&id)?;
+    let device_opt = claims
+        .find_one_with_access(&state.db.devices(), doc! { "_id": device_oid })
         .await?;
-    let node = node_opt.ok_or_else(|| ServerError::not_found("Device not found"))?;
+    let device = device_opt.ok_or_else(|| ServerError::not_found("Device not found"))?;
 
-    let _ = node.remove_device(&claims, &state.db).await?;
+    let _ = device.remove_device(&claims, &state.db).await?;
 
     Ok(ServerResponse::builder()
         .status_code(axum::http::StatusCode::NO_CONTENT)
@@ -149,7 +144,7 @@ async fn post_heartbeat(
     Path(id): Path<String>,
     Json(payload): Json<HeartbeatRequest>,
 ) -> ServerAppResult<HeartbeatResponse> {
-    let node = claims
+    let device = claims
         .find_one_with_scope_and_role::<DeviceDoc>(
             &state.db.devices(),
             doc! { "_id": ObjectId::parse_str(&id)? },
@@ -158,7 +153,7 @@ async fn post_heartbeat(
         .await?
         .ok_or_else(|| ServerError::not_found("Device not found"))?;
 
-    let body = node.handle_heartbeat(claims, &state.db, payload).await?;
+    let body = device.handle_heartbeat(claims, &state.db, payload).await?;
     let res = ServerResponse::builder().body(body).ok().build();
     Ok(res)
 }
@@ -168,7 +163,7 @@ async fn get_device_ssh(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ServerAppResult<String> {
-    let node = claims
+    let device = claims
         .find_one_with_scope_and_role::<DeviceDoc>(
             &state.db.devices(),
             doc! { "_id": ObjectId::parse_str(&id)? },
@@ -177,7 +172,7 @@ async fn get_device_ssh(
         .await?
         .ok_or_else(|| ServerError::not_found("Device not found"))?;
 
-    let command = node.request_ssh_command(&state).await?;
+    let command = device.request_ssh_command(&state).await?;
     let res = ServerResponse::builder().body(command).ok().build();
     Ok(res)
 }
@@ -187,7 +182,7 @@ async fn get_device_ssh(
 //     State(state): State<AppState>,
 //     Path(id): Path<String>,
 // ) -> ServerAppResult<String> {
-//     let node = claims
+//     let device = claims
 //         .find_one_with_scope_and_role::<DeviceDoc>(
 //             &state.db.devices(),
 //             doc! { "_id": ObjectId::parse_str(&id)? },
@@ -196,7 +191,7 @@ async fn get_device_ssh(
 //         .await?
 //         .ok_or_else(|| ServerError::not_found("Device not found"))?;
 
-//     let command = node.request_public_url(&state).await?;
+//     let command = device.request_public_url(&state).await?;
 //     let res = ServerResponse::builder().body(command).ok().build();
 //     Ok(res)
 // }
@@ -206,7 +201,7 @@ async fn get_logs_websocket(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ServerAppResult<String> {
-    let node = claims
+    let device = claims
         .find_one_with_scope_and_role::<DeviceDoc>(
             &state.db.devices(),
             doc! { "_id": ObjectId::parse_str(&id)? },
@@ -215,7 +210,7 @@ async fn get_logs_websocket(
         .await?
         .ok_or_else(|| ServerError::not_found("Device not found"))?;
 
-    let command = node.get_logs_url(None, &state).await?;
+    let command = device.get_logs_url(None, &state).await?;
     let res = ServerResponse::builder().body(command).ok().build();
     Ok(res)
 }
@@ -225,7 +220,7 @@ async fn get_terminal_websocket(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ServerAppResult<String> {
-    let node = claims
+    let device = claims
         .find_one_with_scope_and_role::<DeviceDoc>(
             &state.db.devices(),
             doc! { "_id": ObjectId::parse_str(&id)? },
@@ -234,7 +229,7 @@ async fn get_terminal_websocket(
         .await?
         .ok_or_else(|| ServerError::not_found("Device not found"))?;
 
-    let command = node.get_terminal_url(None, &state).await?;
+    let command = device.get_terminal_url(None, &state).await?;
     let res = ServerResponse::builder().body(command).ok().build();
     Ok(res)
 }
@@ -244,7 +239,7 @@ async fn get_metrics_websocket(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ServerAppResult<String> {
-    let node = claims
+    let device = claims
         .find_one_with_scope_and_role::<DeviceDoc>(
             &state.db.devices(),
             doc! { "_id": ObjectId::parse_str(&id)? },
@@ -253,7 +248,7 @@ async fn get_metrics_websocket(
         .await?
         .ok_or_else(|| ServerError::not_found("Device not found"))?;
 
-    let command = node.get_metrics_url(None, &state).await?;
+    let command = device.get_metrics_url(None, &state).await?;
     let res = ServerResponse::builder().body(command).ok().build();
     Ok(res)
 }

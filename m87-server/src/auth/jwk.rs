@@ -76,10 +76,10 @@ pub async fn validate_token(token: &str, config: &Arc<AppConfig>) -> ServerResul
     Ok(decoded.claims)
 }
 
-pub async fn get_email_from_token(
+pub async fn get_email_and_name_from_token(
     token: &str,
     config: &Arc<AppConfig>,
-) -> ServerResult<Option<String>> {
+) -> ServerResult<(Option<String>, Option<String>)> {
     let issuer = config.oauth.issuer.trim_end_matches('/').to_string();
     let userinfo_url = format!("{}/userinfo", issuer);
 
@@ -102,8 +102,12 @@ pub async fn get_email_from_token(
         .await
         .map_err(|e| ServerError::internal_error(&format!("Failed to parse userinfo: {}", e)))?;
 
-    Ok(json
-        .get("email")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string()))
+    Ok((
+        json.get("email")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        json.get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    ))
 }

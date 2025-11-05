@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+use crate::device::DeviceSystemInfo;
+
 #[derive(Serialize, Deserialize)]
 pub struct DeviceAuthRequestBody {
-    pub device_info: String,
-    pub hostname: String,
+    pub device_info: DeviceSystemInfo,
     pub owner_scope: String,
     pub device_id: String,
 }
@@ -28,6 +29,6 @@ pub struct AuthRequestAction {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceAuthRequest {
     pub request_id: String,
-    pub device_info: String,
+    pub device_info: DeviceSystemInfo,
     pub created_at: String,
 }

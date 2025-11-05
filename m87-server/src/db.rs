@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use crate::{
     models::{
-        device::DeviceDoc, device_auth_request::DeviceAuthRequestDoc, api_key::ApiKeyDoc,
-        roles::RoleDoc, ssh_key::SSHPubKeyDoc,
+        api_key::ApiKeyDoc, device::DeviceDoc, device_auth_request::DeviceAuthRequestDoc,
+        roles::RoleDoc, ssh_key::SSHPubKeyDoc, user::UserDoc,
     },
     response::ServerResult,
 };
@@ -33,6 +33,10 @@ impl Mongo {
 
     pub fn devices(&self) -> Collection<DeviceDoc> {
         self.col("devices")
+    }
+
+    pub fn users(&self) -> Collection<UserDoc> {
+        self.col("users")
     }
 
     pub fn device_auth_requests(&self) -> Collection<DeviceAuthRequestDoc> {
@@ -120,6 +124,11 @@ impl Mongo {
 
         self.api_keys()
             .create_index(IndexModel::builder().keys(doc! { "key_id": 1 }).build())
+            .await?;
+
+        // add index to users sub
+        self.users()
+            .create_index(IndexModel::builder().keys(doc! { "sub": 1 }).build())
             .await?;
         Ok(())
     }

@@ -8,6 +8,7 @@ use crate::device;
 use crate::devices;
 use crate::stack;
 use crate::update;
+use crate::util;
 
 #[derive(Parser)]
 #[command(name = "m87")]
@@ -253,7 +254,9 @@ pub async fn cli() -> anyhow::Result<()> {
                         false => None,
                     },
                 };
-                auth::register_device(owner_ref).await?
+                let config = config::Config::load()?;
+                let sysinfo = util::system_info::get_system_info(config.enable_geo_lookup).await?;
+                auth::register_device(owner_ref, sysinfo).await?
             }
         },
         Commands::Devices(cmd) => match cmd {

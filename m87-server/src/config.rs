@@ -22,6 +22,7 @@ pub struct AppConfig {
     pub forward_secret: String,
     pub is_staging: bool,
     pub admin_emails: Vec<String>,
+    pub users_need_approval: bool,
 }
 
 impl AppConfig {
@@ -60,6 +61,9 @@ impl AppConfig {
             .map(|email| email.trim().to_string())
             .collect();
 
+        let users_need_approval =
+            std::env::var("USERS_NEED_APPROVAL").unwrap_or_else(|_| "false".to_string()) == "true";
+
         Ok(Self {
             mongo_uri,
             mongo_db,
@@ -71,6 +75,7 @@ impl AppConfig {
             forward_secret,
             is_staging,
             admin_emails,
+            users_need_approval,
         })
     }
 }

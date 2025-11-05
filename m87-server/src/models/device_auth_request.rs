@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use m87_shared::device::DeviceSystemInfo;
 use mongodb::bson::{doc, oid::ObjectId, DateTime};
 
 use serde::{Deserialize, Serialize};
@@ -23,11 +24,10 @@ pub struct DeviceAuthRequestDoc {
     /// uuid of the request
     pub request_id: String,
     /// fastfetch string output
-    pub device_info: String,
+    pub device_info: DeviceSystemInfo,
     /// Time when the entry was created
     pub created_at: DateTime,
     pub device_id: String,
-    pub hostname: String,
     pub owner_scope: String,
     pub approved: bool,
 }
@@ -39,10 +39,9 @@ impl DeviceAuthRequestDoc {
             id: None,
             request_id: request_uuid.clone(),
             created_at: DateTime::now(),
-            device_info: body.device_info.to_string(),
+            device_info: body.device_info,
             device_id: body.device_id.to_string(),
             owner_scope: body.owner_scope.to_string(),
-            hostname: body.hostname.to_string(),
             approved: false,
         };
         let _ = db

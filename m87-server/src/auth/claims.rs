@@ -6,13 +6,11 @@ use mongodb::{bson::Document, options::FindOptions, Collection};
 use tracing::info;
 
 use crate::{
-    auth::{
-        access_control::AccessControlled,
-        jwk::{get_email_from_token, validate_token},
-    },
+    auth::access_control::AccessControlled,
     models::{
         api_key::ApiKeyDoc,
         roles::{Role, RoleDoc},
+        user::UserDoc,
     },
     response::{ServerError, ServerResult},
     util::{app_state::AppState, pagination::RequestPagination},
@@ -40,11 +38,13 @@ impl FromRequestParts<AppState> for Claims {
 
         if is_jwt {
             // Handle JWT
-            let claims = validate_token(token, &state.config).await?;
-            // Optional: map claims.sub to roles or user
+            let user = UserDoc::get_or_create(&token, &state.db, &state.config).await?;
 
-            let email = get_email_from_token(token, &state.config).await?;
-            let reference_id = email.unwrap_or(claims.sub);
+            if !user.approved {
+                return Err(ServerError::unauthorized("user not approved"));
+            }
+
+            let reference_id = user.get_reference_id();
             let mut roles = RoleDoc::list_for_reference(&state.db, &reference_id).await?;
             // add user:reference_id role as owner
             info!("reference id: {}", reference_id);

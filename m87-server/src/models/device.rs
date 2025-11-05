@@ -1,9 +1,6 @@
-use std::{
-    hash::{DefaultHasher, Hash, Hasher},
-    sync::Arc,
-};
+use std::sync::Arc;
 
-use mongodb::bson::{doc, oid::ObjectId, Bson, DateTime, Document};
+use mongodb::bson::{doc, oid::ObjectId, DateTime, Document};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,47 +21,13 @@ fn default_stable_version() -> String {
     "latest".to_string()
 }
 
-// Helper functions to convert shared types to Bson (can't use From trait due to orphan rules)
-pub fn device_config_to_bson(config: &DeviceClientConfig) -> Bson {
-    mongodb::bson::to_bson(config).unwrap()
-}
-
-pub fn device_system_info_to_bson(info: &DeviceSystemInfo) -> Bson {
-    mongodb::bson::to_bson(info).unwrap()
-}
-
-// Helper function to hash DeviceSystemInfo (used for caching)
-pub fn hash_device_system_info(info: &DeviceSystemInfo) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    info.hostname.hash(&mut hasher);
-    info.public_ip_address.hash(&mut hasher);
-    info.operating_system.hash(&mut hasher);
-    info.architecture.hash(&mut hasher);
-    if let Some(cores) = &info.cores {
-        cores.hash(&mut hasher);
-    }
-    if let Some(memory) = &info.memory {
-        memory.to_bits().hash(&mut hasher);
-    }
-    if let Some(latitude) = &info.latitude {
-        latitude.to_bits().hash(&mut hasher);
-    }
-    if let Some(longitude) = &info.longitude {
-        longitude.to_bits().hash(&mut hasher);
-    }
-    info.country_code.hash(&mut hasher);
-    info.cpu_name.hash(&mut hasher);
-    info.gpus.hash(&mut hasher);
-    hasher.finish()
-}
-
 #[derive(Deserialize, Serialize, Default)]
 pub struct UpdateDeviceBody {
     pub system_info: Option<DeviceSystemInfo>,
-    pub client_version: Option<String>,
-    pub target_client_version: Option<String>,
+    pub version: Option<String>,
+    pub target_version: Option<String>,
     #[serde(default)]
-    pub client_config: Option<DeviceClientConfig>,
+    pub config: Option<DeviceClientConfig>,
     #[serde(default)]
     pub owner_scope: Option<String>,
     #[serde(default)]
@@ -87,19 +50,16 @@ impl UpdateDeviceBody {
             update_fields.insert("allowed_scopes", allowed_scopes);
         }
 
-        if let Some(client_version) = &self.client_version {
-            update_fields.insert("client_version", client_version);
+        if let Some(version) = &self.version {
+            update_fields.insert("version", version);
         }
 
-        if let Some(target_client_version) = &self.target_client_version {
-            update_fields.insert("target_client_version", target_client_version);
+        if let Some(target_version) = &self.target_version {
+            update_fields.insert("target_version", target_version);
         }
 
-        if let Some(client_config) = &self.client_config {
-            update_fields.insert(
-                "client_config",
-                mongodb::bson::to_bson(client_config).unwrap(),
-            );
+        if let Some(config) = &self.config {
+            update_fields.insert("config", mongodb::bson::to_bson(config).unwrap());
             // Force a compose recheck when config changes
             update_fields.insert("current_compose_hash", mongodb::bson::Bson::Null);
         }
@@ -116,10 +76,11 @@ impl UpdateDeviceBody {
 pub struct CreateDeviceBody {
     pub id: Option<String>,
     pub name: String,
-    pub target_client_version: Option<String>,
+    pub target_version: Option<String>,
     pub owner_scope: String,
     pub allowed_scopes: Vec<String>,
     pub api_key_id: ObjectId,
+    pub system_info: DeviceSystemInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,11 +93,11 @@ pub struct DeviceDoc {
     pub created_at: DateTime,
     pub last_connection: DateTime,
     #[serde(default = "String::new")]
-    pub client_version: String,
+    pub version: String,
     #[serde(default = "default_stable_version")]
-    pub target_client_version: String,
+    pub target_version: String,
     #[serde(default)]
-    pub client_config: DeviceClientConfig,
+    pub config: DeviceClientConfig,
     pub owner_scope: String,
     pub allowed_scopes: Vec<String>,
     pub system_info: DeviceSystemInfo,
@@ -150,7 +111,7 @@ impl DeviceDoc {
             Some(id) => ObjectId::parse_str(&id)?,
             None => ObjectId::new(),
         };
-        let self_scope = format!("node:{}", device_id.to_string());
+        let self_scope = format!("device:{}", device_id.to_string());
         let allowed_scopes = match create_body.allowed_scopes.contains(&self_scope) {
             true => create_body.allowed_scopes,
             false => {
@@ -168,12 +129,14 @@ impl DeviceDoc {
             updated_at: now,
             created_at: now,
             last_connection: now,
-            client_version: "".to_string(),
-            target_client_version: "latest".to_string(),
-            client_config: DeviceClientConfig::default(),
+            version: "".to_string(),
+            target_version: create_body
+                .target_version
+                .unwrap_or(default_stable_version()),
+            config: DeviceClientConfig::default(),
             owner_scope: create_body.owner_scope,
             allowed_scopes,
-            system_info: DeviceSystemInfo::default(),
+            system_info: create_body.system_info,
             instruction_hash: 0,
             api_key_id: create_body.api_key_id,
         };
@@ -242,7 +205,7 @@ impl DeviceDoc {
         allowed_source_ips: Option<Vec<String>>,
         state: &AppState,
     ) -> ServerResult<String> {
-        let port = self.client_config.server_port as u16;
+        let port = self.config.server_port as u16;
         let url = self
             .request_public_url("", port, "https://", allowed_source_ips, state)
             .await?;
@@ -339,35 +302,35 @@ fn short_device_id(device_id: String) -> String {
     short.to_string()
 }
 
-// Helper functions for converting DeviceDoc to PublicDevice (can't use impl due to orphan rules)
-pub fn device_doc_to_public(node: &DeviceDoc) -> PublicDevice {
-    let now_ms = DateTime::now().timestamp_millis();
-    let last_ms = node.last_connection.timestamp_millis();
-    let heartbeat_secs = node
-        .client_config
-        .heartbeat_interval_secs
-        .clone()
-        .unwrap_or(30);
-    // convert u32 to i64
-    let heartbeat_secs = heartbeat_secs as i64;
+impl Into<PublicDevice> for DeviceDoc {
+    fn into(self) -> PublicDevice {
+        let now_ms = DateTime::now().timestamp_millis();
+        let last_ms = self.last_connection.timestamp_millis();
+        let heartbeat_secs = self.config.heartbeat_interval_secs.clone().unwrap_or(30);
+        // convert u32 to i64
+        let heartbeat_secs = heartbeat_secs as i64;
 
-    let online = now_ms - last_ms < 3 * heartbeat_secs * 1000;
-    PublicDevice {
-        id: node.id.unwrap().to_string(),
-        name: node.name.clone(),
-        updated_at: node.updated_at.try_to_rfc3339_string().unwrap(),
-        created_at: node.created_at.try_to_rfc3339_string().unwrap(),
-        last_connection: node.last_connection.try_to_rfc3339_string().unwrap(),
-        online,
-        client_version: node.client_version.clone(),
-        target_client_version: node.target_client_version.clone(),
-        client_config: node.client_config.clone(),
-        system_info: node.system_info.clone(),
+        let online = now_ms - last_ms < 3 * heartbeat_secs * 1000;
+        PublicDevice {
+            id: self.id.unwrap().to_string(),
+            name: self.name.clone(),
+            short_id: self.short_id.clone(),
+            updated_at: self.updated_at.try_to_rfc3339_string().unwrap(),
+            created_at: self.created_at.try_to_rfc3339_string().unwrap(),
+            last_connection: self.last_connection.try_to_rfc3339_string().unwrap(),
+            online,
+            version: self.version.clone(),
+            target_version: self.target_version.clone(),
+            config: self.config.clone(),
+            system_info: self.system_info.clone(),
+        }
     }
 }
 
-pub fn device_docs_to_public(nodes: &Vec<DeviceDoc>) -> Vec<PublicDevice> {
-    nodes.iter().map(device_doc_to_public).collect()
+impl DeviceDoc {
+    pub fn to_public_devices(devices: Vec<DeviceDoc>) -> Vec<PublicDevice> {
+        devices.into_iter().map(|device| device.into()).collect()
+    }
 }
 
 impl AccessControlled for DeviceDoc {

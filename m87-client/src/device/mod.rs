@@ -1,4 +1,4 @@
-mod daemon;
+pub mod daemon;
 pub mod services;
 pub mod system_metrics;
 

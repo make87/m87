@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use m87_shared::device::DeviceSystemInfo;
 use tokio::time::Instant;
 use tracing::info;
 
@@ -8,8 +9,7 @@ use crate::server;
 
 pub struct DeviceAuthRequestHandler {
     pub api_url: String,
-    pub device_info: Option<String>,
-    pub hostname: String,
+    pub device_info: DeviceSystemInfo,
     pub device_id: String,
     pub owner_scope: String,
     pub request_id: Option<String>,
@@ -18,12 +18,8 @@ pub struct DeviceAuthRequestHandler {
 
 impl DeviceAuthRequestHandler {
     pub async fn send_auth_request(&mut self) -> Result<()> {
-        let device_info = self.device_info.as_ref().expect(
-            "Device info not set. This is needed for the user to know which device to authenticate",
-        );
         let body = server::DeviceAuthRequestBody {
-            device_info: device_info.clone(),
-            hostname: self.hostname.clone(),
+            device_info: self.device_info.clone(),
             owner_scope: self.owner_scope.clone(),
             device_id: self.device_id.clone(),
         };

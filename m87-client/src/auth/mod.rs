@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use m87_shared::device::DeviceSystemInfo;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter};
 #[cfg(unix)]
@@ -252,7 +253,10 @@ pub async fn login_cli() -> Result<()> {
     Ok(())
 }
 
-pub async fn register_device(owner_scope: Option<String>) -> Result<()> {
+pub async fn register_device(
+    owner_scope: Option<String>,
+    device_system_info: DeviceSystemInfo,
+) -> Result<()> {
     if AuthManager::has_device_credentials()? {
         info!("Already registered");
         return Ok(());
@@ -273,12 +277,9 @@ pub async fn register_device(owner_scope: Option<String>) -> Result<()> {
     } else {
         format!("org:{}", owner_scope)
     };
-    let node_info = macchina::get_detailed_printout();
-    let host_name = get_host_name()?;
     let mut report_handler = device::DeviceAuthRequestHandler {
         api_url: config.api_url.clone(),
-        device_info: Some(node_info),
-        hostname: host_name.clone(),
+        device_info: device_system_info,
         device_id: config.device_id,
         owner_scope,
         request_id: None,

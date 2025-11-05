@@ -22,7 +22,7 @@ pub use m87_shared::auth::{
     AuthRequestAction, CheckAuthRequest, DeviceAuthRequest, DeviceAuthRequestBody,
     DeviceAuthRequestCheckResponse,
 };
-pub use m87_shared::device::{Device, DeviceSystemInfo, UpdateDeviceBody};
+pub use m87_shared::device::{DeviceSystemInfo, PublicDevice, UpdateDeviceBody};
 pub use m87_shared::heartbeat::{Digests, HeartbeatRequest, HeartbeatResponse};
 
 pub async fn set_auth_request(
@@ -122,7 +122,7 @@ pub async fn list_devices(
     api_url: &str,
     token: &str,
     trust_invalid_server_cert: bool,
-) -> Result<Vec<Device>> {
+) -> Result<Vec<PublicDevice>> {
     let client = get_client(trust_invalid_server_cert)?;
 
     let res = retry_async!(
