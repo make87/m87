@@ -340,7 +340,7 @@ jobs:
           # Publish compose configuration for each tag
           for TAG in $TAGS; do
             echo "Publishing compose configuration: $TAG"
-            docker compose publish --with-env -y --set "*.labels.org.opencontainers.image.source=https://github.com/make87/make87" $TAG
+            docker compose publish --with-env -y $TAG
           done
 
           echo "Docker Compose configurations published successfully"
