@@ -2,6 +2,12 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      use_release_build:
+        description: 'Build Rust with --release flag (disable for faster CI testing)'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -76,7 +82,11 @@ jobs:
 
       - name: Build ${{ matrix.package }} for ${{ matrix.arch }}
         run: |
-          cargo build --release --package ${{ matrix.package }}
+          if [ "${{ github.event.inputs.use_release_build }}" = "true" ]; then
+            cargo build --release --package ${{ matrix.package }}
+          else
+            cargo build --package ${{ matrix.package }}
+          fi
 
       - name: Determine binary name
         id: binary-info
@@ -93,9 +103,16 @@ jobs:
           BINARY_NAME="${{ steps.binary-info.outputs.binary_name }}"
           TARGET="${{ matrix.target }}"
 
+          # Determine build directory based on release flag
+          if [ "${{ github.event.inputs.use_release_build }}" = "true" ]; then
+            BUILD_DIR="release"
+          else
+            BUILD_DIR="debug"
+          fi
+
           # Copy binary to a standardized location
           mkdir -p dist
-          cp target/release/$BINARY_NAME dist/${BINARY_NAME}-${TARGET}
+          cp target/$BUILD_DIR/$BINARY_NAME dist/${BINARY_NAME}-${TARGET}
 
           # Make it executable
           chmod +x dist/${BINARY_NAME}-${TARGET}
@@ -153,6 +170,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ghcr.io/make87/m87-server:${{ needs.read-version.outputs.version }}-${{ matrix.arch }}
+          build-args: |
+            BUILD_MODE=${{ github.event.inputs.use_release_build == 'true' && 'release' || 'debug' }}
           cache-from: type=registry,ref=ghcr.io/make87/m87-server:buildcache-${{ matrix.arch }}
           cache-to: type=registry,ref=ghcr.io/make87/m87-server:buildcache-${{ matrix.arch }},mode=max
 
@@ -308,6 +327,9 @@ jobs:
           done
 
           echo "Docker manifests created and pushed successfully"
+
+      - name: Set up Docker Buildx for compose publish
+        uses: docker/setup-buildx-action@v3
 
       - name: Publish Docker Compose configuration
         working-directory: m87-server
