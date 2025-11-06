@@ -153,6 +153,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ghcr.io/make87/m87-server:${{ needs.read-version.outputs.version }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/make87/make87
           cache-from: type=registry,ref=ghcr.io/make87/m87-server:buildcache-${{ matrix.arch }}
           cache-to: type=registry,ref=ghcr.io/make87/m87-server:buildcache-${{ matrix.arch }},mode=max
 
@@ -308,3 +310,37 @@ jobs:
           done
 
           echo "Docker manifests created and pushed successfully"
+
+      - name: Publish Docker Compose configuration
+        working-directory: m87-server
+        run: |
+          VERSION="${{ needs.read-version.outputs.version }}"
+          IS_HIGHEST="${{ steps.version-compare.outputs.is_highest }}"
+
+          echo "Publishing Docker Compose configuration for version: $VERSION"
+
+          # Base tags that always get created
+          TAGS="ghcr.io/make87/m87-server-compose:$VERSION"
+
+          # Add major.minor tag for stable versions (no suffix)
+          if [[ ! $VERSION == *-* ]]; then
+            MAJOR_MINOR=$(echo $VERSION | cut -d. -f1,2)
+            TAGS="$TAGS ghcr.io/make87/m87-server-compose:$MAJOR_MINOR"
+            echo "Adding major.minor tag: $MAJOR_MINOR"
+          fi
+
+          # Add latest tag only if this is the highest stable version
+          if [[ $IS_HIGHEST == "true" ]]; then
+            TAGS="$TAGS ghcr.io/make87/m87-server-compose:latest"
+            echo "Adding :latest tag"
+          fi
+
+          echo "All compose tags: $TAGS"
+
+          # Publish compose configuration for each tag
+          for TAG in $TAGS; do
+            echo "Publishing compose configuration: $TAG"
+            docker compose publish --with-env -y $TAG
+          done
+
+          echo "Docker Compose configurations published successfully"
