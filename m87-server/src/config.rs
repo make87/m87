@@ -23,6 +23,8 @@ pub struct AppConfig {
     pub is_staging: bool,
     pub admin_emails: Vec<String>,
     pub users_need_approval: bool,
+    pub certificate_path: String,
+    pub acme_acc_prv_pem_key: Option<String>,
 }
 
 impl AppConfig {
@@ -64,6 +66,11 @@ impl AppConfig {
         let users_need_approval =
             std::env::var("USERS_NEED_APPROVAL").unwrap_or_else(|_| "false".to_string()) == "true";
 
+        let certificate_path =
+            std::env::var("CERTIFICATE_PATH").unwrap_or_else(|_| "/data/m87/certs/".to_string());
+
+        let acme_acc_prv_pem_key = std::env::var("ACME_ACC_PRV_PEM_KEY").ok();
+
         Ok(Self {
             mongo_uri,
             mongo_db,
@@ -76,6 +83,8 @@ impl AppConfig {
             is_staging,
             admin_emails,
             users_need_approval,
+            certificate_path,
+            acme_acc_prv_pem_key,
         })
     }
 }

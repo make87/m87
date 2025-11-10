@@ -23,6 +23,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct Claims {
     pub roles: Vec<RoleDoc>,
+    pub is_admin: bool,
 }
 
 impl FromRequestParts<AppState> for Claims {
@@ -69,12 +70,20 @@ impl Claims {
                 role: Role::Owner,
                 created_at: None,
             });
-            Ok(Self { roles })
+
+            let is_admin = match user.email {
+                Some(email) => config.admin_emails.contains(&email),
+                None => false,
+            };
+            Ok(Self { roles, is_admin })
         } else {
             // Handle API key
             let key_doc = ApiKeyDoc::find_and_validate_key(db, token).await?;
             let roles = RoleDoc::list_for_reference(db, &key_doc.key_id).await?;
-            Ok(Self { roles })
+            Ok(Self {
+                roles,
+                is_admin: false,
+            })
         }
     }
 
