@@ -85,7 +85,27 @@ pub async fn serve(
     };
     // create cfg.certificate_path if it does not exist
     std::fs::create_dir_all(&cfg.certificate_path).expect("failed to create certificate directory");
+    // will load existing or create self signed certificate on firststartup. Below task will pickup getting an offical cert
     let current = Arc::new(ArcSwap::from(Arc::new(create_tls_config(&cfg).await?)));
+
+    // --- background renewal & reload task ---
+    let current_clone = current.clone();
+    let cfg_clone = cfg.clone();
+    tokio::spawn(async move {
+        loop {
+            if !cfg_clone.is_staging {
+                if let Err(e) = maybe_renew_wildcard(&cfg_clone).await {
+                    warn!("renewal failed: {e:?}");
+                }
+            }
+            // Reload whatever is on disk or freshly renewed
+            if let Ok(new) = create_tls_config(&cfg_clone).await {
+                current_clone.store(Arc::new(new));
+                info!("reloaded TLS certs");
+            }
+            sleep(Duration::from_secs(12 * 3600)).await;
+        }
+    });
 
     // ===== REST on loopback =====
     let cors = CorsLayer::new()
@@ -106,17 +126,6 @@ pub async fn serve(
         .nest("/device", device::create_route())
         .nest("/admin", admin_route)
         .route("/status", get(get_status))
-        // .route(
-        //     "/reload_cert",
-        //     post(|_| async move {
-        //         let config = maybe_renew_wildcard(&cfg).await?;
-        //         if let Ok(new) = create_tls_config(&cfg).await {
-        //             current_clone.store(Arc::new(new));
-        //             info!("reloaded TLS certs");
-        //         }
-        //         Ok::<_, Error>(Response::new(Body::empty()))
-        //     }),
-        // )
         .with_state(state.clone())
         .layer(cors)
         .layer(SetSensitiveHeadersLayer::new(std::iter::once(
@@ -139,7 +148,7 @@ pub async fn serve(
 
     // === TLS (ACME or self-signed) ===
     // Don't spawn here — serve_tls_or_selfsigned already does internal spawns.
-    serve_tls_or_selfsigned(cfg.clone(), state.clone(), relay.clone(), current.clone()).await?;
+    serve_tls_or_selfsigned(cfg.clone(), state.clone(), current.clone()).await?;
 
     // === Wait for REST task forever ===
     let _ = rest_task.await;
@@ -149,35 +158,12 @@ pub async fn serve(
 pub async fn serve_tls_or_selfsigned(
     cfg: Arc<AppConfig>,
     state: AppState,
-    relay: Arc<RelayState>,
     current: Arc<ArcSwap<ServerConfig>>,
 ) -> ServerResult<()> {
     let tcp = TcpListener::bind(("0.0.0.0", cfg.unified_port))
         .await
         .expect("bind TLS");
     let mut incoming = TcpListenerStream::new(tcp);
-
-    // Holder for live TLS config
-    let acceptor = TlsAcceptor::from(current.load_full());
-
-    // --- background renewal & reload task ---
-    let current_clone = current.clone();
-    let cfg_clone = cfg.clone();
-    tokio::spawn(async move {
-        loop {
-            if !cfg_clone.is_staging {
-                if let Err(e) = maybe_renew_wildcard(&cfg_clone).await {
-                    warn!("renewal failed: {e:?}");
-                }
-            }
-            // Reload whatever is on disk or freshly renewed
-            if let Ok(new) = create_tls_config(&cfg_clone).await {
-                current_clone.store(Arc::new(new));
-                info!("reloaded TLS certs");
-            }
-            sleep(Duration::from_secs(12 * 3600)).await;
-        }
-    });
 
     // --- accept incoming connections ---
     tokio::spawn(async move {
@@ -186,7 +172,7 @@ pub async fn serve_tls_or_selfsigned(
             let state = state.clone();
             tokio::spawn(async move {
                 match acceptor.accept(stream).await {
-                    Ok(mut tls) => {
+                    Ok(tls) => {
                         let sni = tls.get_ref().1.server_name().unwrap_or("").to_string();
                         let _ = handle_sni(&sni, tls, &state).await;
                     }

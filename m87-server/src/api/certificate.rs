@@ -58,6 +58,12 @@ pub async fn create_tls_config(cfg: &AppConfig) -> ServerResult<ServerConfig> {
     let fullchain = format!("{}/fullchain.pem", certs_dir);
     let privkey = format!("{}/privkey.pem", certs_dir);
 
+    // fallback if missing
+    if !Path::new(&fullchain).exists() || !Path::new(&privkey).exists() {
+        warn!("No TLS certs found, generating temporary self-signed certificate");
+        return create_selfsigned_config(cfg);
+    }
+
     let cert_bytes = fs::read(&fullchain)
         .await
         .map_err(|e| ServerError::internal_error(&format!("read cert: {e:?}")))?;
@@ -88,6 +94,24 @@ pub async fn create_tls_config(cfg: &AppConfig) -> ServerResult<ServerConfig> {
         .map_err(|e| ServerError::internal_error(&format!("{e}")))?;
 
     Ok(config)
+}
+
+pub fn create_selfsigned_config(cfg: &AppConfig) -> ServerResult<ServerConfig> {
+    use rcgen::generate_simple_self_signed;
+    let ck = generate_simple_self_signed(vec![cfg.public_address.clone()])
+        .map_err(|e| ServerError::internal_error(&format!("selfsigned: {e}")))?;
+    let cert_der = rustls::pki_types::CertificateDer::from(ck.cert.der().to_vec());
+    let key_bytes = ck.signing_key.serialize_der();
+    let key_der = rustls::pki_types::PrivateKeyDer::from(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(key_bytes),
+    );
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    Ok(ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .map_err(|e| ServerError::internal_error(&format!("{e}")))?)
 }
 
 pub async fn maybe_renew_wildcard(cfg: &AppConfig) -> ServerResult<()> {
@@ -126,6 +150,7 @@ pub async fn inner_acme_renew(cfg: &AppConfig) -> ServerResult<()> {
             }
         }
     }
+    info!("Renewing certificate via ACME");
 
     // === ACME DNS-01 issuance ===
     const LETS_ENCRYPT_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
