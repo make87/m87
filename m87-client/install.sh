@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
 # make87 installer script
@@ -6,8 +6,8 @@ set -e
 # This script installs the m87 client binary to /usr/local/bin
 #
 # Usage:
-#   curl -fsSL https://github.com/make87/make87/releases/download/v0.0.1/install.sh | bash
-#   curl -fsSL get.make87.com/v0.0.1 | bash
+#   curl -fsSL https://github.com/make87/make87/releases/download/v0.0.1/install-client.sh | sh
+#   curl -fsSL get.make87.com/v0.0.1 | sh
 #
 # What it does:
 #   - Detects OS (Linux) and architecture (x86_64/aarch64)
@@ -31,19 +31,19 @@ VERSION="__VERSION__"
 
 # Helper functions
 info() {
-    echo -e "${BLUE}==>${NC} $1"
+    printf "${BLUE}==>${NC} %s\n" "$1"
 }
 
 success() {
-    echo -e "${GREEN}✓${NC} $1"
+    printf "${GREEN}✓${NC} %s\n" "$1"
 }
 
 error() {
-    echo -e "${RED}✗ Error:${NC} $1" >&2
+    printf "${RED}✗ Error:${NC} %s\n" "$1" >&2
 }
 
 warning() {
-    echo -e "${YELLOW}⚠ Warning:${NC} $1"
+    printf "${YELLOW}⚠ Warning:${NC} %s\n" "$1"
 }
 
 # Detect OS
@@ -85,20 +85,20 @@ detect_arch() {
 
 # Check for required tools
 check_dependencies() {
-    local missing_deps=()
+    missing_deps=""
 
     # Check for download tool
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-        missing_deps+=("curl or wget")
+        missing_deps="${missing_deps} curl or wget"
     fi
 
     # Check for checksum tool
     if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
-        missing_deps+=("sha256sum or shasum")
+        missing_deps="${missing_deps} sha256sum or shasum"
     fi
 
-    if [ ${#missing_deps[@]} -ne 0 ]; then
-        error "Missing required dependencies: ${missing_deps[*]}"
+    if [ -n "$missing_deps" ]; then
+        error "Missing required dependencies:$missing_deps"
         error "Please install them and try again"
         exit 1
     fi
@@ -106,8 +106,8 @@ check_dependencies() {
 
 # Download file with progress
 download() {
-    local url="$1"
-    local output="$2"
+    url="$1"
+    output="$2"
 
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL --progress-bar "$url" -o "$output"
@@ -121,9 +121,9 @@ download() {
 
 # Verify SHA256 checksum
 verify_checksum() {
-    local file="$1"
-    local expected_checksum="$2"
-    local actual_checksum
+    file="$1"
+    expected_checksum="$2"
+    actual_checksum=""
 
     if command -v sha256sum >/dev/null 2>&1; then
         actual_checksum=$(sha256sum "$file" | awk '{print $1}')
@@ -155,8 +155,8 @@ needs_sudo() {
 
 # Install binary
 install_binary() {
-    local src="$1"
-    local dest="$INSTALL_DIR/$BINARY_NAME"
+    src="$1"
+    dest="$INSTALL_DIR/$BINARY_NAME"
 
     if needs_sudo; then
         info "Installing to $dest (requires sudo)"
@@ -193,14 +193,13 @@ main() {
 
     info "Installing version: v$VERSION"
 
-    local tmp_dir
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' EXIT
 
     # Step 3: Download binary
-    local binary_name="${BINARY_NAME}-${TARGET}"
-    local download_url="https://github.com/$GITHUB_REPO/releases/download/v${VERSION}/${binary_name}"
-    local binary_path="$tmp_dir/$binary_name"
+    binary_name="${BINARY_NAME}-${TARGET}"
+    download_url="https://github.com/$GITHUB_REPO/releases/download/v${VERSION}/${binary_name}"
+    binary_path="$tmp_dir/$binary_name"
 
     info "Downloading $binary_name..."
     download "$download_url" "$binary_path"
@@ -208,11 +207,10 @@ main() {
 
     # Step 4: Download and verify checksum
     info "Verifying checksum..."
-    local checksums_url="https://github.com/$GITHUB_REPO/releases/download/v${VERSION}/SHA256SUMS"
-    local checksums_file="$tmp_dir/SHA256SUMS"
+    checksums_url="https://github.com/$GITHUB_REPO/releases/download/v${VERSION}/SHA256SUMS"
+    checksums_file="$tmp_dir/SHA256SUMS"
 
     if download "$checksums_url" "$checksums_file" 2>/dev/null; then
-        local expected_checksum
         expected_checksum=$(grep "$binary_name" "$checksums_file" | awk '{print $1}')
 
         if [ -n "$expected_checksum" ]; then
@@ -230,7 +228,6 @@ main() {
     # Step 6: Verify installation
     info "Verifying installation..."
     if command -v "$BINARY_NAME" >/dev/null 2>&1; then
-        local installed_version
         installed_version=$("$BINARY_NAME" --version 2>/dev/null || echo "unknown")
         success "Installation verified: $installed_version"
     else

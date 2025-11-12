@@ -180,18 +180,18 @@ jobs:
       - name: Add install script to release
         run: |
           # install.sh already has the correct version from the version-update workflow
-          cp install.sh release-assets/
-          chmod +x release-assets/install.sh
-          echo "Added install.sh to release assets"
+          cp m87-client/install.sh release-assets/install-client.sh
+          chmod +x release-assets/install-client.sh
+          echo "Added install-client.sh to release assets"
           # Verify the version is set correctly
-          grep "^VERSION=" release-assets/install.sh
-          ls -lh release-assets/install.sh
+          grep "^VERSION=" release-assets/install-client.sh
+          ls -lh release-assets/install-client.sh
 
       - name: Generate checksums
         run: |
           cd release-assets
           # Generate SHA256 checksums for all files (SHA256SUMS will be created after, so it won't include itself)
-          sha256sum m87-* install.sh > SHA256SUMS
+          sha256sum m87-* install-client.sh > SHA256SUMS
           echo "Generated checksums:"
           cat SHA256SUMS
 
