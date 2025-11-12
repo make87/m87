@@ -1,4 +1,4 @@
-use anyhow::Ok;
+use anyhow::{bail, Ok};
 use clap::{Parser, Subcommand};
 
 use crate::app;
@@ -20,297 +20,418 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Local device management commands
-    #[command(subcommand)]
-    Device(DeviceCommands),
+    /// Login and authenticate this device
+    Login {
+        /// Configure device as agent (can be managed remotely)
+        #[arg(long)]
+        agent: bool,
 
-    /// Remote devices management commands
+        /// Configure device as manager (can manage other devices)
+        #[arg(long)]
+        manager: bool,
+    },
+
+    /// Logout and deauthenticate this device
+    Logout {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Manage local agent service
+    #[command(subcommand)]
+    Agent(AgentCommands),
+
+    /// Manage devices and groups
     #[command(subcommand)]
     Devices(DevicesCommands),
 
-    /// Application management commands
+    /// Manage active port tunnels
     #[command(subcommand)]
-    App(AppCommands),
+    Tunnels(TunnelsCommands),
 
-    /// Stack management commands
-    #[command(subcommand)]
-    Stack(StackCommands),
-
-    /// Update the m87 CLI to the latest version
-    Update,
-
-    /// Command to manage server and authenticate agianst it
-    #[command(subcommand)]
-    Server(ServerCommands),
-
-    /// Show version information
+    /// Show CLI version information
     Version,
+
+    /// Update the CLI to the latest version
+    Update {
+        /// Update to specific version
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Remote device commands (device-first syntax)
+    #[command(external_subcommand)]
+    Device(Vec<String>),
 }
 
 #[derive(Subcommand)]
-enum ConfigCommands {
-    /// Clear all config from the system
-    Clear,
+enum AgentCommands {
+    /// Start the agent service now (does not persist across reboots)
+    Start,
+
+    /// Stop the agent service now (does not change auto-start configuration)
+    Stop,
+
+    /// Restart the agent service
+    Restart,
+
+    /// Configure service to auto-start on boot (does not start now)
+    Enable {
+        /// Enable AND start service immediately
+        #[arg(long)]
+        now: bool,
+    },
+
+    /// Remove auto-start on boot (does not stop running service)
+    Disable {
+        /// Disable AND stop service immediately
+        #[arg(long)]
+        now: bool,
+    },
+
+    /// Show local agent service status and configuration
+    Status,
 }
 
 #[derive(Subcommand)]
 enum DevicesCommands {
-    /// List all devices
-    List,
+    /// List all accessible devices
+    List {
+        /// Filter by status (online, offline, pending, all)
+        #[arg(long)]
+        status: Option<String>,
+    },
 
-    /// SSH commands
-    #[command(subcommand)]
-    Ssh(SSHCommands),
+    /// Show detailed information about a specific device
+    Show {
+        /// Device name or ID
+        device: String,
+    },
 
-    Metrics {
-        #[arg(short, long)]
-        id: String,
+    /// Approve a pending device to join the organization
+    Approve {
+        /// Device name or ID
+        device: String,
+
+        /// Add device to groups on approval
+        #[arg(long)]
+        groups: Option<String>,
+    },
+
+    /// Reject a pending device registration
+    Reject {
+        /// Device name or ID
+        device: String,
+
+        /// Optional reason for rejection (for audit logs)
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
-enum SSHCommands {
-    /// Connect to a device via SSH
-    Connect {
-        #[arg(short, long)]
-        id: String,
+enum TunnelsCommands {
+    /// List all active tunnels
+    List {
+        /// Filter by device name
+        device: Option<String>,
+
+        /// Filter by device name (alternative syntax)
+        #[arg(long)]
+        device_flag: Option<String>,
     },
 
-    Url {
-        #[arg(short, long)]
-        id: String,
+    /// Close an active tunnel
+    Close {
+        /// Tunnel ID to close
+        id: Option<String>,
+
+        /// Close all tunnels to specific device
+        #[arg(long)]
+        device: Option<String>,
     },
 }
 
+// Remote device command enums
 #[derive(Subcommand)]
-enum DeviceCommands {
-    /// Run the device daemon
-    Run {
-        #[arg(short, long)]
-        user_email: Option<String>,
-        #[arg(short, long)]
-        organization_id: Option<String>,
-    },
-
-    /// Install the device as a system service
-    Install {
-        #[arg(short, long)]
-        user_email: Option<String>,
-        #[arg(short, long)]
-        organization_id: Option<String>,
-    },
-
-    /// Uninstall the device service
-    Uninstall,
-
-    /// Check device status
-    Status,
-    /// Get credentials for the device
-    Register {
-        #[arg(short, long)]
-        user_email: Option<String>,
-        #[arg(short, long)]
-        organization_id: Option<String>,
-    },
-    /// Remove the credentials for the device
-    Unregister,
-
-    /// Configuration management commands
-    #[command(subcommand)]
-    Config(ConfigCommands),
-}
-
-#[derive(Subcommand)]
-enum AppCommands {
-    /// Build an application
-    Build {
-        /// Path to the application directory
-        #[arg(default_value = ".")]
-        path: String,
-    },
-
-    /// Push an application to the registry
-    Push {
-        /// Application name
-        name: String,
-
-        /// Application version
-        #[arg(short, long)]
-        version: Option<String>,
-    },
-
-    /// Run an application
-    Run {
-        /// Application name
-        name: String,
-
-        /// Additional arguments to pass to the application
+enum RemoteDeviceCommands {
+    /// Open interactive SSH session to device
+    Ssh {
+        /// Command to execute (optional)
         #[arg(last = true)]
+        command: Vec<String>,
+    },
+
+    /// Create port tunnel from remote device to local machine
+    Tunnel {
+        /// Port mapping (remote:local)
+        ports: String,
+
+        /// Run tunnel in background (ephemeral)
+        #[arg(short, long)]
+        background: bool,
+
+        /// Create persistent tunnel that survives reboots
+        #[arg(long)]
+        persist: bool,
+
+        /// Assign name to tunnel for easier management
+        #[arg(long)]
+        name: Option<String>,
+
+        /// List active tunnels for this device
+        #[command(subcommand)]
+        subcommand: Option<TunnelSubCommands>,
+    },
+
+    /// Sync files from local device to remote device
+    Sync {
+        /// Local path
+        local_path: String,
+
+        /// Remote path
+        remote_path: String,
+
+        /// Continuous sync on file changes
+        #[arg(short, long)]
+        watch: bool,
+
+        /// Exclude patterns (can be repeated)
+        #[arg(long)]
+        exclude: Vec<String>,
+
+        /// Delete remote files not in local
+        #[arg(long)]
+        delete: bool,
+
+        /// Show what would be synced without doing it
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Copy file from local to remote (one-time, scp-like)
+    Copy {
+        /// Local path
+        local_path: String,
+
+        /// Remote path
+        remote_path: String,
+    },
+
+    /// List files and directories on remote device
+    Ls {
+        /// Arguments to pass to ls command
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
-}
 
-#[derive(Subcommand)]
-enum StackCommands {
-    /// Pull a stack configuration
-    Pull {
-        /// Stack name
-        name: String,
+    /// Run docker commands on remote device with local context
+    Docker {
+        /// Docker command arguments
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<String>,
     },
 
-    /// Watch for stack changes
-    Watch {
-        /// Stack name
-        name: String,
+    /// Stream logs from device
+    Logs {
+        /// Container name (optional)
+        container: Option<String>,
+
+        /// Stream logs in real-time
+        #[arg(short, long)]
+        follow: bool,
+
+        /// Show logs since duration (e.g., 1h, 30m, 2d)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Show last n lines
+        #[arg(long, default_value = "100")]
+        tail: usize,
+
+        /// Show timestamps
+        #[arg(long)]
+        timestamps: bool,
+    },
+
+    /// Show resource usage statistics
+    Stats {
+        /// Continuous updates (like top)
+        #[arg(short, long)]
+        watch: bool,
+
+        /// Update interval for watch mode
+        #[arg(long, default_value = "2s")]
+        interval: String,
+    },
+
+    /// Execute arbitrary command on remote device
+    Cmd {
+        /// Allocate PTY for interactive commands
+        #[arg(short, long)]
+        interactive: bool,
+
+        /// Command to execute (after --)
+        #[arg(last = true)]
+        command: Vec<String>,
     },
 }
 
 #[derive(Subcommand)]
-enum ServerCommands {
-    /// Log in to the platform
-    Login,
-
-    /// Check authentication status
-    Status,
-
-    /// Log out of the platform
-    Logout,
-
-    /// Manage authentication requests to the server
-    #[command(subcommand)]
-    Requests(AuthRequestCommands),
-}
-
-#[derive(Subcommand)]
-enum AuthRequestCommands {
-    /// Request a control tunnel token
+enum TunnelSubCommands {
+    /// List active tunnels for this device
     List,
-    /// Accept a control tunnel token request
-    Accept {
-        /// the id of the request
+
+    /// Close tunnel(s) for this device
+    Close {
+        /// Tunnel ID to close
+        id: Option<String>,
+
+        /// Close all tunnels
         #[arg(long)]
-        request_id: String,
-    },
-    /// Reject a control tunnel token request
-    Reject {
-        /// the id of the request
-        #[arg(long)]
-        request_id: String,
+        all: bool,
     },
 }
 
 pub async fn cli() -> anyhow::Result<()> {
-    // Initialize tracing
-    // fmt()
-    //     .with_env_filter(
-    //         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-    //     )
-    //     .init();
-
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Device(cmd) => match cmd {
-            DeviceCommands::Config(cmd) => match cmd {
-                ConfigCommands::Clear => config::Config::clear()?,
-            },
-            DeviceCommands::Run {
-                user_email,
-                organization_id,
-            } => {
-                let owner_ref = match user_email.is_some() {
-                    true => user_email,
-                    false => match organization_id.is_some() {
-                        true => organization_id,
-                        false => None,
-                    },
-                };
-                device::run(owner_ref).await?
-            }
-            DeviceCommands::Install {
-                user_email,
-                organization_id,
-            } => {
-                let owner_ref = match user_email.is_some() {
-                    true => user_email,
-                    false => match organization_id.is_some() {
-                        true => organization_id,
-                        false => None,
-                    },
-                };
-                device::install(owner_ref).await?
-            }
-            DeviceCommands::Uninstall => device::uninstall().await?,
-            DeviceCommands::Status => device::status().await?,
-            DeviceCommands::Unregister => auth::logout_device().await?,
-            DeviceCommands::Register {
-                user_email,
-                organization_id,
-            } => {
-                let owner_ref = match user_email.is_some() {
-                    true => user_email,
-                    false => match organization_id.is_some() {
-                        true => organization_id,
-                        false => None,
-                    },
-                };
-                let config = config::Config::load()?;
-                let sysinfo = util::system_info::get_system_info(config.enable_geo_lookup).await?;
-                auth::register_device(owner_ref, sysinfo).await?
-            }
-        },
-        Commands::Devices(cmd) => match cmd {
-            DevicesCommands::List => {
-                let devices = devices::list_devices().await?;
-                println!("{:?}", devices);
-                Ok(())
-            }
-            DevicesCommands::Metrics { id } => devices::metrics(&id).await,
-            DevicesCommands::Ssh(cmd) => match cmd {
-                SSHCommands::Connect { id } => Ok(()),
-                SSHCommands::Url { id } => Ok(()),
-            },
-        }?,
-        Commands::App(cmd) => match cmd {
-            AppCommands::Build { path } => app::build(&path).await?,
-            AppCommands::Push { name, version } => app::push(&name, version.as_deref()).await?,
-            AppCommands::Run { name, args } => app::run(&name, &args).await?,
-        },
-        Commands::Stack(cmd) => match cmd {
-            StackCommands::Pull { name } => stack::pull(&name).await?,
-            StackCommands::Watch { name } => stack::watch(&name).await?,
-        },
-        Commands::Update => {
-            let success = update::update(true).await?;
-            if success {
-                println!("Update successful");
-            } else {
-                println!("Update failed");
-            }
+        Commands::Login { agent, manager } => {
+            // Stub: Not implemented
+            bail!("Command 'login' is not yet implemented");
         }
-        Commands::Server(cmd) => match cmd {
-            ServerCommands::Login => {
-                // Inline the previous backend::auth wrapper behavior and call the auth manager directly.
-                auth::login_cli().await?
+
+        Commands::Logout { force } => {
+            // Stub: Not implemented
+            bail!("Command 'logout' is not yet implemented");
+        }
+
+        Commands::Agent(cmd) => match cmd {
+            AgentCommands::Start => {
+                // Stub: Not implemented
+                bail!("Command 'agent start' is not yet implemented");
             }
-            ServerCommands::Status => auth::status().await?,
-            ServerCommands::Logout => auth::logout_cli().await?,
-            ServerCommands::Requests(cmd) => match cmd {
-                AuthRequestCommands::List => {
-                    let requests = auth::list_auth_requests().await?;
-                    println!("{:?}", requests);
-                    Ok(())
-                }
-                AuthRequestCommands::Accept { request_id } => {
-                    auth::accept_auth_request(&request_id).await
-                }
-                AuthRequestCommands::Reject { request_id } => {
-                    auth::reject_auth_request(&request_id).await
-                }
-            }?,
+            AgentCommands::Stop => {
+                // Stub: Not implemented
+                bail!("Command 'agent stop' is not yet implemented");
+            }
+            AgentCommands::Restart => {
+                // Stub: Not implemented
+                bail!("Command 'agent restart' is not yet implemented");
+            }
+            AgentCommands::Enable { now } => {
+                // Stub: Not implemented
+                bail!("Command 'agent enable' is not yet implemented");
+            }
+            AgentCommands::Disable { now } => {
+                // Stub: Not implemented
+                bail!("Command 'agent disable' is not yet implemented");
+            }
+            AgentCommands::Status => {
+                // Stub: Not implemented
+                bail!("Command 'agent status' is not yet implemented");
+            }
         },
+
+        Commands::Devices(cmd) => match cmd {
+            DevicesCommands::List { status } => {
+                // Stub: Not implemented
+                bail!("Command 'devices list' is not yet implemented");
+            }
+            DevicesCommands::Show { device } => {
+                // Stub: Not implemented
+                bail!("Command 'devices show' is not yet implemented");
+            }
+            DevicesCommands::Approve { device, groups } => {
+                // Stub: Not implemented
+                bail!("Command 'devices approve' is not yet implemented");
+            }
+            DevicesCommands::Reject { device, reason } => {
+                // Stub: Not implemented
+                bail!("Command 'devices reject' is not yet implemented");
+            }
+        },
+
+        Commands::Tunnels(cmd) => match cmd {
+            TunnelsCommands::List { device, device_flag } => {
+                // Stub: Not implemented
+                bail!("Command 'tunnels list' is not yet implemented");
+            }
+            TunnelsCommands::Close { id, device } => {
+                // Stub: Not implemented
+                bail!("Command 'tunnels close' is not yet implemented");
+            }
+        },
+
         Commands::Version => {
-            println!("m87 version {}", env!("CARGO_PKG_VERSION"));
+            println!("m87 CLI v{}", env!("CARGO_PKG_VERSION"));
+            println!("Build: {}", env!("CARGO_PKG_VERSION"));
+            // TODO: Add more version info (Go version, platform, etc.)
+        }
+
+        Commands::Update { version } => {
+            // Stub: Not implemented
+            bail!("Command 'update' is not yet implemented");
+        }
+
+        Commands::Device(args) => {
+            // This handles the device-first syntax: m87 <device> <command> [args...]
+            if args.is_empty() {
+                bail!("Device name required. Usage: m87 <device> <command> [args...]");
+            }
+
+            let device_name = &args[0];
+
+            if args.len() < 2 {
+                bail!("Command required. Usage: m87 {} <command> [args...]", device_name);
+            }
+
+            let command = &args[1];
+            let remaining_args = &args[2..];
+
+            match command.as_str() {
+                "ssh" => {
+                    // Stub: Not implemented
+                    bail!("Command 'ssh' is not yet implemented for device '{}'", device_name);
+                }
+                "tunnel" => {
+                    // Stub: Not implemented
+                    bail!("Command 'tunnel' is not yet implemented for device '{}'", device_name);
+                }
+                "sync" => {
+                    // Stub: Not implemented
+                    bail!("Command 'sync' is not yet implemented for device '{}'", device_name);
+                }
+                "copy" => {
+                    // Stub: Not implemented
+                    bail!("Command 'copy' is not yet implemented for device '{}'", device_name);
+                }
+                "ls" => {
+                    // Stub: Not implemented
+                    bail!("Command 'ls' is not yet implemented for device '{}'", device_name);
+                }
+                "docker" => {
+                    // Stub: Not implemented
+                    bail!("Command 'docker' is not yet implemented for device '{}'", device_name);
+                }
+                "logs" => {
+                    // Stub: Not implemented
+                    bail!("Command 'logs' is not yet implemented for device '{}'", device_name);
+                }
+                "stats" => {
+                    // Stub: Not implemented
+                    bail!("Command 'stats' is not yet implemented for device '{}'", device_name);
+                }
+                "cmd" => {
+                    // Stub: Not implemented
+                    bail!("Command 'cmd' is not yet implemented for device '{}'", device_name);
+                }
+                _ => {
+                    bail!("Unknown command '{}' for device '{}'. Use 'm87 --help' for available commands", command, device_name);
+                }
+            }
         }
     }
 
