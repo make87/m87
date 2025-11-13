@@ -66,9 +66,9 @@ jobs:
       - name: Update version in install.sh
         run: |
           VERSION="${{ steps.extract-version.outputs.version }}"
-          sed -i "s/^VERSION=\"__VERSION__\"/VERSION=\"$VERSION\"/" install.sh
-          echo "Updated install.sh to version $VERSION"
-          grep "^VERSION=" install.sh
+          sed -i "s/^VERSION=\"__VERSION__\"/VERSION=\"$VERSION\"/" m87-client/install.sh
+          echo "Updated m87-client/install.sh to version $VERSION"
+          grep "^VERSION=" m87-client/install.sh
 
       - name: Update Docker image tag in docker-compose.yml
         run: |
@@ -86,6 +86,6 @@ jobs:
           VERSION="${{ steps.extract-version.outputs.version }}"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add m87-client/Cargo.toml m87-server/Cargo.toml m87-shared/Cargo.toml tests/Cargo.toml install.sh m87-server/docker-compose.yml Cargo.lock
+          git add m87-client/Cargo.toml m87-server/Cargo.toml m87-shared/Cargo.toml tests/Cargo.toml m87-client/install.sh m87-server/docker-compose.yml Cargo.lock
           git commit -m "chore: bump version to $VERSION" || echo "No changes to commit"
           git push || echo "No changes to push"
