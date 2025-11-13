@@ -1,6 +1,37 @@
 use anyhow::bail;
 use clap::{Parser, Subcommand};
 
+/// Represents a parsed device path (either local or remote)
+struct DevicePath {
+    device: Option<String>,  // None = local, Some(name) = remote
+    path: String,
+}
+
+/// Parse a path string into DevicePath, detecting device:path syntax
+fn parse_device_path(input: &str) -> DevicePath {
+    // Check for device:path pattern
+    if let Some(colon_pos) = input.find(':') {
+        // Handle Windows drive letters (e.g., C:\path)
+        // If it's a single char followed by colon and backslash, treat as local Windows path
+        if colon_pos == 1 && input.len() > 2 && &input[2..3] == "\\" {
+            DevicePath {
+                device: None,
+                path: input.to_string(),
+            }
+        } else {
+            DevicePath {
+                device: Some(input[..colon_pos].to_string()),
+                path: input[colon_pos + 1..].to_string(),
+            }
+        }
+    } else {
+        DevicePath {
+            device: None,
+            path: input.to_string(),
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "m87")]
 #[command(version, about = "m87 CLI - Unified CLI for the make87 platform", long_about = None)]
@@ -45,6 +76,24 @@ enum Commands {
         /// Update to specific version
         #[arg(long)]
         version: Option<String>,
+    },
+
+    /// Copy files between local and remote devices (SCP-style)
+    Cp {
+        /// Source path (<path> for local, <device>:<path> for remote)
+        source: String,
+
+        /// Destination path (<path> for local, <device>:<path> for remote)
+        dest: String,
+    },
+
+    /// Sync files between local and remote devices (rsync-style)
+    Sync {
+        /// Source path (<path> for local, <device>:<path> for remote)
+        source: String,
+
+        /// Destination path (<path> for local, <device>:<path> for remote)
+        dest: String,
     },
 
     /// Remote device commands (device-first syntax)
@@ -243,12 +292,84 @@ pub async fn cli() -> anyhow::Result<()> {
             bail!("Not implemented");
         }
 
+        Commands::Cp { source, dest } => {
+            handle_cp_command(&source, &dest).await?;
+        }
+
+        Commands::Sync { source, dest } => {
+            handle_sync_command(&source, &dest).await?;
+        }
+
         Commands::Device(args) => {
             handle_device_command(args).await?;
         }
     }
 
     Ok(())
+}
+
+async fn handle_cp_command(source: &str, dest: &str) -> anyhow::Result<()> {
+    let src_path = parse_device_path(source);
+    let dst_path = parse_device_path(dest);
+
+    match (&src_path.device, &dst_path.device) {
+        (None, None) => {
+            bail!("At least one path must specify a device (use <device>:<path> syntax)");
+        }
+        (Some(src_dev), Some(dst_dev)) => {
+            // Remote to remote copy
+            eprintln!("Error: 'cp' command is not yet implemented");
+            eprintln!("Would copy from '{}:{}' to '{}:{}'",
+                     src_dev, src_path.path, dst_dev, dst_path.path);
+            bail!("Not implemented");
+        }
+        (None, Some(dst_dev)) => {
+            // Local to remote copy
+            eprintln!("Error: 'cp' command is not yet implemented");
+            eprintln!("Would copy local '{}' to '{}:{}'",
+                     src_path.path, dst_dev, dst_path.path);
+            bail!("Not implemented");
+        }
+        (Some(src_dev), None) => {
+            // Remote to local copy
+            eprintln!("Error: 'cp' command is not yet implemented");
+            eprintln!("Would copy from '{}:{}' to local '{}'",
+                     src_dev, src_path.path, dst_path.path);
+            bail!("Not implemented");
+        }
+    }
+}
+
+async fn handle_sync_command(source: &str, dest: &str) -> anyhow::Result<()> {
+    let src_path = parse_device_path(source);
+    let dst_path = parse_device_path(dest);
+
+    match (&src_path.device, &dst_path.device) {
+        (None, None) => {
+            bail!("At least one path must specify a device (use <device>:<path> syntax)");
+        }
+        (Some(src_dev), Some(dst_dev)) => {
+            // Remote to remote sync
+            eprintln!("Error: 'sync' command is not yet implemented");
+            eprintln!("Would sync from '{}:{}' to '{}:{}'",
+                     src_dev, src_path.path, dst_dev, dst_path.path);
+            bail!("Not implemented");
+        }
+        (None, Some(dst_dev)) => {
+            // Local to remote sync
+            eprintln!("Error: 'sync' command is not yet implemented");
+            eprintln!("Would sync local '{}' to '{}:{}'",
+                     src_path.path, dst_dev, dst_path.path);
+            bail!("Not implemented");
+        }
+        (Some(src_dev), None) => {
+            // Remote to local sync
+            eprintln!("Error: 'sync' command is not yet implemented");
+            eprintln!("Would sync from '{}:{}' to local '{}'",
+                     src_dev, src_path.path, dst_path.path);
+            bail!("Not implemented");
+        }
+    }
 }
 
 async fn handle_device_command(args: Vec<String>) -> anyhow::Result<()> {
@@ -266,14 +387,12 @@ async fn handle_device_command(args: Vec<String>) -> anyhow::Result<()> {
     let remaining_args = &args[2..];
 
     match command.as_str() {
-        "ssh" => {
-            eprintln!("Error: 'ssh' command is not yet implemented for device '{}'", device_name);
-            if !remaining_args.is_empty() && remaining_args[0] == "--" {
-                let cmd_args = &remaining_args[1..];
-                eprintln!("Would execute SSH command: {:?}", cmd_args.join(" "));
-            } else {
-                eprintln!("Would open interactive SSH session");
+        "shell" => {
+            if !remaining_args.is_empty() {
+                bail!("The shell command does not accept any options or flags");
             }
+            eprintln!("Error: 'shell' command is not yet implemented for device '{}'", device_name);
+            eprintln!("Would open interactive shell session");
             bail!("Not implemented");
         }
 
@@ -319,24 +438,6 @@ async fn handle_device_command(args: Vec<String>) -> anyhow::Result<()> {
             let tunnel_id = &remaining_args[1];
             eprintln!("Error: 'tunnels close' command is not yet implemented for device '{}'", device_name);
             eprintln!("Would close tunnel with ID: {}", tunnel_id);
-            bail!("Not implemented");
-        }
-
-        "sync" => {
-            if remaining_args.len() < 2 {
-                bail!("Usage: m87 {} sync <local-path> <remote-path>", device_name);
-            }
-            eprintln!("Error: 'sync' command is not yet implemented for device '{}'", device_name);
-            eprintln!("Would sync from '{}' to '{}'", remaining_args[0], remaining_args[1]);
-            bail!("Not implemented");
-        }
-
-        "copy" => {
-            if remaining_args.len() < 2 {
-                bail!("Usage: m87 {} copy <local-path> <remote-path>", device_name);
-            }
-            eprintln!("Error: 'copy' command is not yet implemented for device '{}'", device_name);
-            eprintln!("Would copy '{}' to '{}'", remaining_args[0], remaining_args[1]);
             bail!("Not implemented");
         }
 
@@ -414,7 +515,7 @@ async fn handle_device_command(args: Vec<String>) -> anyhow::Result<()> {
         }
 
         _ => {
-            bail!("Unknown command '{}' for device '{}'. Available commands: ssh, tunnel, tunnels, sync, copy, ls, docker, logs, stats, cmd",
+            bail!("Unknown command '{}' for device '{}'. Available commands: shell, tunnel, tunnels, ls, docker, logs, stats, cmd",
                   command, device_name);
         }
     }
