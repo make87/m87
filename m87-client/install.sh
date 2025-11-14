@@ -6,8 +6,8 @@ set -e
 # This script installs the m87 client binary to /usr/local/bin
 #
 # Usage:
-#   curl -fsSL https://github.com/make87/make87/releases/download/v0.0.1/install-client.sh | sh
-#   curl -fsSL get.make87.com/v0.0.1 | sh
+#   curl -fsSL https://github.com/make87/make87/releases/latest/download/install-client.sh | sh
+#   curl -fsSL get.make87.com | sh
 #
 # What it does:
 #   - Detects OS (Linux) and architecture (x86_64/aarch64)
