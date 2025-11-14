@@ -21,57 +21,72 @@ use crate::server::send_heartbeat;
 use crate::util::logging::init_tracing_with_log_layer;
 use crate::util::system_info::get_system_info;
 
-const SERVICE_NAME: &str = "m87-device";
-const SERVICE_FILE: &str = "/etc/systemd/system/m87-device.service";
+const SERVICE_NAME: &str = "m87-agent";
+const SERVICE_FILE: &str = "/etc/systemd/system/m87-agent.service";
 
+/// Internal helper: Install the systemd service file and reload daemon
+/// Not directly callable from CLI - used by other functions when service is missing
 pub async fn install_service() -> Result<()> {
-    let exe_path = std::env::current_exe().context("Unable to resolve binary path")?;
+    let exe_path = std::env::current_exe()?;
+    let username = std::env::var("USER")?;  // Get current user
+
     let service_content = format!(
         "[Unit]
-Description=Device Service for make87
-After=network.target
+Description=m87 Agent Service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart={} device run --headless
-Restart=always
+Type=simple
+ExecStart={} agent run
+Restart=on-failure
 RestartSec=3
-User=root
+User={}
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=30
+StartLimitBurst=5
+StartLimitIntervalSec=30
 Environment=RUST_LOG=info
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
 ",
-        exe_path.display()
+        exe_path.display(),
+        username
     );
 
     std::fs::write(SERVICE_FILE, &service_content)
         .context("Failed to write systemd service file")?;
 
-    Command::new("systemctl").args(["daemon-reload"]).status()?;
-    Command::new("systemctl")
-        .args(["enable", SERVICE_NAME])
-        .status()?;
-    Command::new("systemctl")
-        .args(["start", SERVICE_NAME])
-        .status()?;
+    Command::new("sudo")
+        .args(["systemctl", "daemon-reload"])
+        .status()
+        .context("Failed to reload systemd daemon")?;
 
-    info!("Installed and started systemd service at {}", SERVICE_FILE);
+    info!("Installed systemd service at {}", SERVICE_FILE);
     Ok(())
 }
 
+/// Internal helper: Uninstall the systemd service file
+/// Not directly callable from CLI - used by other functions
 pub async fn uninstall_service() -> Result<()> {
     if Path::new(SERVICE_FILE).exists() {
-        Command::new("systemctl")
-            .args(["stop", SERVICE_NAME])
+        Command::new("sudo")
+            .args(["systemctl", "stop", SERVICE_NAME])
             .status()
             .ok();
-        Command::new("systemctl")
-            .args(["disable", SERVICE_NAME])
+        Command::new("sudo")
+            .args(["systemctl", "disable", SERVICE_NAME])
             .status()
             .ok();
         std::fs::remove_file(SERVICE_FILE).context("Failed to remove service file")?;
-        Command::new("systemctl")
-            .args(["daemon-reload"])
+        Command::new("sudo")
+            .args(["systemctl", "daemon-reload"])
             .status()
             .ok();
         info!("Uninstalled m87 device service");
@@ -82,7 +97,102 @@ pub async fn uninstall_service() -> Result<()> {
     Ok(())
 }
 
-pub async fn status_service() -> Result<()> {
+/// Ensure service file exists, install if missing
+async fn ensure_service_installed() -> Result<()> {
+    if !Path::new(SERVICE_FILE).exists() {
+        info!("Service file not found, installing...");
+        install_service().await?;
+    }
+    Ok(())
+}
+
+/// CLI: m87 agent start
+/// Starts the agent service (auto-installs if service file doesn't exist)
+pub async fn start() -> Result<()> {
+    ensure_service_installed().await?;
+
+    Command::new("sudo")
+        .args(["systemctl", "start", SERVICE_NAME])
+        .status()
+        .context("Failed to start service")?;
+
+    info!("Started m87-agent service");
+    Ok(())
+}
+
+/// CLI: m87 agent stop
+/// Stops the agent service
+pub async fn stop() -> Result<()> {
+    Command::new("sudo")
+        .args(["systemctl", "stop", SERVICE_NAME])
+        .status()
+        .context("Failed to stop service")?;
+
+    info!("Stopped m87-agent service");
+    Ok(())
+}
+
+/// CLI: m87 agent restart
+/// Restarts the agent service (auto-installs if service file doesn't exist)
+pub async fn restart() -> Result<()> {
+    ensure_service_installed().await?;
+
+    Command::new("sudo")
+        .args(["systemctl", "restart", SERVICE_NAME])
+        .status()
+        .context("Failed to restart service")?;
+
+    info!("Restarted m87-agent service");
+    Ok(())
+}
+
+/// CLI: m87 agent enable [--now]
+/// Enables auto-start on boot (auto-installs if service file doesn't exist)
+pub async fn enable(now: bool) -> Result<()> {
+    ensure_service_installed().await?;
+
+    if now {
+        Command::new("sudo")
+            .args(["systemctl", "enable", "--now", SERVICE_NAME])
+            .status()
+            .context("Failed to enable service")?;
+        info!("Enabled and started m87-agent service");
+    } else {
+        Command::new("sudo")
+            .args(["systemctl", "enable", SERVICE_NAME])
+            .status()
+            .context("Failed to enable service")?;
+        info!("Enabled m87-agent service");
+    }
+
+    Ok(())
+}
+
+/// CLI: m87 agent disable [--now]
+/// Disables auto-start on boot
+pub async fn disable(now: bool) -> Result<()> {
+    if now {
+        Command::new("sudo")
+            .args(["systemctl", "disable", "--now", SERVICE_NAME])
+            .status()
+            .context("Failed to disable service")?;
+        info!("Disabled and stopped m87-agent service");
+    } else {
+        Command::new("sudo")
+            .args(["systemctl", "disable", SERVICE_NAME])
+            .status()
+            .context("Failed to disable service")?;
+        info!("Disabled m87-agent service");
+    }
+
+    Ok(())
+}
+
+/// CLI: m87 agent status
+/// Shows service status (auto-installs if service file doesn't exist)
+pub async fn status() -> Result<()> {
+    ensure_service_installed().await?;
+
     let output = Command::new("systemctl")
         .args(["status", SERVICE_NAME])
         .output()

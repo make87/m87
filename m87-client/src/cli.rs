@@ -1,6 +1,13 @@
 use anyhow::bail;
 use clap::{Parser, Subcommand};
 
+use crate::auth;
+use crate::config::Config;
+use crate::device;
+use crate::devices;
+use crate::update;
+use crate::util;
+
 /// Represents a parsed device path (either local or remote)
 struct DevicePath {
     device: Option<String>,  // None = local, Some(name) = remote
@@ -103,6 +110,9 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AgentCommands {
+    /// Run the agent daemon (blocking, used by systemd service)
+    Run,
+
     /// Start the agent service now (does not persist across reboots)
     Start,
 
@@ -187,63 +197,60 @@ pub async fn cli() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Login { agent, manager } => {
-            eprintln!("Error: 'login' command is not yet implemented");
-            eprintln!("Would configure device with roles: agent={}, manager={}", agent, manager);
-            bail!("Not implemented");
+            if !agent && !manager {
+                bail!("Please specify at least one role: --agent or --manager");
+            }
+
+            if agent {
+                println!("Registering device as agent...");
+                let config = Config::load()?;
+                let sysinfo = util::system_info::get_system_info(config.enable_geo_lookup).await?;
+                auth::register_device(None, sysinfo).await?;
+                println!("Device registered as agent successfully");
+            }
+
+            if manager {
+                println!("Logging in as manager...");
+                auth::login_cli().await?;
+                println!("Logged in as manager successfully");
+            }
         }
 
         Commands::Logout => {
-            eprintln!("Error: 'logout' command is not yet implemented");
-            eprintln!("Would logout device");
-            bail!("Not implemented");
+            println!("Logging out...");
+            auth::logout_cli().await?;
+            auth::logout_device().await?;
+            println!("Logged out successfully");
         }
 
         Commands::Agent(cmd) => match cmd {
+            AgentCommands::Run => {
+                device::agent::run().await?;
+            }
             AgentCommands::Start => {
-                eprintln!("Error: 'agent start' command is not yet implemented");
-                eprintln!("Would run: systemctl start m87-client.service");
-                bail!("Not implemented");
+                device::agent::start().await?;
             }
             AgentCommands::Stop => {
-                eprintln!("Error: 'agent stop' command is not yet implemented");
-                eprintln!("Would run: systemctl stop m87-client.service");
-                bail!("Not implemented");
+                device::agent::stop().await?;
             }
             AgentCommands::Restart => {
-                eprintln!("Error: 'agent restart' command is not yet implemented");
-                eprintln!("Would run: systemctl restart m87-client.service");
-                bail!("Not implemented");
+                device::agent::restart().await?;
             }
             AgentCommands::Enable { now } => {
-                eprintln!("Error: 'agent enable' command is not yet implemented");
-                if now {
-                    eprintln!("Would run: systemctl enable --now m87-client.service");
-                } else {
-                    eprintln!("Would run: systemctl enable m87-client.service");
-                }
-                bail!("Not implemented");
+                device::agent::enable(now).await?;
             }
             AgentCommands::Disable { now } => {
-                eprintln!("Error: 'agent disable' command is not yet implemented");
-                if now {
-                    eprintln!("Would run: systemctl disable --now m87-client.service");
-                } else {
-                    eprintln!("Would run: systemctl disable m87-client.service");
-                }
-                bail!("Not implemented");
+                device::agent::disable(now).await?;
             }
             AgentCommands::Status => {
-                eprintln!("Error: 'agent status' command is not yet implemented");
-                eprintln!("Would run: systemctl status m87-client.service");
-                bail!("Not implemented");
+                device::agent::status().await?;
             }
         },
 
         Commands::Devices(cmd) => match cmd {
             DevicesCommands::List => {
-                eprintln!("Error: 'devices list' command is not yet implemented");
-                eprintln!("Would list all accessible devices");
-                bail!("Not implemented");
+                let devices = devices::list_devices().await?;
+                println!("{:#?}", devices);
             }
             DevicesCommands::Show { device } => {
                 eprintln!("Error: 'devices show' command is not yet implemented");
@@ -251,14 +258,14 @@ pub async fn cli() -> anyhow::Result<()> {
                 bail!("Not implemented");
             }
             DevicesCommands::Approve { device } => {
-                eprintln!("Error: 'devices approve' command is not yet implemented");
-                eprintln!("Would approve device: {}", device);
-                bail!("Not implemented");
+                println!("Approving device: {}", device);
+                auth::accept_auth_request(&device).await?;
+                println!("Device approved successfully");
             }
             DevicesCommands::Reject { device } => {
-                eprintln!("Error: 'devices reject' command is not yet implemented");
-                eprintln!("Would reject device: {}", device);
-                bail!("Not implemented");
+                println!("Rejecting device: {}", device);
+                auth::reject_auth_request(&device).await?;
+                println!("Device rejected successfully");
             }
         },
 
@@ -283,13 +290,18 @@ pub async fn cli() -> anyhow::Result<()> {
         }
 
         Commands::Update { version } => {
-            eprintln!("Error: 'update' command is not yet implemented");
             if let Some(v) = version {
-                eprintln!("Would update to version: {}", v);
-            } else {
-                eprintln!("Would update to latest version");
+                println!("Note: Specific version updates not yet supported, updating to latest version");
+                eprintln!("Requested version: {}", v);
             }
-            bail!("Not implemented");
+
+            println!("Checking for updates...");
+            let success = update::update(true).await?;
+            if success {
+                println!("Update successful");
+            } else {
+                println!("Already at latest version");
+            }
         }
 
         Commands::Cp { source, dest } => {
