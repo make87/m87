@@ -20,8 +20,10 @@ use tokio_yamux::{Config as YamuxConfig, Session};
 
 pub async fn handle_sni(sni: &str, mut tls: TlsStream<tokio::net::TcpStream>, state: &AppState) {
     if sni.is_empty() {
-        warn!("TLS no SNI; closing");
-        let _ = tls.shutdown().await;
+        warn!("TLS no SNI; proxy t rest");
+        if let Err(e) = proxy_to_rest(&mut tls, state.config.rest_port).await {
+            warn!("REST proxy failed: {e:?}");
+        }
         return;
     }
 
