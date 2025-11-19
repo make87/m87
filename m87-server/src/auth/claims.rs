@@ -77,6 +77,19 @@ impl Claims {
             };
             Ok(Self { roles, is_admin })
         } else {
+            // check if token is config.admin_key
+            match &config.admin_key {
+                Some(admin_key) => {
+                    if token == admin_key {
+                        return Ok(Self {
+                            roles: vec![],
+                            is_admin: true,
+                        });
+                    }
+                }
+                _ => {}
+            }
+
             // Handle API key
             let key_doc = ApiKeyDoc::find_and_validate_key(db, token).await?;
             let roles = RoleDoc::list_for_reference(db, &key_doc.key_id).await?;

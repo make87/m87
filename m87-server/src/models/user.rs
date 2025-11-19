@@ -52,12 +52,26 @@ impl UserDoc {
 
         // Otherwise create new user
         let (email, name) = get_email_and_name_from_token(token, config).await?;
+        // check if user domain is in config.user_auto_accept_domains if users_need_approval is true
+        let approved = match config.users_need_approval {
+            true => {
+                if let Some(mail) = &email {
+                    !config
+                        .user_auto_accept_domains
+                        .contains(&mail.split('@').last().unwrap().to_string())
+                } else {
+                    false
+                }
+            }
+            false => true,
+        };
+
         let new_user = UserDoc {
             id: None,
             name,
             email,
             sub: claims.sub.clone(),
-            approved: !config.users_need_approval,
+            approved,
             created_at: Some(now.clone()),
             last_login: Some(now),
             total_logins: 1,

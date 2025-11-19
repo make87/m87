@@ -17,15 +17,15 @@ pub struct AppConfig {
     pub mongo_db: String,
     pub oauth: OAuthConfig,
     pub public_address: String,
-    pub cert_contact: String,
     pub unified_port: u16,
     pub rest_port: u16,
     pub forward_secret: String,
+    pub admin_key: Option<String>,
     pub is_staging: bool,
     pub admin_emails: Vec<String>,
     pub users_need_approval: bool,
+    pub user_auto_accept_domains: Vec<String>,
     pub certificate_path: String,
-    pub acme_acc_prv_pem_key: Option<String>,
 }
 
 impl AppConfig {
@@ -54,9 +54,6 @@ impl AppConfig {
             .parse()
             .unwrap();
 
-        let cert_contact =
-            std::env::var("CERT_CONTACT").unwrap_or_else(|_| "admin@make87.com".into());
-
         // no default
         let admin_emails = std::env::var("ADMIN_EMAILS")
             .unwrap_or_else(|_| "".to_string())
@@ -66,29 +63,31 @@ impl AppConfig {
 
         let users_need_approval =
             std::env::var("USERS_NEED_APPROVAL").unwrap_or_else(|_| "false".to_string()) == "true";
+        let user_auto_accept_domains = std::env::var("USER_AUTO_ACCEPT_DOMAINS")
+            .unwrap_or_else(|_| "".to_string())
+            .split(',')
+            .map(|domain| domain.trim().to_string())
+            .collect();
 
         let certificate_path =
             std::env::var("CERTIFICATE_PATH").unwrap_or_else(|_| "/data/m87/certs/".to_string());
 
-        let acme_acc_prv_pem_key = std::env::var("ACME_ACC_PRV_PEM_KEY").ok().map(|p| {
-            let decoded = BASE64_STANDARD.decode(&p).unwrap();
-            String::from_utf8_lossy(&decoded).to_string()
-        });
+        let admin_key = std::env::var("ADMIN_KEY").ok();
 
         Ok(Self {
             mongo_uri,
             mongo_db,
             oauth: OAuthConfig { issuer, audience },
             public_address,
-            cert_contact,
             unified_port,
             rest_port,
             forward_secret,
             is_staging,
             admin_emails,
             users_need_approval,
+            user_auto_accept_domains,
             certificate_path,
-            acme_acc_prv_pem_key,
+            admin_key,
         })
     }
 }

@@ -1,17 +1,15 @@
 use arc_swap::ArcSwap;
 use axum::{
-    extract::State,
     http::{header, Method},
     response::IntoResponse,
     routing::{get, post},
-    Extension, Router,
+    Extension, Json, Router,
 };
 use futures::StreamExt;
 use rustls::ServerConfig;
 use std::{sync::Arc, time::Duration};
 
 use tokio::net::TcpListener;
-use tokio::time::sleep;
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::TcpListenerStream;
 use tower_http::{
@@ -26,47 +24,19 @@ use tracing::{info, warn};
 use crate::{
     api::{
         auth,
-        certificate::{create_tls_config, maybe_renew_wildcard},
+        certificate::{create_tls_config, update_cert},
         device,
         tunnel::handle_sni,
     },
-    auth::claims::Claims,
     config::AppConfig,
     db::Mongo,
     relay::relay_state::RelayState,
-    response::{ServerAppResult, ServerError, ServerResponse, ServerResult},
+    response::ServerResult,
     util::app_state::AppState,
 };
 
 async fn get_status() -> impl IntoResponse {
     "ok".to_string()
-}
-
-pub async fn reload_cert(
-    claims: Claims,
-    State(state): State<AppState>,
-    Extension(current): Extension<Arc<ArcSwap<ServerConfig>>>,
-) -> ServerAppResult<()> {
-    // optionally restrict to admin
-    if !claims.is_admin {
-        return Err(ServerError::unauthorized(""));
-    }
-
-    let cfg = state.config.clone();
-    if let Err(e) = maybe_renew_wildcard(&cfg).await {
-        warn!("manual renewal failed: {e:?}");
-    }
-
-    match create_tls_config(&cfg).await {
-        Ok(new) => {
-            current.store(Arc::new(new));
-            info!("TLS cert manually reloaded");
-            Ok(ServerResponse::builder().ok().build())
-        }
-        Err(e) => Err(ServerError::internal_error(&format!(
-            "reload failed: {e:?}"
-        ))),
-    }
 }
 
 pub async fn serve(
@@ -85,27 +55,8 @@ pub async fn serve(
     };
     // create cfg.certificate_path if it does not exist
     std::fs::create_dir_all(&cfg.certificate_path).expect("failed to create certificate directory");
-    // will load existing or create self signed certificate on firststartup. Below task will pickup getting an offical cert
+    // will load existing or create self signed certificate on firststartup. Valid certs have to be posted via update-cert route
     let current = Arc::new(ArcSwap::from(Arc::new(create_tls_config(&cfg).await?)));
-
-    // --- background renewal & reload task ---
-    let current_clone = current.clone();
-    let cfg_clone = cfg.clone();
-    tokio::spawn(async move {
-        loop {
-            if !cfg_clone.is_staging {
-                if let Err(e) = maybe_renew_wildcard(&cfg_clone).await {
-                    warn!("renewal failed: {e:?}");
-                }
-            }
-            // Reload whatever is on disk or freshly renewed
-            if let Ok(new) = create_tls_config(&cfg_clone).await {
-                current_clone.store(Arc::new(new));
-                info!("reloaded TLS certs");
-            }
-            sleep(Duration::from_secs(12 * 3600)).await;
-        }
-    });
 
     // ===== REST on loopback =====
     let cors = CorsLayer::new()
@@ -118,7 +69,7 @@ pub async fn serve(
         ]);
 
     let admin_route = Router::new()
-        .route("/reload-cert", post(reload_cert))
+        .route("/update-cert", post(update_cert))
         .layer(Extension(current.clone()));
 
     let app = Router::new()

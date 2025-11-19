@@ -36,9 +36,6 @@ mongodb = "3"
 rcgen = "0.14.5"
 arc-swap = "=1.7.1"
 rustls-pemfile = "2.2.0"
-acme2 = "0.5.1"
-x509-parser = "0.18.0"
-hickory-resolver = "0.25.2"
 
 # Server-specific serialization
 bson = { version = "3", features = ["serde_with-3", "chrono-0_4"] }

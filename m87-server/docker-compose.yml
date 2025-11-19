@@ -17,7 +17,7 @@ services:
       - UNIFIED_PORT=${UNIFIED_PORT:-8084}
       - REST_PORT=${REST_PORT:-8085}
       - STAGING=${STAGING:-1}
-      - ACME_ACC_PRV_PEM_KEY=${ACME_ACC_PRV_PEM_KEY:-}
+      - ADMIN_KEY=${ADMIN_KEY:-}
     depends_on:
       - mongo
     networks:
