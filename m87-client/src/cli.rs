@@ -49,21 +49,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Post-installation authentication and role selection
+    /// Authenticate with make87 (defaults to manager login)
     Login {
-        /// Configure device as agent (can be managed remotely)
+        /// Configure device as agent for remote management (Linux only, headless flow)
+        #[cfg(feature = "agent")]
         #[arg(long)]
         agent: bool,
-
-        /// Configure device as manager (can manage other devices)
-        #[arg(long)]
-        manager: bool,
     },
 
     /// Logout and deauthenticate this device
     Logout,
 
     /// Manage local agent service (requires root privileges - use sudo)
+    #[cfg(feature = "agent")]
     #[command(subcommand)]
     Agent(AgentCommands),
 
@@ -108,6 +106,7 @@ enum Commands {
     Device(Vec<String>),
 }
 
+#[cfg(feature = "agent")]
 #[derive(Subcommand)]
 enum AgentCommands {
     /// Run the agent daemon (blocking, used by systemd service)
@@ -196,20 +195,28 @@ pub async fn cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Login { agent, manager } => {
-            if !agent && !manager {
-                bail!("Please specify at least one role: --agent or --manager");
-            }
-
+        Commands::Login {
+            #[cfg(feature = "agent")]
+            agent,
+        } => {
+            #[cfg(feature = "agent")]
             if agent {
+                // Agent registration flow (headless, requires approval)
                 println!("Registering device as agent...");
                 let config = Config::load()?;
                 let sysinfo = util::system_info::get_system_info(config.enable_geo_lookup).await?;
                 auth::register_device(None, sysinfo).await?;
                 println!("Device registered as agent successfully");
+            } else {
+                // Default: Manager login flow (OAuth)
+                println!("Logging in as manager...");
+                auth::login_cli().await?;
+                println!("Logged in as manager successfully");
             }
 
-            if manager {
+            #[cfg(not(feature = "agent"))]
+            {
+                // Manager-only builds: always do manager login
                 println!("Logging in as manager...");
                 auth::login_cli().await?;
                 println!("Logged in as manager successfully");
@@ -219,10 +226,12 @@ pub async fn cli() -> anyhow::Result<()> {
         Commands::Logout => {
             println!("Logging out...");
             auth::logout_cli().await?;
+            #[cfg(feature = "agent")]
             auth::logout_device().await?;
             println!("Logged out successfully");
         }
 
+        #[cfg(feature = "agent")]
         Commands::Agent(cmd) => match cmd {
             AgentCommands::Run => {
                 device::agent::run().await?;

@@ -13,7 +13,9 @@ use tokio_yamux::{Config as YamuxConfig, Session};
 use tracing::{error, info, warn};
 use webpki_roots::TLS_SERVER_ROOTS;
 
+#[cfg(feature = "agent")]
 use crate::device::services::service_info::ServiceInfo;
+#[cfg(feature = "agent")]
 use crate::device::system_metrics::SystemMetrics;
 use crate::{auth::AuthManager, config::Config, retry_async};
 
@@ -22,9 +24,13 @@ pub use m87_shared::auth::{
     AuthRequestAction, CheckAuthRequest, DeviceAuthRequest, DeviceAuthRequestBody,
     DeviceAuthRequestCheckResponse,
 };
-pub use m87_shared::device::{DeviceSystemInfo, PublicDevice, UpdateDeviceBody};
+pub use m87_shared::device::{DeviceSystemInfo, PublicDevice};
+#[cfg(feature = "agent")]
+pub use m87_shared::device::UpdateDeviceBody;
 pub use m87_shared::heartbeat::{Digests, HeartbeatRequest, HeartbeatResponse};
 
+// Agent-specific: Used by device registration
+#[cfg(feature = "agent")]
 pub async fn set_auth_request(
     api_url: &str,
     body: DeviceAuthRequestBody,
@@ -44,6 +50,8 @@ pub async fn set_auth_request(
     }
 }
 
+// Agent-specific: Used by device registration
+#[cfg(feature = "agent")]
 pub async fn check_auth_request(
     api_url: &str,
     request_id: &str,
@@ -72,6 +80,7 @@ pub async fn check_auth_request(
     }
 }
 
+// Manager-specific: List pending device auth requests
 pub async fn list_auth_requests(
     api_url: &str,
     token: &str,
@@ -90,6 +99,7 @@ pub async fn list_auth_requests(
     }
 }
 
+// Manager-specific: Approve or reject device registration
 pub async fn handle_auth_request(
     api_url: &str,
     token: &str,
@@ -118,6 +128,7 @@ pub async fn handle_auth_request(
     }
 }
 
+// Manager-specific: List all accessible devices
 pub async fn list_devices(
     api_url: &str,
     token: &str,
@@ -139,6 +150,8 @@ pub async fn list_devices(
     }
 }
 
+// Agent-specific: Report device details to backend
+#[cfg(feature = "agent")]
 pub async fn report_device_details(
     api_url: &str,
     token: &str,
@@ -167,6 +180,8 @@ pub async fn report_device_details(
     }
 }
 
+// Agent-specific: Request token for control tunnel
+#[cfg(feature = "agent")]
 pub async fn request_control_tunnel_token(
     api_url: &str,
     token: &str,
@@ -197,6 +212,8 @@ pub async fn request_control_tunnel_token(
     }
 }
 
+// Agent-specific: Maintain persistent control tunnel connection
+#[cfg(feature = "agent")]
 pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     let config = Config::load().context("Failed to load configuration")?;
     let token = AuthManager::get_device_token()?;
@@ -296,6 +313,8 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     Ok(())
 }
 
+// Agent-specific: Send heartbeat with metrics and services
+#[cfg(feature = "agent")]
 pub async fn send_heartbeat(
     last_instruction_hash: &str,
     device_id: &str,

@@ -4,7 +4,11 @@ pub mod devices;
 pub mod app;
 pub mod auth;
 pub mod config;
+
+// Agent-specific modules (Linux-only via build.rs)
+#[cfg(feature = "agent")]
 pub mod rest;
+
 pub mod server;
 pub mod stack;
 pub mod update;

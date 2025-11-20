@@ -4,6 +4,7 @@ use sha1::{Digest, Sha1};
 use std::{fs, path::PathBuf};
 use tracing::{info, warn};
 
+#[cfg(feature = "agent")]
 use crate::util::mac;
 
 fn default_heartbeat_interval() -> u64 {
@@ -72,6 +73,8 @@ impl Config {
     }
 
     /// Create a deterministic BSON-style ObjectId string from hostname and MAC address.
+    /// Agent-specific: Used for device registration
+    #[cfg(feature = "agent")]
     pub fn deterministic_device_id() -> String {
         let hostname = hostname::get()
             .unwrap_or_default()
@@ -86,6 +89,25 @@ impl Config {
         let hash = hasher.finalize();
 
         // Take first 12 bytes and convert to hex
+        hash[..12].iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    /// Manager-only fallback: Generate a device ID based on hostname
+    #[cfg(not(feature = "agent"))]
+    pub fn deterministic_device_id() -> String {
+        // For manager-only builds, generate an ID from hostname
+        // This won't be used for agent registration, only for config storage
+        use sha1::{Digest, Sha1};
+        let hostname = hostname::get()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        let mut hasher = Sha1::new();
+        hasher.update(hostname.as_bytes());
+        hasher.update(b"manager-device");
+        let hash = hasher.finalize();
+
         hash[..12].iter().map(|b| format!("{:02x}", b)).collect()
     }
 

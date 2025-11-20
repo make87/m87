@@ -15,6 +15,14 @@ path = "src/main.rs"
 name = "m87_client"
 path = "src/lib.rs"
 
+[features]
+# Features are auto-enabled by build.rs based on target OS:
+# - Linux: agent + manager (full functionality)
+# - macOS/Windows: manager only (device management, no local agent)
+default = []
+agent = []    # Agent-specific: systemd service, local metrics, REST API, control tunnel
+manager = []  # Manager-specific: device management, OAuth login, remote operations
+
 [dependencies]
 # Local workspace crates
 m87-shared = { path = "../m87-shared" }

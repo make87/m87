@@ -104,11 +104,18 @@ impl OAuth2Token {
                 details.clone().user_code().secret(),
             )
             .await?;
-        // println!(
-        //     "To authenticate, visit {} and enter the code: {}",
-        //     details.clone().verification_uri().to_string(),
-        //     details.clone().user_code().secret()
-        // );
+
+        // Spawn a spinner task that runs in the background
+        let spinner_handle = tokio::spawn(async {
+            let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let mut i = 0;
+            loop {
+                print!("\r{} Waiting for authentication...", spinner_chars[i % spinner_chars.len()]);
+                std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
+                i += 1;
+            }
+        });
 
         // Request the access token (no manual polling loop needed)
         let token_response = client
@@ -134,6 +141,11 @@ impl OAuth2Token {
                     RequestTokenError::Other(e) => RequestTokenError::Other(e),
                 }
             })?;
+
+        // Stop the spinner
+        spinner_handle.abort();
+        print!("\r\x1b[2K"); // Clear the spinner line
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
         // Extract token information
         let access_token = token_response.access_token().secret().to_string();
@@ -172,17 +184,10 @@ pub struct PrintUserAuthRequestHandler;
 #[async_trait::async_trait]
 impl SendUserAuthRequestHandler for PrintUserAuthRequestHandler {
     async fn send_auth_request(&mut self, verification_uri: &str, user_code: &str) -> Result<()> {
-        println!(
-            "To authenticate, visit {} and enter the code: {}",
-            verification_uri, user_code
-        );
+        // Clear, prominent display of authentication information
+        println!("\nTo authenticate, visit: {}", verification_uri);
+        println!("Enter this code: {}\n", user_code);
 
-        // Try to open the browser automatically
-        if webbrowser::open(verification_uri).is_ok() {
-            println!("Opened your browser automatically.");
-        } else {
-            println!("(Couldn't open automatically — open manually if needed.)");
-        }
         Ok(())
     }
     async fn on_auth_success(&self, _token: &str) -> Result<()> {
