@@ -47,6 +47,10 @@ impl RelayState {
         self.tunnels.read().await.get(device_id).cloned()
     }
 
+    pub async fn has_tunnel(&self, device_id: &str) -> bool {
+        self.tunnels.read().await.contains_key(device_id)
+    }
+
     // --- Forward management --- public to device proxying
     /// `sni_host` is the hostname clients will connect to (e.g. camera1.nexus.make87.com)
     pub async fn register_forward(

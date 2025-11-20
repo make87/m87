@@ -7,7 +7,10 @@ use rustls::{
     ClientConfig, RootCertStore, SignatureScheme,
 };
 use std::sync::Arc;
-use tokio::{io, net::TcpStream};
+use tokio::{
+    io::{self, BufReader},
+    net::TcpStream,
+};
 use tokio_rustls::{rustls, TlsConnector};
 use tokio_yamux::{Config as YamuxConfig, Session};
 use tracing::{error, info, warn};
@@ -286,34 +289,40 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     let mut sess = Session::new_client(tls, YamuxConfig::default());
     info!("control session created");
     // continuously poll session to handle keep-alives, frame exchange
-    while let Some(Ok(mut stream)) = sess.next().await {
+    while let Some(Ok(stream)) = sess.next().await {
         tokio::spawn(async move {
-            // header with port number
-            let mut buf = [0u8; 16];
-            if let Ok(n) = stream.peek(&mut buf).await {
-                let port: u16 = String::from_utf8_lossy(&buf[..n])
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-                if port > 0 {
-                    if let Ok(mut local) = TcpStream::connect(("127.0.0.1", port)).await {
-                        let _ = match io::copy_bidirectional(&mut stream, &mut local).await {
-                            Ok((_a, _b)) => {
-                                info!("proxy session closed cleanly ");
-                                let _ = stream.shutdown().await;
-                                let _ = local.shutdown().await;
-                                Ok(())
-                            }
-                            Err(e) => {
-                                info!("proxy session closed with error ");
-                                let _ = stream.shutdown().await;
-                                let _ = local.shutdown().await;
-                                Err(e)
-                            }
-                        };
-                    }
-                }
+            use tokio::io::AsyncBufReadExt;
+            let mut reader = BufReader::new(stream);
+
+            // 1. READ (not peek!) the port line
+            let mut header = Vec::new();
+            if let Err(e) = reader.read_until(b'\n', &mut header).await {
+                warn!("failed to read port header: {}", e);
+                return;
             }
+
+            let port: u16 = String::from_utf8_lossy(&header).trim().parse().unwrap_or(0);
+
+            if port == 0 {
+                warn!("invalid port header");
+                return;
+            }
+
+            // 2. Connect to local service
+            let mut local = match TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("failed to connect to local {}: {}", port, e);
+                    return;
+                }
+            };
+
+            // 3. Proxy remaining stream data
+            let mut stream = reader.into_inner();
+            let _ = match io::copy_bidirectional(&mut stream, &mut local).await {
+                Ok((_a, _b)) => info!("proxy closed cleanly"),
+                Err(e) => info!("proxy closed with error: {}", e),
+            };
         });
     }
     info!("control session exited");

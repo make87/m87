@@ -255,13 +255,16 @@ pub async fn handle_control_tunnel(
     // Upgrade to Yamux
     let base = reader.into_inner();
     let mut sess = Session::new_server(base, YamuxConfig::default());
+    let control = sess.control();
     relay
-        .register_tunnel(device_id.clone(), sess.control())
+        .register_tunnel(device_id.clone(), control.clone())
         .await;
     info!(%device_id, "control tunnel active");
 
     let relay_clone = relay.clone();
     tokio::spawn(async move {
+        // keep Control alive for the duration of this task
+        let _keep_alive = control;
         while let Some(item) = sess.next().await {
             match item {
                 Ok(_stream) => {

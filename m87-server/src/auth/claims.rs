@@ -61,8 +61,6 @@ impl Claims {
 
             let reference_id = user.get_reference_id();
             let mut roles = RoleDoc::list_for_reference(db, &reference_id).await?;
-            // add user:reference_id role as owner
-            info!("reference id: {}", reference_id);
             roles.push(RoleDoc {
                 id: None,
                 reference_id: reference_id.clone(),
