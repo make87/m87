@@ -23,11 +23,11 @@ pub fn build_router() -> Router {
         .route("/terminal", get(ws_upgrade(handle_terminal_ws)))
         .route("/metrics", get(ws_upgrade(handle_system_metrics_ws)))
         .route(
-            "/container/:name",
+            "/container/{name}",
             get(ws_upgrade_with_param(handle_container_terminal_ws)),
         )
         .route(
-            "/container-logs/:name",
+            "/container-logs/{name}",
             get(ws_upgrade_with_param(handle_container_logs_ws)),
         )
 }

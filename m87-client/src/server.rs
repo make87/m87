@@ -197,6 +197,27 @@ pub async fn request_control_tunnel_token(
     }
 }
 
+async fn connect_host(host: &str, port: u16) -> anyhow::Result<TcpStream> {
+    for i in 0..10 {
+        match tokio::net::lookup_host((host, port)).await {
+            Ok(addrs) => {
+                for addr in addrs {
+                    if addr.is_ipv4() {
+                        if let Ok(stream) = TcpStream::connect(addr).await {
+                            return Ok(stream);
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+
+        let backoff = 200 + (i * 150);
+        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+    }
+    Err(anyhow!("DNS resolution failed after retries"))
+}
+
 pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     let config = Config::load().context("Failed to load configuration")?;
     let token = AuthManager::get_device_token()?;
@@ -218,7 +239,8 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
             .trim_start_matches("https://")
             .trim_start_matches("http://")
     );
-    let tcp = TcpStream::connect((control_host.clone(), 443)).await?;
+
+    let tcp = connect_host(&control_host, 443).await?;
 
     // 2. Root store (use system roots or webpki)
     let mut root_store = RootCertStore::empty();
@@ -247,9 +269,10 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
 
     // 4. TLS handshake (SNI)
     let connector = TlsConnector::from(tls_config);
-    let server_name = ServerName::try_from(control_host).context("invalid SNI name")?;
+    let server_name = ServerName::try_from(control_host.clone()).context("invalid SNI name")?;
     let mut tls = connector.connect(server_name, tcp).await?;
 
+    info!("connected to {}. Starting handshake", &control_host);
     // 4. Send handshake line
     use tokio::io::AsyncWriteExt;
     let line = format!(
@@ -261,6 +284,7 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
 
     // create client session
     let mut sess = Session::new_client(tls, YamuxConfig::default());
+    info!("control session created");
     // continuously poll session to handle keep-alives, frame exchange
     while let Some(Ok(mut stream)) = sess.next().await {
         tokio::spawn(async move {
@@ -292,6 +316,7 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
             }
         });
     }
+    info!("control session exited");
     // register / run streams as needed
     Ok(())
 }

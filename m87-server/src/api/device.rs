@@ -440,6 +440,7 @@ async fn handle_upgraded_proxy(
     let mut sess = conn_arc.lock().await;
     let mut sub = sess
         .open_stream()
+        .await
         .map_err(|_| ServerError::internal_error("Failed to open stream"))?;
 
     let header = b"80\n";
