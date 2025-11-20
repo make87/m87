@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
-use tokio_yamux::Session;
+use tokio_yamux::{Control, Session};
 
 use crate::response::{ServerError, ServerResult};
 
@@ -17,9 +17,7 @@ pub struct ForwardMeta {
 #[derive(Clone)]
 pub struct RelayState {
     /// device_id -> yamux session for active tunnel
-    pub tunnels: Arc<
-        RwLock<HashMap<String, Arc<Mutex<Session<tokio_rustls::server::TlsStream<TcpStream>>>>>>,
-    >,
+    pub tunnels: Arc<RwLock<HashMap<String, Arc<Mutex<Control>>>>>,
 
     /// sni_host -> ForwardMeta
     pub forwards: Arc<RwLock<HashMap<String, ForwardMeta>>>,
@@ -34,11 +32,7 @@ impl RelayState {
     }
 
     // --- Tunnel management --- device to nexus connection
-    pub async fn register_tunnel(
-        &self,
-        device_id: String,
-        connection: Session<tokio_rustls::server::TlsStream<TcpStream>>,
-    ) {
+    pub async fn register_tunnel(&self, device_id: String, connection: Control) {
         self.tunnels
             .write()
             .await
@@ -49,11 +43,12 @@ impl RelayState {
         self.tunnels.write().await.remove(device_id);
     }
 
-    pub async fn get_tunnel(
-        &self,
-        device_id: &str,
-    ) -> Option<Arc<Mutex<Session<tokio_rustls::server::TlsStream<TcpStream>>>>> {
+    pub async fn get_tunnel(&self, device_id: &str) -> Option<Arc<Mutex<Control>>> {
         self.tunnels.read().await.get(device_id).cloned()
+    }
+
+    pub async fn has_tunnel(&self, device_id: &str) -> bool {
+        self.tunnels.read().await.contains_key(device_id)
     }
 
     // --- Forward management --- public to device proxying

@@ -7,7 +7,10 @@ use rustls::{
     ClientConfig, RootCertStore, SignatureScheme,
 };
 use std::sync::Arc;
-use tokio::{io, net::TcpStream};
+use tokio::{
+    io::{self, BufReader},
+    net::TcpStream,
+};
 use tokio_rustls::{rustls, TlsConnector};
 use tokio_yamux::{Config as YamuxConfig, Session};
 use tracing::{error, info, warn};
@@ -197,6 +200,27 @@ pub async fn request_control_tunnel_token(
     }
 }
 
+async fn connect_host(host: &str, port: u16) -> anyhow::Result<TcpStream> {
+    for i in 0..10 {
+        match tokio::net::lookup_host((host, port)).await {
+            Ok(addrs) => {
+                for addr in addrs {
+                    if addr.is_ipv4() {
+                        if let Ok(stream) = TcpStream::connect(addr).await {
+                            return Ok(stream);
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+
+        let backoff = 200 + (i * 150);
+        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+    }
+    Err(anyhow!("DNS resolution failed after retries"))
+}
+
 pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     let config = Config::load().context("Failed to load configuration")?;
     let token = AuthManager::get_device_token()?;
@@ -218,7 +242,8 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
             .trim_start_matches("https://")
             .trim_start_matches("http://")
     );
-    let tcp = TcpStream::connect((control_host.clone(), 443)).await?;
+
+    let tcp = connect_host(&control_host, 443).await?;
 
     // 2. Root store (use system roots or webpki)
     let mut root_store = RootCertStore::empty();
@@ -247,9 +272,10 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
 
     // 4. TLS handshake (SNI)
     let connector = TlsConnector::from(tls_config);
-    let server_name = ServerName::try_from(control_host).context("invalid SNI name")?;
+    let server_name = ServerName::try_from(control_host.clone()).context("invalid SNI name")?;
     let mut tls = connector.connect(server_name, tcp).await?;
 
+    info!("connected to {}. Starting handshake", &control_host);
     // 4. Send handshake line
     use tokio::io::AsyncWriteExt;
     let line = format!(
@@ -261,37 +287,45 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
 
     // create client session
     let mut sess = Session::new_client(tls, YamuxConfig::default());
+    info!("control session created");
     // continuously poll session to handle keep-alives, frame exchange
-    while let Some(Ok(mut stream)) = sess.next().await {
+    while let Some(Ok(stream)) = sess.next().await {
         tokio::spawn(async move {
-            // header with port number
-            let mut buf = [0u8; 16];
-            if let Ok(n) = stream.peek(&mut buf).await {
-                let port: u16 = String::from_utf8_lossy(&buf[..n])
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-                if port > 0 {
-                    if let Ok(mut local) = TcpStream::connect(("127.0.0.1", port)).await {
-                        let _ = match io::copy_bidirectional(&mut stream, &mut local).await {
-                            Ok((_a, _b)) => {
-                                info!("proxy session closed cleanly ");
-                                let _ = stream.shutdown().await;
-                                let _ = local.shutdown().await;
-                                Ok(())
-                            }
-                            Err(e) => {
-                                info!("proxy session closed with error ");
-                                let _ = stream.shutdown().await;
-                                let _ = local.shutdown().await;
-                                Err(e)
-                            }
-                        };
-                    }
-                }
+            use tokio::io::AsyncBufReadExt;
+            let mut reader = BufReader::new(stream);
+
+            // 1. READ (not peek!) the port line
+            let mut header = Vec::new();
+            if let Err(e) = reader.read_until(b'\n', &mut header).await {
+                warn!("failed to read port header: {}", e);
+                return;
             }
+
+            let port: u16 = String::from_utf8_lossy(&header).trim().parse().unwrap_or(0);
+
+            if port == 0 {
+                warn!("invalid port header");
+                return;
+            }
+
+            // 2. Connect to local service
+            let mut local = match TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("failed to connect to local {}: {}", port, e);
+                    return;
+                }
+            };
+
+            // 3. Proxy remaining stream data
+            let mut stream = reader.into_inner();
+            let _ = match io::copy_bidirectional(&mut stream, &mut local).await {
+                Ok((_a, _b)) => info!("proxy closed cleanly"),
+                Err(e) => info!("proxy closed with error: {}", e),
+            };
         });
     }
+    info!("control session exited");
     // register / run streams as needed
     Ok(())
 }

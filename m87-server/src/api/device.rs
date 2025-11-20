@@ -75,7 +75,13 @@ async fn get_devices(
     let devices = claims.list_with_access(&devices_col, &pagination).await?;
     let total_count = claims.count_with_access(&devices_col).await?;
 
-    let devices = DeviceDoc::to_public_devices(devices);
+    let mut devices = DeviceDoc::to_public_devices(devices);
+    // for each check if state.relay.has_tunnel
+    for device in &mut devices {
+        if state.relay.has_tunnel(&device.id).await {
+            device.online = true;
+        }
+    }
 
     Ok(ServerResponse::builder()
         .body(devices)
@@ -100,9 +106,13 @@ async fn get_device_by_id(
         .find_one_with_access(&state.db.devices(), doc! { "_id": device_id })
         .await?;
     let device = device_opt.ok_or_else(|| ServerError::not_found("Device not found"))?;
+    let mut pub_device: PublicDevice = device.into();
+    if state.relay.has_tunnel(&id).await {
+        pub_device.online = true;
+    }
 
     Ok(ServerResponse::builder()
-        .body(device.into())
+        .body(pub_device)
         .status_code(axum::http::StatusCode::OK)
         .build())
 }
@@ -440,6 +450,7 @@ async fn handle_upgraded_proxy(
     let mut sess = conn_arc.lock().await;
     let mut sub = sess
         .open_stream()
+        .await
         .map_err(|_| ServerError::internal_error("Failed to open stream"))?;
 
     let header = b"80\n";

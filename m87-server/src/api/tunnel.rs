@@ -20,7 +20,7 @@ use tokio_yamux::{Config as YamuxConfig, Session};
 
 pub async fn handle_sni(sni: &str, mut tls: TlsStream<tokio::net::TcpStream>, state: &AppState) {
     if sni.is_empty() {
-        warn!("TLS no SNI; proxy t rest");
+        warn!("TLS no SNI; proxy to rest");
         if let Err(e) = proxy_to_rest(&mut tls, state.config.rest_port).await {
             warn!("REST proxy failed: {e:?}");
         }
@@ -177,7 +177,7 @@ pub async fn proxy_to_device_rest(
 
     // --- 4. Open a yamux substream ---
     let mut sess = conn_arc.lock().await;
-    let mut sub = match sess.open_stream() {
+    let mut sub = match sess.open_stream().await {
         Ok(s) => s,
         Err(_) => {
             inbound
@@ -254,9 +254,32 @@ pub async fn handle_control_tunnel(
 
     // Upgrade to Yamux
     let base = reader.into_inner();
-    let sess = Session::new_server(base, YamuxConfig::default());
-    relay.register_tunnel(device_id.clone(), sess).await;
+    let mut sess = Session::new_server(base, YamuxConfig::default());
+    let control = sess.control();
+    relay
+        .register_tunnel(device_id.clone(), control.clone())
+        .await;
     info!(%device_id, "control tunnel active");
+
+    let relay_clone = relay.clone();
+    tokio::spawn(async move {
+        // keep Control alive for the duration of this task
+        let _keep_alive = control;
+        while let Some(item) = sess.next().await {
+            match item {
+                Ok(_stream) => {
+                    // control sessions should not yield streams — usually ignore
+                }
+                Err(e) => {
+                    warn!("yamux session error for {}: {:?}", device_id, e);
+                    break;
+                }
+            }
+        }
+
+        info!("control session closed for {}", device_id);
+        relay_clone.remove_tunnel(&device_id).await;
+    });
     Ok(())
 }
 
@@ -304,6 +327,7 @@ async fn handle_forward_connection(
     let mut sess = conn_arc.lock().await;
     let mut sub = sess
         .open_stream()
+        .await
         .map_err(|_| ServerError::internal_error("yamux open_stream failed"))?;
 
     // Send port header to node
