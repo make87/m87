@@ -116,32 +116,11 @@ pub async fn proxy_to_device_rest(
     short_id: &str,
     state: &AppState,
 ) -> ServerResult<()> {
-    let mut header_buf = Vec::with_capacity(4096);
+    let (buffer, header_end) = read_full_http_request(inbound).await?;
+    let header_bytes = &buffer[..header_end];
+    let leftover_bytes = &buffer[header_end..];
 
-    loop {
-        let mut chunk = [0u8; 1024];
-        let n = inbound.read(&mut chunk).await?;
-        if n == 0 {
-            return Ok(());
-        }
-
-        header_buf.extend_from_slice(&chunk[..n]);
-
-        if header_buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-
-        if header_buf.len() > 32 * 1024 {
-            inbound
-                .get_mut()
-                .0
-                .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n")
-                .await?;
-            return Ok(());
-        }
-    }
-
-    let request = String::from_utf8_lossy(&header_buf);
+    let request = String::from_utf8_lossy(header_bytes);
 
     let token = extract_bearer_token(&request);
     if token.is_none() {
@@ -199,13 +178,49 @@ pub async fn proxy_to_device_rest(
     };
 
     let rest_port = device.config.server_port;
-    // first message to request the port we want to fowrad tp
     sub.write_all(format!("{rest_port}\n").as_bytes()).await?;
-    // send the whole header we parsedto make su even a ws upgrade works
-    sub.write_all(&header_buf).await?;
+
+    sub.write_all(header_bytes).await?;
+    if !leftover_bytes.is_empty() {
+        sub.write_all(leftover_bytes).await?;
+    }
 
     tokio::io::copy_bidirectional(inbound, &mut sub).await?;
     Ok(())
+}
+
+async fn read_full_http_request(
+    inbound: &mut (impl AsyncReadExt + Unpin),
+) -> io::Result<(Vec<u8>, usize)> {
+    let mut buf = Vec::with_capacity(4096);
+
+    let header_end = loop {
+        // read chunk
+        let mut tmp = [0u8; 1024];
+        let n = inbound.read(&mut tmp).await?;
+
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "client closed before sending headers",
+            ));
+        }
+
+        buf.extend_from_slice(&tmp[..n]);
+
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+
+        if buf.len() > 32 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "headers too large",
+            ));
+        }
+    };
+
+    Ok((buf, header_end))
 }
 
 async fn proxy_to_rest(
@@ -339,10 +354,6 @@ async fn handle_forward_connection(
 
     sub.write_all(format!("{}\n", forward_doc.target_port).as_bytes())
         .await?;
-
-    let mut tmp = [0u8; 1024];
-    let n = inbound.read(&mut tmp).await?;
-    sub.write_all(&tmp[..n]).await?;
 
     tokio::spawn(async move {
         let _ = proxy_bidirectional(&mut inbound, &mut sub).await;

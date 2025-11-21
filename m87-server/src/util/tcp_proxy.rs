@@ -5,8 +5,6 @@ use tracing::{info, warn};
 
 use crate::response::{ServerError, ServerResult};
 
-/// Bidirectional TCP proxy between inbound and reverse sockets.
-/// Adds TCP_NODELAY and keepalive for stability, and performs full cleanup on exit.
 pub async fn proxy_bidirectional_tcp(inbound: TcpStream, reverse: TcpStream) -> ServerResult<()> {
     let socket = Socket::from(inbound.into_std()?);
     let _ = socket.set_tcp_nodelay(true);
@@ -47,7 +45,7 @@ where
             Ok(())
         }
         Err(e) => {
-            info!("proxy session closed with error ");
+            info!("proxy session closed with error {:?}", e);
             let _ = a.shutdown().await;
             let _ = b.shutdown().await;
             Err(e)
