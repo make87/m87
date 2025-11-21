@@ -55,6 +55,16 @@ enum Commands {
         #[cfg(feature = "agent")]
         #[arg(long)]
         agent: bool,
+
+        /// Organization ID to register agent under (only with --agent)
+        #[cfg(feature = "agent")]
+        #[arg(long = "org-id", conflicts_with = "email")]
+        org_id: Option<String>,
+
+        /// Email address to register agent under (only with --agent)
+        #[cfg(feature = "agent")]
+        #[arg(long, conflicts_with = "org_id")]
+        email: Option<String>,
     },
 
     /// Logout and deauthenticate this device
@@ -198,14 +208,27 @@ pub async fn cli() -> anyhow::Result<()> {
         Commands::Login {
             #[cfg(feature = "agent")]
             agent,
+            #[cfg(feature = "agent")]
+            org_id,
+            #[cfg(feature = "agent")]
+            email,
         } => {
             #[cfg(feature = "agent")]
             if agent {
+                // Determine owner_scope from provided flags
+                let owner_scope = if let Some(org) = org_id {
+                    Some(format!("org:{}", org))
+                } else if let Some(email_addr) = email {
+                    Some(format!("user:{}", email_addr))
+                } else {
+                    None
+                };
+
                 // Agent registration flow (headless, requires approval)
                 println!("Registering device as agent...");
                 let config = Config::load()?;
                 let sysinfo = util::system_info::get_system_info(config.enable_geo_lookup).await?;
-                auth::register_device(None, sysinfo).await?;
+                auth::register_device(owner_scope, sysinfo).await?;
                 println!("Device registered as agent successfully");
             } else {
                 // Default: Manager login flow (OAuth)
