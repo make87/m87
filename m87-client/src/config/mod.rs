@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::{fs, path::PathBuf};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[cfg(feature = "agent")]
 use crate::util::mac;
@@ -18,9 +18,15 @@ fn default_server_port() -> u16 {
     8337
 }
 
+fn default_make87_api_url() -> String {
+    "https://api.make87.com".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
-    pub api_url: String,
+    pub api_url: Option<String>,
+    #[serde(default = "default_make87_api_url")]
+    pub make87_api_url: String,
     pub device_id: String,
     pub log_level: String,
     #[serde(default = "default_heartbeat_interval")]
@@ -43,7 +49,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            api_url: "https://free.make87.com".to_string(),
+            api_url: None,
+            make87_api_url: "https://api.make87.com".to_string(),
             device_id: Config::deterministic_device_id(),
             log_level: "info".to_string(),
             heartbeat_interval_secs: default_heartbeat_interval(),
@@ -70,6 +77,16 @@ impl Config {
             tracing::warn!("No config file found at {:?}", path);
         }
         Ok(())
+    }
+
+    pub fn get_server_url(&self) -> String {
+        match &self.api_url {
+            Some(url) => url.clone(),
+            None => {
+                error!("API URL not set. Make sure to login in order to set it!");
+                panic!("API URL not set");
+            }
+        }
     }
 
     /// Create a deterministic BSON-style ObjectId string from hostname and MAC address.
@@ -179,7 +196,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.api_url, "https://free.make87.com");
+        assert_eq!(config.api_url, None);
         assert_eq!(config.log_level, "info");
     }
 

@@ -27,10 +27,77 @@ pub use m87_shared::auth::{
     AuthRequestAction, CheckAuthRequest, DeviceAuthRequest, DeviceAuthRequestBody,
     DeviceAuthRequestCheckResponse,
 };
-pub use m87_shared::device::{DeviceSystemInfo, PublicDevice};
 #[cfg(feature = "agent")]
 pub use m87_shared::device::UpdateDeviceBody;
+pub use m87_shared::device::{DeviceSystemInfo, PublicDevice};
 pub use m87_shared::heartbeat::{Digests, HeartbeatRequest, HeartbeatResponse};
+
+pub async fn get_server_url_and_owner_reference(make87_api_url: &str) -> Result<(String, String)> {
+    let client = reqwest::Client::new();
+
+    // ------------------------------------------------------------
+    // 1. POST /login → returns ID
+    // ------------------------------------------------------------
+    let post_url = format!("{}/login", make87_api_url);
+
+    #[derive(serde::Serialize)]
+    struct EmptyBody {}
+
+    let id: String = client
+        .post(&post_url)
+        .json(&EmptyBody {})
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    // ------------------------------------------------------------
+    // 2. Print browser login URL for the user
+    // ------------------------------------------------------------
+    let browser_url = format!("{}/login/{}", make87_api_url, id);
+    eprintln!("No server configured.");
+    eprintln!("Open this link in your browser to log in:");
+    eprintln!("{}", browser_url);
+    eprintln!("Waiting for authentication...");
+
+    // ------------------------------------------------------------
+    // 3. Poll GET /login/{id} until url != None
+    // ------------------------------------------------------------
+    let get_url = format!("{}/login/{}", make87_api_url, id);
+
+    #[derive(serde::Deserialize)]
+    struct LoginUrlResponse {
+        url: Option<String>,
+        owner_reference: Option<String>,
+    }
+
+    let mut wait_time = 0;
+
+    loop {
+        let resp = client
+            .get(&get_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<LoginUrlResponse>()
+            .await?;
+
+        match (resp.url, resp.owner_reference) {
+            (Some(url), Some(owner_reference)) => {
+                return Ok((url, owner_reference));
+            }
+            _ => {}
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        wait_time += 2;
+        if wait_time >= 120 {
+            eprintln!("Timeout waiting 120s for authentication");
+            return Err(anyhow::anyhow!("Timeout waiting for authentication"));
+        }
+    }
+}
 
 // Agent-specific: Used by device registration
 #[cfg(feature = "agent")]
@@ -246,7 +313,7 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
 
     let device_id = config.device_id.clone();
     let control_tunnel_token = request_control_tunnel_token(
-        &config.api_url,
+        &config.get_server_url(),
         &token,
         &device_id,
         config.trust_invalid_server_cert,
@@ -257,7 +324,7 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     let control_host = format!(
         "control.{}",
         config
-            .api_url
+            .get_server_url()
             .trim_start_matches("https://")
             .trim_start_matches("http://")
     );
@@ -375,7 +442,6 @@ where
 
     Ok(port)
 }
-
 
 // Agent-specific: Send heartbeat with metrics and services
 #[cfg(feature = "agent")]

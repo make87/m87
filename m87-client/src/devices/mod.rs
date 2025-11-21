@@ -6,7 +6,12 @@ use crate::{auth::AuthManager, config::Config, server};
 pub async fn list_devices() -> Result<Vec<PublicDevice>> {
     let token = AuthManager::get_cli_token().await?;
     let config = Config::load()?;
-    server::list_devices(&config.api_url, &token, config.trust_invalid_server_cert).await
+    server::list_devices(
+        &config.get_server_url(),
+        &token,
+        config.trust_invalid_server_cert,
+    )
+    .await
 }
 
 pub async fn metrics(_device_id: &str) -> Result<()> {

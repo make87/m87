@@ -58,7 +58,6 @@ dirs = "5.0"
 libmacchina = "7"
 openidconnect = { version = "3.5.0", default-features = false, features = ["accept-rfc3339-timestamps", "rustls-tls", "reqwest"] }
 sysinfo = "0.36.1"
-webbrowser = "1.0.6"
 pty-process = { version = "0.5.3", features = ["async"] }
 webpki-roots = "1.0.3"
 

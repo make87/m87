@@ -263,13 +263,27 @@ pub async fn register_device(
         return Ok(());
     }
 
-    let config = Config::load()?;
+    let mut config = Config::load()?;
     let owner_scope = match owner_scope {
         Some(rid) => rid,
         None => match Config::has_owner_reference()? {
             true => Config::get_owner_reference()?,
-            false => std::env::var(OWNER_REFERENCE_ENV_VAR)
-                .expect(format!("{} not set", OWNER_REFERENCE_ENV_VAR).as_str()),
+            false => match std::env::var(OWNER_REFERENCE_ENV_VAR) {
+                Ok(value) => value,
+                Err(_) => {
+                    if config.api_url.is_none() {
+                        let (url, owner) =
+                            server::get_server_url_and_owner_reference(&config.make87_api_url)
+                                .await?;
+                        config.api_url = Some(url);
+                        config.owner_reference = Some(owner.clone());
+                        config.save()?;
+                        owner
+                    } else {
+                        return Err(anyhow::anyhow!("No owner reference provided"));
+                    }
+                }
+            },
         },
     };
     //if @ is in owner_scope prefix with user: otherwise with org:
@@ -279,7 +293,7 @@ pub async fn register_device(
         format!("org:{}", owner_scope)
     };
     let mut report_handler = device::DeviceAuthRequestHandler {
-        api_url: config.api_url.clone(),
+        api_url: config.get_server_url(),
         device_info: device_system_info,
         device_id: config.device_id,
         owner_scope,
@@ -322,7 +336,12 @@ pub async fn logout_device() -> Result<()> {
 pub async fn list_auth_requests() -> Result<Vec<server::DeviceAuthRequest>> {
     let token = AuthManager::get_cli_token().await?;
     let config = Config::load()?;
-    server::list_auth_requests(&config.api_url, &token, config.trust_invalid_server_cert).await
+    server::list_auth_requests(
+        &config.get_server_url(),
+        &token,
+        config.trust_invalid_server_cert,
+    )
+    .await
 }
 
 // Manager-specific: Approve device registration
@@ -331,7 +350,7 @@ pub async fn accept_auth_request(request_id: &str) -> Result<()> {
     let config = Config::load()?;
 
     server::handle_auth_request(
-        &config.api_url,
+        &config.get_server_url(),
         &token,
         request_id,
         true,
@@ -346,7 +365,7 @@ pub async fn reject_auth_request(request_id: &str) -> Result<()> {
     let config = Config::load()?;
 
     server::handle_auth_request(
-        &config.api_url,
+        &config.get_server_url(),
         &token,
         request_id,
         false,

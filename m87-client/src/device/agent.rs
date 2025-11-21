@@ -43,7 +43,7 @@ fn check_permission_error(status: std::process::ExitStatus) -> Result<()> {
 /// Not directly callable from CLI - used by other functions when service is missing
 pub async fn install_service() -> Result<()> {
     let exe_path = std::env::current_exe()?;
-    let username = std::env::var("USER")?;  // Get current user
+    let username = std::env::var("USER")?; // Get current user
 
     let service_content = format!(
         "[Unit]
@@ -313,7 +313,7 @@ async fn login_and_run() -> Result<()> {
     }
     let token = AuthManager::get_device_token()?;
     let res = report_device_details(
-        &config.api_url,
+        &config.get_server_url(),
         &config.device_id,
         &token,
         config.enable_geo_lookup,
@@ -383,7 +383,7 @@ async fn sync_with_backend() -> Result<()> {
     let _instruction = send_heartbeat(
         last_instruciotn_hash,
         &config.device_id,
-        &config.api_url,
+        &config.get_server_url(),
         &token,
         metrics,
         services,
