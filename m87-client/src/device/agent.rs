@@ -273,7 +273,7 @@ pub async fn status() -> Result<()> {
     ensure_service_installed().await?;
 
     let status = Command::new("systemctl")
-        .args(["status", "-n", "0", SERVICE_NAME])
+        .args(["status", "--lines=0", SERVICE_NAME])
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
