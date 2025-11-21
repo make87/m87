@@ -32,7 +32,10 @@ pub use m87_shared::device::UpdateDeviceBody;
 pub use m87_shared::device::{DeviceSystemInfo, PublicDevice};
 pub use m87_shared::heartbeat::{Digests, HeartbeatRequest, HeartbeatResponse};
 
-pub async fn get_server_url_and_owner_reference(make87_api_url: &str) -> Result<(String, String)> {
+pub async fn get_server_url_and_owner_reference(
+    make87_api_url: &str,
+    make87_app_url: &str,
+) -> Result<(String, String)> {
     let client = reqwest::Client::new();
 
     // ------------------------------------------------------------
@@ -55,7 +58,8 @@ pub async fn get_server_url_and_owner_reference(make87_api_url: &str) -> Result<
     // ------------------------------------------------------------
     // 2. Print browser login URL for the user
     // ------------------------------------------------------------
-    let browser_url = format!("{}/login/{}", make87_api_url, id);
+
+    let browser_url = format!("{}/app/devices/login/{}", make87_app_url, id);
     eprintln!("No server configured.");
     eprintln!("Open this link in your browser to log in:");
     eprintln!("{}", browser_url);

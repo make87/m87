@@ -272,9 +272,11 @@ pub async fn register_device(
                 Ok(value) => value,
                 Err(_) => {
                     if config.api_url.is_none() {
-                        let (url, owner) =
-                            server::get_server_url_and_owner_reference(&config.make87_api_url)
-                                .await?;
+                        let (url, owner) = server::get_server_url_and_owner_reference(
+                            &config.make87_api_url,
+                            &config.make87_app_url,
+                        )
+                        .await?;
                         config.api_url = Some(url);
                         config.owner_reference = Some(owner.clone());
                         config.save()?;
