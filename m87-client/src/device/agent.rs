@@ -43,7 +43,10 @@ fn check_permission_error(status: std::process::ExitStatus) -> Result<()> {
 /// Not directly callable from CLI - used by other functions when service is missing
 pub async fn install_service() -> Result<()> {
     let exe_path = std::env::current_exe()?;
-    let username = std::env::var("USER")?; // Get current user
+    // Get the actual user (not root)
+    let username = std::env::var("SUDO_USER")
+        .or_else(|_| std::env::var("USER"))
+        .context("Unable to determine username")?;
 
     let service_content = format!(
         "[Unit]
