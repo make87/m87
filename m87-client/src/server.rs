@@ -1,26 +1,21 @@
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
+use m87_shared::forward::{CreateForward, ForwardAccess, PublicForward};
 use reqwest::Client;
-use rustls::{
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    pki_types::{CertificateDer, ServerName, UnixTime},
-    ClientConfig, RootCertStore, SignatureScheme,
-};
-use std::sync::Arc;
 use tokio::{
-    io::{self, AsyncReadExt, BufReader},
+    io::{self, AsyncReadExt},
     net::TcpStream,
 };
-use tokio_rustls::{rustls, TlsConnector};
 use tokio_yamux::{Config as YamuxConfig, Session};
 use tracing::{error, info, warn};
-use webpki_roots::TLS_SERVER_ROOTS;
 
 #[cfg(feature = "agent")]
 use crate::device::services::service_info::ServiceInfo;
 #[cfg(feature = "agent")]
 use crate::device::system_metrics::SystemMetrics;
 use crate::{auth::AuthManager, config::Config, retry_async};
+
+use crate::util::tls::get_tls_connection;
 
 // Import shared types
 pub use m87_shared::auth::{
@@ -258,6 +253,140 @@ pub async fn report_device_details(
     }
 }
 
+pub async fn request_forward(
+    api_url: &str,
+    token: &str,
+    device_id: &str,
+    device_short_id: &str,
+    target_port: u16,
+    access: ForwardAccess,
+    name: &str,
+    trust_invalid_server_cert: bool,
+) -> Result<()> {
+    let client = get_client(trust_invalid_server_cert)?;
+    let url = format!(
+        "{}/device/{}/forward",
+        api_url.trim_end_matches('/'),
+        device_id
+    );
+
+    let body = CreateForward {
+        name: Some(name.to_string()),
+        access,
+        device_short_id: device_short_id.to_string(),
+        device_id: device_id.to_string(),
+        target_port,
+    };
+
+    let res = retry_async!(
+        3,
+        3,
+        client.post(&url).bearer_auth(token).json(&body).send()
+    );
+    if let Err(e) = res {
+        eprintln!("[Device] Error requesting forward: {}", e);
+        return Err(anyhow!(e));
+    }
+    match res.unwrap().error_for_status() {
+        Ok(_r) => Ok(()),
+        Err(e) => {
+            eprintln!("[Device] Error requesting forward: {}", e);
+            Err(anyhow!(e))
+        }
+    }
+}
+
+pub async fn list_forwards(
+    api_url: &str,
+    token: &str,
+    device_id: &str,
+    trust_invalid_server_cert: bool,
+) -> Result<Vec<PublicForward>> {
+    let client = get_client(trust_invalid_server_cert)?;
+    let url = format!(
+        "{}/device/{}/forwards",
+        api_url.trim_end_matches('/'),
+        device_id
+    );
+
+    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send());
+    if let Err(e) = res {
+        eprintln!("[Device] Error listing forwards: {}", e);
+        return Err(anyhow!(e));
+    }
+    match res.unwrap().error_for_status() {
+        Ok(r) => {
+            let forwards = r.json::<Vec<PublicForward>>().await?;
+            Ok(forwards)
+        }
+        Err(e) => {
+            eprintln!("[Device] Error listing forwards: {}", e);
+            Err(anyhow!(e))
+        }
+    }
+}
+
+pub async fn delete_forward(
+    api_url: &str,
+    token: &str,
+    device_id: &str,
+    trust_invalid_server_cert: bool,
+    target_port: u16,
+) -> Result<()> {
+    let client = get_client(trust_invalid_server_cert)?;
+    let url = format!(
+        "{}/device/{}/forward/{}",
+        api_url.trim_end_matches('/'),
+        device_id,
+        target_port
+    );
+
+    let res = retry_async!(3, 3, client.delete(&url).bearer_auth(token).send());
+    if let Err(e) = res {
+        eprintln!("[Device] Error deleting forward: {}", e);
+        return Err(anyhow!(e));
+    }
+    match res.unwrap().error_for_status() {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("[Device] Error deleting forward: {}", e);
+            Err(anyhow!(e))
+        }
+    }
+}
+
+pub async fn get_forward(
+    api_url: &str,
+    token: &str,
+    device_id: &str,
+    trust_invalid_server_cert: bool,
+    target_port: u16,
+) -> Result<PublicForward> {
+    let client = get_client(trust_invalid_server_cert)?;
+    let url = format!(
+        "{}/device/{}/forward/{}",
+        api_url.trim_end_matches('/'),
+        device_id,
+        target_port
+    );
+
+    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send());
+    if let Err(e) = res {
+        eprintln!("[Device] Error getting forward: {}", e);
+        return Err(anyhow!(e));
+    }
+    match res.unwrap().error_for_status() {
+        Ok(r) => {
+            let forward = r.json().await?;
+            Ok(forward)
+        }
+        Err(e) => {
+            eprintln!("[Device] Error getting forward: {}", e);
+            Err(anyhow!(e))
+        }
+    }
+}
+
 // Agent-specific: Request token for control tunnel
 #[cfg(feature = "agent")]
 pub async fn request_control_tunnel_token(
@@ -292,29 +421,6 @@ pub async fn request_control_tunnel_token(
 
 // Agent-specific: Maintain persistent control tunnel connection
 #[cfg(feature = "agent")]
-async fn connect_host(host: &str, port: u16) -> anyhow::Result<TcpStream> {
-    for i in 0..10 {
-        match tokio::net::lookup_host((host, port)).await {
-            Ok(addrs) => {
-                for addr in addrs {
-                    if addr.is_ipv4() {
-                        if let Ok(stream) = TcpStream::connect(addr).await {
-                            return Ok(stream);
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-
-        let backoff = 200 + (i * 150);
-        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-    }
-    Err(anyhow!("DNS resolution failed after retries"))
-}
-
-// Agent-specific: Maintain persistent control tunnel connection
-#[cfg(feature = "agent")]
 pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     let config = Config::load().context("Failed to load configuration")?;
     let token = AuthManager::get_device_token()?;
@@ -329,49 +435,46 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     .await?;
 
     // 1. TCP connect
-    let control_host = format!(
-        "control.{}",
-        config
-            .get_server_url()
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-    );
+    let control_host = format!("control.{}", config.get_server_hostname());
 
-    let tcp = connect_host(&control_host, 443).await?;
+    // let tcp = connect_host(&control_host, 443).await?;
 
-    // 2. Root store (use system roots or webpki)
-    let mut root_store = RootCertStore::empty();
-    root_store.roots.extend(TLS_SERVER_ROOTS.iter().cloned());
+    // // 2. Root store (use system roots or webpki)
+    // let mut root_store = RootCertStore::empty();
+    // root_store.roots.extend(TLS_SERVER_ROOTS.iter().cloned());
 
-    // 3. TLS client config
-    info!(
-        "Creating TLS client config with trust_invalid_server_cert: {}",
-        config.trust_invalid_server_cert
-    );
-    let tls_config = if config.trust_invalid_server_cert {
-        warn!("Trusting invalid server certificate");
-        Arc::new(
-            ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerify))
-                .with_no_client_auth(),
-        )
-    } else {
-        Arc::new(
-            ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth(),
-        )
-    };
+    // // 3. TLS client config
+    // info!(
+    //     "Creating TLS client config with trust_invalid_server_cert: {}",
+    //     config.trust_invalid_server_cert
+    // );
+    // let tls_config = if config.trust_invalid_server_cert {
+    //     warn!("Trusting invalid server certificate");
+    //     Arc::new(
+    //         ClientConfig::builder()
+    //             .dangerous()
+    //             .with_custom_certificate_verifier(Arc::new(NoVerify))
+    //             .with_no_client_auth(),
+    //     )
+    // } else {
+    //     Arc::new(
+    //         ClientConfig::builder()
+    //             .with_root_certificates(root_store)
+    //             .with_no_client_auth(),
+    //     )
+    // };
 
-    // 4. TLS handshake (SNI)
-    let connector = TlsConnector::from(tls_config);
-    let server_name = ServerName::try_from(control_host.clone()).context("invalid SNI name")?;
-    let mut tls = connector.connect(server_name, tcp).await?;
+    // // 4. TLS handshake (SNI)
+    // let connector = TlsConnector::from(tls_config);
+    // let server_name = ServerName::try_from(control_host.clone()).context("invalid SNI name")?;
+    // let mut tls = connector.connect(server_name, tcp).await?;
+    let mut tls =
+        get_tls_connection(control_host.to_string(), config.trust_invalid_server_cert).await?;
 
     info!("connected to {}. Starting handshake", &control_host);
     // 4. Send handshake line
     use tokio::io::AsyncWriteExt;
+
     let line = format!(
         "M87 device_id={} token={}\n",
         device_id, control_tunnel_token
@@ -399,7 +502,6 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
                 }
             };
 
-            // ---- CONNECT TO LOCAL SERVICE ----
             let mut local = match TcpStream::connect(("127.0.0.1", port)).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -408,7 +510,6 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
                 }
             };
 
-            // ---- PROXY IO ----
             let _ = match io::copy_bidirectional(&mut yamux_stream, &mut local).await {
                 Ok(_) => info!("proxy closed cleanly"),
                 Err(e) => info!("proxy closed with error: {:?}", e),
@@ -521,49 +622,5 @@ fn get_client(trust_invalid_server_cert: bool) -> Result<Client> {
         // otherwise we verify the certificate
         let client = Client::new();
         Ok(client)
-    }
-}
-
-#[derive(Debug)]
-struct NoVerify;
-
-impl ServerCertVerifier for NoVerify {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::ED25519,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA256,
-        ]
     }
 }

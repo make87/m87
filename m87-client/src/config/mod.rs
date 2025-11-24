@@ -96,6 +96,13 @@ impl Config {
         }
     }
 
+    pub fn get_server_hostname(&self) -> String {
+        let url = self.get_server_url();
+        url.trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .to_string()
+    }
+
     /// Create a deterministic BSON-style ObjectId string from hostname and MAC address.
     /// Agent-specific: Used for device registration
     #[cfg(feature = "agent")]

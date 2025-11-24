@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::device;
 use crate::device::logs;
 use crate::device::shell;
+use crate::device::tunnel;
 use crate::devices;
 use crate::update;
 use crate::util;
@@ -130,13 +131,21 @@ pub struct DeviceRoot {
 pub enum DeviceCommand {
     Shell,
     Tunnel {
-        spec: String,
+        port: u16,
         #[arg(long)]
         background: bool,
         #[arg(long)]
         persist: bool,
         #[arg(long)]
         name: Option<String>,
+        #[arg(long)]
+        ips: Option<String>,
+        #[arg(long)]
+        add_own_ip: bool,
+        #[arg(long)]
+        open: bool,
+        #[arg(long)]
+        local_port: Option<u16>,
     },
     Tunnels {
         #[command(subcommand)]
@@ -166,7 +175,7 @@ pub enum DeviceCommand {
 #[derive(Subcommand, Debug)]
 pub enum DeviceTunnelsCommand {
     List,
-    Close { id: String },
+    Close { port: u16 },
 }
 
 #[cfg(feature = "agent")]
@@ -494,31 +503,41 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
         }
 
         DeviceCommand::Tunnel {
-            spec,
+            port,
             background,
             persist,
             name,
+            ips,
+            add_own_ip,
+            open,
+            local_port,
         } => {
-            println!("Would create tunnel on {}: {}", device, spec);
-            println!(
-                "  background={background}, persist={persist}, name={:?}",
-                name
-            );
-            bail!("Not implemented");
+            // split by ,
+            let ips = ips.map(|f| f.split(",").map(|s| s.to_string()).collect::<Vec<String>>());
+            let _ = tunnel::create_tunnel(&device, port, ips, add_own_ip, open, name).await?;
+            if let Some(localport) = local_port {
+                let _ = tunnel::open_local_tunnel(&device, localport, name).await?;
+                if !persist {
+                    let _ = tunnel::delete_tunnel(&device, port).await?;
+                }
+            }
+            Ok(())
         }
 
         DeviceCommand::Tunnels {
             cmd: DeviceTunnelsCommand::List,
         } => {
-            println!("Would list tunnels on {}", device);
-            bail!("Not implemented");
+            let tunnels = tunnel::list_tunnels(&device).await?;
+            println!("Tunnels on {}: {:#?}", device, tunnels);
+            Ok(())
         }
 
         DeviceCommand::Tunnels {
-            cmd: DeviceTunnelsCommand::Close { id },
+            cmd: DeviceTunnelsCommand::Close { port },
         } => {
-            println!("Would close tunnel {} on {}", id, device);
-            bail!("Not implemented");
+            let tunnels = tunnel::delete_tunnel(&device, port).await?;
+            println!("Closed tunnel on {}: {}", device, port);
+            Ok(())
         }
 
         DeviceCommand::Ls { path } => {

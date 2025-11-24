@@ -12,3 +12,5 @@ pub mod retry;
 
 #[cfg(feature = "agent")]
 pub mod system_info;
+
+pub mod tls;
