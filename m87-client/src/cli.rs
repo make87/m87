@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use crate::auth;
 use crate::config::Config;
 use crate::device;
+use crate::device::logs;
 use crate::device::shell;
 use crate::devices;
 use crate::update;
@@ -531,11 +532,8 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
         }
 
         DeviceCommand::Logs { follow, tail } => {
-            println!(
-                "Would run logs on {} (follow={follow}, tail={tail})",
-                device
-            );
-            bail!("Not implemented");
+            logs::run_logs(&device).await?;
+            Ok(())
         }
 
         DeviceCommand::Stats => {

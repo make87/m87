@@ -8,4 +8,5 @@ pub mod services;
 #[cfg(feature = "agent")]
 pub mod system_metrics;
 
+pub mod logs;
 pub mod shell;
