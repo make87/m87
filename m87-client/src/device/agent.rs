@@ -66,10 +66,6 @@ TimeoutStopSec=30
 StartLimitBurst=5
 StartLimitIntervalSec=30
 Environment=RUST_LOG=info
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=true
-NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
