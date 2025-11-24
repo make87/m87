@@ -6,7 +6,7 @@ use tokio::{
     select,
     time::{timeout, Duration},
 };
-use tracing::error;
+use tracing::{error, info};
 
 use std::{io::Read, io::Write, sync::Arc};
 
@@ -14,7 +14,7 @@ pub async fn handle_terminal_ws(socket: WebSocket) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     if let Err(e) = ws_tx
-        .send(Message::Text("Initializing shell...\n".into()))
+        .send(Message::Text("Initializing shell...\n\r".into()))
         .await
     {
         error!("Failed to send initialization message: {}", e);
@@ -53,6 +53,7 @@ pub async fn handle_terminal_ws(socket: WebSocket) {
     };
 
     let mut cmd = CommandBuilder::new(shell);
+    cmd.args(&["-l", "-i"]);
     cmd.env("TERM", "xterm-256color");
 
     let mut child = match pair.slave.spawn_command(cmd) {
@@ -99,7 +100,6 @@ pub async fn handle_terminal_ws(socket: WebSocket) {
     // --------------------------------------------------------
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
-    let tx_out = tx.clone();
     tokio::task::spawn_blocking(move || {
         let mut reader = reader;
         let mut buf = [0u8; 1024];
@@ -109,15 +109,21 @@ pub async fn handle_terminal_ws(socket: WebSocket) {
 
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    info!("closed pty");
+                    break;
+                }
                 Ok(n) => {
                     if let Some(tx) = ready_opt.take() {
                         // send “ready” exactly once
                         let _ = tx.send(());
                     }
-                    let _ = tx_out.send(buf[..n].to_vec());
+                    let _ = tx.send(buf[..n].to_vec());
                 }
-                Err(_) => break,
+                Err(_) => {
+                    info!("error reading pty");
+                    break;
+                }
             }
         }
 
@@ -150,7 +156,7 @@ pub async fn handle_terminal_ws(socket: WebSocket) {
     // --------------------------------------------------------
     // 5. Main loop: WebSocket <-> PTY
     // --------------------------------------------------------
-    loop {
+    'outer: loop {
         select! {
             // WebSocket → PTY
             Some(Ok(msg)) = ws_rx.next() => {
@@ -160,10 +166,10 @@ pub async fn handle_terminal_ws(socket: WebSocket) {
                         let writer = Arc::clone(&writer);
                         if tokio::task::spawn_blocking(move || {
                             let mut w = writer.blocking_lock();
-                            w.write_all(&data.as_bytes())?;
+                            w.write_all(data.as_bytes())?;
                             w.flush()
                         }).await.is_err() {
-                            break;
+                            break 'outer;
                         }
                     }
                     Message::Binary(bin) => {
@@ -174,10 +180,10 @@ pub async fn handle_terminal_ws(socket: WebSocket) {
                             w.write_all(&data)?;
                             w.flush()
                         }).await.is_err() {
-                            break;
+                            break 'outer;
                         }
                     }
-                    Message::Close(_) => break,
+                    Message::Close(_) => break 'outer,
                     _ => {}
                 }
             }
@@ -186,11 +192,21 @@ pub async fn handle_terminal_ws(socket: WebSocket) {
             Some(out) = rx.recv() => {
                 let text = String::from_utf8_lossy(&out).to_string();
                 if ws_tx.send(Message::Text(Utf8Bytes::from(text))).await.is_err() {
-                    break;
+                    break 'outer;
                 }
             }
 
-            else => break,
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                if let Some(_status) = child.try_wait().unwrap_or(None) {
+                    // bash is gone
+                    break 'outer;
+                }
+            }
+
+            else => {
+                // PTY thread ended OR websocket ended
+                break 'outer;
+            }
         }
     }
 
@@ -198,4 +214,10 @@ pub async fn handle_terminal_ws(socket: WebSocket) {
     // 6. Cleanup
     // --------------------------------------------------------
     let _ = child.kill();
+
+    // Explicitly close the websocket so clients can exit cleanly
+    let _ = ws_tx.send(Message::Close(None)).await;
+
+    // Dropping ws_tx also helps ensure the stream terminates
+    drop(ws_tx);
 }

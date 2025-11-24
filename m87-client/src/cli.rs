@@ -4,13 +4,14 @@ use clap::{Parser, Subcommand};
 use crate::auth;
 use crate::config::Config;
 use crate::device;
+use crate::device::shell;
 use crate::devices;
 use crate::update;
 use crate::util;
 
 /// Represents a parsed device path (either local or remote)
 struct DevicePath {
-    device: Option<String>,  // None = local, Some(name) = remote
+    device: Option<String>, // None = local, Some(name) = remote
     path: String,
 }
 
@@ -111,9 +112,60 @@ enum Commands {
         dest: String,
     },
 
-    /// Remote device commands (device-first syntax)
     #[command(external_subcommand)]
     Device(Vec<String>),
+}
+
+#[derive(Parser, Debug)]
+pub struct DeviceRoot {
+    /// Device name or ID
+    pub device: String,
+
+    #[command(subcommand)]
+    pub command: DeviceCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DeviceCommand {
+    Shell,
+    Tunnel {
+        spec: String,
+        #[arg(long)]
+        background: bool,
+        #[arg(long)]
+        persist: bool,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Tunnels {
+        #[command(subcommand)]
+        cmd: DeviceTunnelsCommand,
+    },
+    Ls {
+        path: Vec<String>,
+    },
+    Docker {
+        args: Vec<String>,
+    },
+    Logs {
+        #[arg(short = 'f', long)]
+        follow: bool,
+        #[arg(long, default_value = "100")]
+        tail: usize,
+    },
+    Stats,
+    Cmd {
+        #[arg(short = 'i', long)]
+        interactive: bool,
+        #[arg(required = true, last = true)]
+        command: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DeviceTunnelsCommand {
+    List,
+    Close { id: String },
 }
 
 #[cfg(feature = "agent")]
@@ -312,12 +364,18 @@ pub async fn cli() -> anyhow::Result<()> {
             println!("m87 CLI v{}", env!("CARGO_PKG_VERSION"));
             println!("Build: {}", option_env!("GIT_COMMIT").unwrap_or("unknown"));
             println!("Rust: {}", env!("CARGO_PKG_RUST_VERSION"));
-            println!("Platform: {}/{}", std::env::consts::OS, std::env::consts::ARCH);
+            println!(
+                "Platform: {}/{}",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            );
         }
 
         Commands::Update { version } => {
             if let Some(v) = version {
-                println!("Note: Specific version updates not yet supported, updating to latest version");
+                println!(
+                    "Note: Specific version updates not yet supported, updating to latest version"
+                );
                 eprintln!("Requested version: {}", v);
             }
 
@@ -339,7 +397,10 @@ pub async fn cli() -> anyhow::Result<()> {
         }
 
         Commands::Device(args) => {
-            handle_device_command(args).await?;
+            let parsed = DeviceRoot::try_parse_from(
+                std::iter::once("m87-dev").chain(args.iter().map(|s| s.as_str())),
+            )?;
+            handle_device_command(parsed).await?;
         }
     }
 
@@ -357,22 +418,28 @@ async fn handle_cp_command(source: &str, dest: &str) -> anyhow::Result<()> {
         (Some(src_dev), Some(dst_dev)) => {
             // Remote to remote copy
             eprintln!("Error: 'cp' command is not yet implemented");
-            eprintln!("Would copy from '{}:{}' to '{}:{}'",
-                     src_dev, src_path.path, dst_dev, dst_path.path);
+            eprintln!(
+                "Would copy from '{}:{}' to '{}:{}'",
+                src_dev, src_path.path, dst_dev, dst_path.path
+            );
             bail!("Not implemented");
         }
         (None, Some(dst_dev)) => {
             // Local to remote copy
             eprintln!("Error: 'cp' command is not yet implemented");
-            eprintln!("Would copy local '{}' to '{}:{}'",
-                     src_path.path, dst_dev, dst_path.path);
+            eprintln!(
+                "Would copy local '{}' to '{}:{}'",
+                src_path.path, dst_dev, dst_path.path
+            );
             bail!("Not implemented");
         }
         (Some(src_dev), None) => {
             // Remote to local copy
             eprintln!("Error: 'cp' command is not yet implemented");
-            eprintln!("Would copy from '{}:{}' to local '{}'",
-                     src_dev, src_path.path, dst_path.path);
+            eprintln!(
+                "Would copy from '{}:{}' to local '{}'",
+                src_dev, src_path.path, dst_path.path
+            );
             bail!("Not implemented");
         }
     }
@@ -389,172 +456,103 @@ async fn handle_sync_command(source: &str, dest: &str) -> anyhow::Result<()> {
         (Some(src_dev), Some(dst_dev)) => {
             // Remote to remote sync
             eprintln!("Error: 'sync' command is not yet implemented");
-            eprintln!("Would sync from '{}:{}' to '{}:{}'",
-                     src_dev, src_path.path, dst_dev, dst_path.path);
+            eprintln!(
+                "Would sync from '{}:{}' to '{}:{}'",
+                src_dev, src_path.path, dst_dev, dst_path.path
+            );
             bail!("Not implemented");
         }
         (None, Some(dst_dev)) => {
             // Local to remote sync
             eprintln!("Error: 'sync' command is not yet implemented");
-            eprintln!("Would sync local '{}' to '{}:{}'",
-                     src_path.path, dst_dev, dst_path.path);
+            eprintln!(
+                "Would sync local '{}' to '{}:{}'",
+                src_path.path, dst_dev, dst_path.path
+            );
             bail!("Not implemented");
         }
         (Some(src_dev), None) => {
             // Remote to local sync
             eprintln!("Error: 'sync' command is not yet implemented");
-            eprintln!("Would sync from '{}:{}' to local '{}'",
-                     src_dev, src_path.path, dst_path.path);
+            eprintln!(
+                "Would sync from '{}:{}' to local '{}'",
+                src_dev, src_path.path, dst_path.path
+            );
             bail!("Not implemented");
         }
     }
 }
 
-async fn handle_device_command(args: Vec<String>) -> anyhow::Result<()> {
-    if args.is_empty() {
-        bail!("Device name required. Usage: m87 <device> <command> [args...]");
-    }
+async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
+    let device = cmd.device;
 
-    let device_name = &args[0];
+    match cmd.command {
+        DeviceCommand::Shell => {
+            let _ = shell::run_shell(&device).await?;
+            Ok(())
+        }
 
-    if args.len() < 2 {
-        bail!("Command required. Usage: m87 {} <command> [args...]", device_name);
-    }
-
-    let command = &args[1];
-    let remaining_args = &args[2..];
-
-    match command.as_str() {
-        "shell" => {
-            if !remaining_args.is_empty() {
-                bail!("The shell command does not accept any options or flags");
-            }
-            eprintln!("Error: 'shell' command is not yet implemented for device '{}'", device_name);
-            eprintln!("Would open interactive shell session");
+        DeviceCommand::Tunnel {
+            spec,
+            background,
+            persist,
+            name,
+        } => {
+            println!("Would create tunnel on {}: {}", device, spec);
+            println!(
+                "  background={background}, persist={persist}, name={:?}",
+                name
+            );
             bail!("Not implemented");
         }
 
-        "tunnel" => {
-            // Handle tunnel creation only
-            if remaining_args.is_empty() {
-                bail!("Tunnel command requires arguments. Usage: m87 {} tunnel <remote>:<local>", device_name);
-            }
-
-            let first_arg = &remaining_args[0];
-
-            // Create tunnel: <remote>:<local>
-            if !first_arg.contains(':') {
-                bail!("Invalid tunnel format. Expected <remote-port>:<local-port>");
-            }
-            eprintln!("Error: 'tunnel' command is not yet implemented for device '{}'", device_name);
-            eprintln!("Would create tunnel: {}", first_arg);
-
-            // Parse additional flags
-            for arg in remaining_args.iter().skip(1) {
-                match arg.as_str() {
-                    "--background" | "-b" => eprintln!("  Run in background: true"),
-                    "--persist" => eprintln!("  Persistent (survives reboots): true"),
-                    _ if arg.starts_with("--name") => {
-                        eprintln!("  Tunnel name specified");
-                    }
-                    _ => {}
-                }
-            }
+        DeviceCommand::Tunnels {
+            cmd: DeviceTunnelsCommand::List,
+        } => {
+            println!("Would list tunnels on {}", device);
             bail!("Not implemented");
         }
 
-        "tunnels" => {
-            // Handle tunnels close <id> only
-            if remaining_args.len() < 2 {
-                bail!("Usage: m87 {} tunnels close <id>", device_name);
-            }
-
-            if remaining_args[0] != "close" {
-                bail!("Unknown tunnels subcommand. Usage: m87 {} tunnels close <id>", device_name);
-            }
-
-            let tunnel_id = &remaining_args[1];
-            eprintln!("Error: 'tunnels close' command is not yet implemented for device '{}'", device_name);
-            eprintln!("Would close tunnel with ID: {}", tunnel_id);
+        DeviceCommand::Tunnels {
+            cmd: DeviceTunnelsCommand::Close { id },
+        } => {
+            println!("Would close tunnel {} on {}", id, device);
             bail!("Not implemented");
         }
 
-        "ls" => {
-            eprintln!("Error: 'ls' command is not yet implemented for device '{}'", device_name);
-            eprintln!("Would execute: ls {}", remaining_args.join(" "));
+        DeviceCommand::Ls { path } => {
+            println!("Would run ls on {} with {:?}", device, path);
             bail!("Not implemented");
         }
 
-        "docker" => {
-            eprintln!("Error: 'docker' command is not yet implemented for device '{}'", device_name);
-            eprintln!("Would set DOCKER_HOST=ssh://user@{}", device_name);
-            eprintln!("Would execute: docker {}", remaining_args.join(" "));
+        DeviceCommand::Docker { args } => {
+            println!("Would run docker on {} with {:?}", device, args);
             bail!("Not implemented");
         }
 
-        "logs" => {
-            eprintln!("Error: 'logs' command is not yet implemented for device '{}'", device_name);
-
-            // Parse logs arguments
-            let mut follow = false;
-            let mut tail = 100;
-
-            let mut i = 0;
-            while i < remaining_args.len() {
-                let arg = &remaining_args[i];
-                match arg.as_str() {
-                    "-f" => follow = true,
-                    "--tail" => {
-                        if i + 1 < remaining_args.len() {
-                            if let Ok(n) = remaining_args[i + 1].parse::<usize>() {
-                                tail = n;
-                            }
-                            i += 1;
-                        }
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-
-            eprintln!("Would stream logs from device");
-            eprintln!("  Follow: {}, Tail: {}", follow, tail);
+        DeviceCommand::Logs { follow, tail } => {
+            println!(
+                "Would run logs on {} (follow={follow}, tail={tail})",
+                device
+            );
             bail!("Not implemented");
         }
 
-        "stats" => {
-            eprintln!("Error: 'stats' command is not yet implemented for device '{}'", device_name);
-            eprintln!("Would show resource statistics");
+        DeviceCommand::Stats => {
+            println!("Would show stats for {}", device);
             bail!("Not implemented");
         }
 
-        "cmd" => {
-            // Look for -- separator
-            let cmd_start = remaining_args.iter().position(|s| s == "--");
-
-            if cmd_start.is_none() {
-                bail!("Usage: m87 {} cmd [-i] -- '<command>'", device_name);
-            }
-
-            let mut interactive = false;
-
-            // Check for -i flag before --
-            for i in 0..cmd_start.unwrap() {
-                if remaining_args[i] == "-i" || remaining_args[i] == "--interactive" {
-                    interactive = true;
-                }
-            }
-
-            let command_args = &remaining_args[cmd_start.unwrap() + 1..];
-
-            eprintln!("Error: 'cmd' command is not yet implemented for device '{}'", device_name);
-            eprintln!("Would execute command (interactive={}): {}", interactive, command_args.join(" "));
+        DeviceCommand::Cmd {
+            interactive,
+            command,
+        } => {
+            println!(
+                "Would exec '{}' on {} (interactive={interactive})",
+                command.join(" "),
+                device
+            );
             bail!("Not implemented");
-        }
-
-        _ => {
-            bail!("Unknown command '{}' for device '{}'. Available commands: shell, tunnel, tunnels, ls, docker, logs, stats, cmd",
-                  command, device_name);
         }
     }
 }
