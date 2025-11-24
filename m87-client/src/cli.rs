@@ -361,9 +361,9 @@ pub async fn cli() -> anyhow::Result<()> {
         },
 
         Commands::Version => {
-            println!("m87 CLI v{}", env!("CARGO_PKG_VERSION"));
-            println!("Build: {}", option_env!("GIT_COMMIT").unwrap_or("unknown"));
-            println!("Rust: {}", env!("CARGO_PKG_RUST_VERSION"));
+            println!("Version: {}", env!("CARGO_PKG_VERSION"));
+            println!("Build: {}", env!("GIT_COMMIT"));
+            println!("Rust: {}", env!("RUSTC_VERSION"));
             println!(
                 "Platform: {}/{}",
                 std::env::consts::OS,

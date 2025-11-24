@@ -81,9 +81,3 @@ pub async fn get_system_info(enable_geo_lookup: bool) -> Result<server::DeviceSy
 
     Ok(sys_info)
 }
-
-pub async fn get_public_ip() -> Result<String> {
-    let response = reqwest::get("https://api.ipify.org").await?;
-    let ip = response.text().await?;
-    Ok(ip)
-}

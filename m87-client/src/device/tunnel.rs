@@ -4,7 +4,7 @@ use m87_shared::forward::PublicForward;
 
 use crate::devices;
 use crate::server;
-use crate::util::system_info::get_public_ip;
+use crate::util::network::get_public_ip;
 use crate::util::tls::forward_server_port;
 use crate::{auth::AuthManager, config::Config};
 

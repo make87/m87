@@ -1,5 +1,6 @@
 pub mod command;
 pub mod logging;
+pub mod network;
 
 // Agent-specific utilities
 #[cfg(feature = "agent")]
