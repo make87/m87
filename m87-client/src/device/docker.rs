@@ -1,9 +1,11 @@
 use anyhow::{anyhow, Context, Result};
+use futures::{SinkExt, StreamExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
 
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
@@ -99,13 +101,18 @@ impl Drop for DockerProxy {
 
 /// Execute docker command on remote device
 pub async fn run_docker_command(device_name: &str, args: Vec<String>) -> Result<()> {
+    // Install crypto provider for rustls
+    let _ = rustls::crypto::CryptoProvider::install_default(
+        rustls::crypto::ring::default_provider(),
+    );
+
     // Check if docker CLI exists
     check_docker_cli()?;
 
     // Create proxy (automatic cleanup via Drop)
     let proxy = DockerProxy::new(device_name).await?;
 
-    info!("Docker proxy ready at {}", proxy.socket_uri());
+    eprintln!("[DEBUG] Docker proxy ready at {}", proxy.socket_uri());
 
     // Execute docker command with DOCKER_HOST pointing to our socket
     let status = std::process::Command::new("docker")
@@ -137,12 +144,11 @@ async fn start_docker_proxy(device_name: &str, socket_path: &Path) -> Result<()>
     // Remove stale socket if exists
     let _ = std::fs::remove_file(socket_path);
 
-    info!("Starting Docker proxy on {}", socket_path.display());
+    eprintln!("[DEBUG] Starting Docker proxy on {}", socket_path.display());
 
     // Create listener (platform-specific)
     #[cfg(unix)]
-    let listener = UnixListener::bind(socket_path)
-        .context("Failed to create Unix socket")?;
+    let listener = UnixListener::bind(socket_path).context("Failed to create Unix socket")?;
 
     #[cfg(windows)]
     let mut listener = ServerOptions::new()
@@ -166,65 +172,173 @@ async fn start_docker_proxy(device_name: &str, socket_path: &Path) -> Result<()>
         let device = device_name.to_string();
         tokio::spawn(async move {
             if let Err(e) = handle_docker_connection(stream, &device).await {
-                warn!("Docker proxy connection error: {}", e);
+                eprintln!("[ERROR] Docker proxy connection error: {:?}", e);
             }
         });
     }
 }
 
-/// Handle single Docker API connection
+/// Handle single Docker API connection via WebSocket
 #[cfg(unix)]
 async fn handle_docker_connection(mut local: UnixStream, device_name: &str) -> Result<()> {
+    use crate::auth::AuthManager;
     use crate::config::Config;
     use crate::devices;
-    use crate::util::tls;
 
-    // 1. Get device info
+    eprintln!("[DEBUG] Docker connection accepted for device: {}", device_name);
+
+    // Get device info
     let dev = devices::list_devices()
-        .await?
+        .await
+        .context("Failed to list devices")?
         .into_iter()
         .find(|d| d.name == device_name)
         .ok_or_else(|| anyhow!("Device '{}' not found", device_name))?;
 
-    // 2. Get config for server hostname
-    let config = Config::load()?;
-    let host_name = format!("docker-{}.{}", dev.short_id, config.get_server_hostname());
+    // Get config and build WebSocket URL
+    let config = Config::load().context("Failed to load config")?;
+    let base = config.get_server_hostname();
+    let url = format!("wss://{}.{}/docker", dev.short_id, base);
 
-    // 3. Connect to server via TLS (server will route to device's Docker socket)
-    let mut remote = tls::get_tls_connection(host_name, config.trust_invalid_server_cert)
+    eprintln!("[DEBUG] Connecting to: {}", url);
+
+    // Get auth token
+    let token = AuthManager::get_cli_token().await?;
+
+    // Build WebSocket request with auth
+    let mut req = url.into_client_request()?;
+    req.headers_mut()
+        .insert("Sec-WebSocket-Protocol", format!("bearer.{}", token).parse()?);
+
+    // Connect to WebSocket
+    let (ws_stream, _) = connect_async(req)
         .await
-        .context("Failed to establish TLS connection to server")?;
+        .context("Failed to connect to WebSocket")?;
 
-    // 4. Bidirectional copy between local socket and remote connection
-    tokio::io::copy_bidirectional(&mut local, &mut remote).await?;
+    eprintln!("[DEBUG] WebSocket connected, starting bidirectional copy");
 
+    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+    let (mut local_read, mut local_write) = local.into_split();
+
+    // Task 1: Local socket → WebSocket
+    let local_to_ws = async {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            match local_read.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if ws_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(
+                            buf[..n].to_vec(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    };
+
+    // Task 2: WebSocket → Local socket
+    let ws_to_local = async {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            match msg {
+                tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                    if local_write.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                tokio_tungstenite::tungstenite::Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    };
+
+    // Run both tasks concurrently
+    tokio::select! {
+        _ = local_to_ws => {}
+        _ = ws_to_local => {}
+    }
+
+    eprintln!("[DEBUG] Docker connection closed");
     Ok(())
 }
 
 #[cfg(windows)]
 async fn handle_docker_connection(mut local: NamedPipeServer, device_name: &str) -> Result<()> {
+    use crate::auth::AuthManager;
     use crate::config::Config;
     use crate::devices;
-    use crate::util::tls;
 
-    // 1. Get device info
+    // Get device info
     let dev = devices::list_devices()
         .await?
         .into_iter()
         .find(|d| d.name == device_name)
         .ok_or_else(|| anyhow!("Device '{}' not found", device_name))?;
 
-    // 2. Get config for server hostname
+    // Get config and build WebSocket URL
     let config = Config::load()?;
-    let host_name = format!("docker-{}.{}", dev.short_id, config.get_server_hostname());
+    let base = config.get_server_hostname();
+    let url = format!("wss://{}.{}/docker", dev.short_id, base);
 
-    // 3. Connect to server via TLS (server will route to device's Docker socket)
-    let mut remote = tls::get_tls_connection(host_name, config.trust_invalid_server_cert)
-        .await
-        .context("Failed to establish TLS connection to server")?;
+    // Get auth token
+    let token = AuthManager::get_cli_token().await?;
 
-    // 4. Bidirectional copy between local socket and remote connection
-    tokio::io::copy_bidirectional(&mut local, &mut remote).await?;
+    // Build WebSocket request with auth
+    let mut req = url.into_client_request()?;
+    req.headers_mut()
+        .insert("Sec-WebSocket-Protocol", format!("bearer.{}", token).parse()?);
+
+    // Connect to WebSocket
+    let (ws_stream, _) = connect_async(req).await?;
+    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+    let (mut local_read, mut local_write) = tokio::io::split(local);
+
+    // Task 1: Local pipe → WebSocket
+    let local_to_ws = async {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            match local_read.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if ws_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(
+                            buf[..n].to_vec(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    };
+
+    // Task 2: WebSocket → Local pipe
+    let ws_to_local = async {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            match msg {
+                tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                    if local_write.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                tokio_tungstenite::tungstenite::Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = local_to_ws => {}
+        _ = ws_to_local => {}
+    }
 
     Ok(())
 }

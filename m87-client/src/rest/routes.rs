@@ -16,11 +16,13 @@ use tokio::net::TcpListener;
 use crate::rest::auth::validate_token;
 use crate::rest::{
     container_logs::handle_container_logs_ws, container_terminal::handle_container_terminal_ws,
-    logs::handle_logs_ws, metrics::handle_system_metrics_ws, terminal::handle_terminal_ws,
+    docker::handle_docker_ws, logs::handle_logs_ws, metrics::handle_system_metrics_ws,
+    terminal::handle_terminal_ws,
 };
 
 pub fn build_router() -> Router {
     Router::new()
+        .route("/docker", get(ws_upgrade(handle_docker_ws)))
         .route("/logs", get(ws_upgrade(handle_logs_ws)))
         .route("/terminal", get(ws_upgrade(handle_terminal_ws)))
         .route("/metrics", get(ws_upgrade(handle_system_metrics_ws)))
