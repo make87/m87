@@ -118,6 +118,7 @@ pub async fn run_docker_command(device_name: &str, args: Vec<String>) -> Result<
         .args(args)
         .env("DOCKER_HOST", proxy.socket_uri())
         .exec()
+        .await
 }
 
 fn check_docker_cli() -> Result<()> {

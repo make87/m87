@@ -1,13 +1,14 @@
-//! Subprocess execution with proper signal handling.
+//! Subprocess execution with proper signal handling using tokio.
 //!
-//! This module provides utilities to run external commands while properly
-//! forwarding signals (SIGINT, SIGTERM, etc.) to the child process.
-//! This ensures that Ctrl+C is handled by the child, not by m87.
+//! Uses tokio::process for async child management. The child shares
+//! the terminal's process group, so it receives SIGINT directly from
+//! the terminal when user presses Ctrl+C.
 
 use anyhow::{Context, Result};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use tokio::process::Command;
 
-/// Builder for running external commands with signal forwarding.
+/// Builder for running external commands.
 pub struct SubprocessBuilder {
     program: String,
     args: Vec<String>,
@@ -33,40 +34,16 @@ impl SubprocessBuilder {
         self
     }
 
-    /// Run the command with signal forwarding.
+    /// Run the command and wait for it to complete.
+    /// The child process receives terminal signals (SIGINT, etc.) directly.
     /// This function does NOT return on success - it calls std::process::exit().
-    pub fn exec(self) -> Result<()> {
-        #[cfg(unix)]
-        {
-            self.exec_unix()
-        }
-        #[cfg(windows)]
-        {
-            self.exec_windows()
-        }
-    }
-}
-
-#[cfg(unix)]
-impl SubprocessBuilder {
-    fn exec_unix(self) -> Result<()> {
-        use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
-
-        // Ignore SIGINT in the parent process BEFORE spawning child.
-        // The child inherits the TTY and will receive SIGINT directly from the terminal.
-        // We ignore it here so the parent waits for the child to handle it.
-        // SAFETY: Setting signal handler to SIG_IGN is safe
-        unsafe {
-            let ignore = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
-            let _ = sigaction(Signal::SIGINT, &ignore);
-            let _ = sigaction(Signal::SIGQUIT, &ignore);
-        }
-
+    pub async fn exec(self) -> Result<()> {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::inherit())
+            .kill_on_drop(false); // Let child handle its own signals
 
         for (k, v) in &self.env {
             cmd.env(k, v);
@@ -76,29 +53,10 @@ impl SubprocessBuilder {
             .spawn()
             .with_context(|| format!("Failed to spawn {}", self.program))?;
 
-        let status = child.wait()?;
-
-        std::process::exit(status.code().unwrap_or(1));
-    }
-}
-
-#[cfg(windows)]
-impl SubprocessBuilder {
-    fn exec_windows(self) -> Result<()> {
-        // Windows: no signal forwarding, just run normally
-        let mut cmd = Command::new(&self.program);
-        cmd.args(&self.args)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-
-        for (k, v) in &self.env {
-            cmd.env(k, v);
-        }
-
-        let status = cmd
-            .status()
-            .with_context(|| format!("Failed to execute {}", self.program))?;
+        // Simply wait for child to exit.
+        // Child receives SIGINT directly from terminal (same process group).
+        // No signal forwarding needed
+        let status = child.wait().await?;
 
         std::process::exit(status.code().unwrap_or(1));
     }
