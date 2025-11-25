@@ -112,8 +112,6 @@ pub async fn run_docker_command(device_name: &str, args: Vec<String>) -> Result<
     // Create proxy (automatic cleanup via Drop)
     let proxy = DockerProxy::new(device_name).await?;
 
-    eprintln!("[DEBUG] Docker proxy ready at {}", proxy.socket_uri());
-
     // Execute docker command with DOCKER_HOST pointing to our socket
     let status = std::process::Command::new("docker")
         .args(&args)
@@ -143,8 +141,6 @@ fn check_docker_cli() -> Result<()> {
 async fn start_docker_proxy(device_name: &str, socket_path: &Path) -> Result<()> {
     // Remove stale socket if exists
     let _ = std::fs::remove_file(socket_path);
-
-    eprintln!("[DEBUG] Starting Docker proxy on {}", socket_path.display());
 
     // Create listener (platform-specific)
     #[cfg(unix)]
@@ -185,8 +181,6 @@ async fn handle_docker_connection(mut local: UnixStream, device_name: &str) -> R
     use crate::config::Config;
     use crate::devices;
 
-    eprintln!("[DEBUG] Docker connection accepted for device: {}", device_name);
-
     // Get device info
     let dev = devices::list_devices()
         .await
@@ -200,8 +194,6 @@ async fn handle_docker_connection(mut local: UnixStream, device_name: &str) -> R
     let base = config.get_server_hostname();
     let url = format!("wss://{}.{}/docker", dev.short_id, base);
 
-    eprintln!("[DEBUG] Connecting to: {}", url);
-
     // Get auth token
     let token = AuthManager::get_cli_token().await?;
 
@@ -214,8 +206,6 @@ async fn handle_docker_connection(mut local: UnixStream, device_name: &str) -> R
     let (ws_stream, _) = connect_async(req)
         .await
         .context("Failed to connect to WebSocket")?;
-
-    eprintln!("[DEBUG] WebSocket connected, starting bidirectional copy");
 
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
     let (mut local_read, mut local_write) = local.into_split();
@@ -263,7 +253,6 @@ async fn handle_docker_connection(mut local: UnixStream, device_name: &str) -> R
         _ = ws_to_local => {}
     }
 
-    eprintln!("[DEBUG] Docker connection closed");
     Ok(())
 }
 
