@@ -1,6 +1,8 @@
 pub mod command;
 pub mod logging;
 pub mod network;
+pub mod shutdown;
+pub mod subprocess;
 
 // Agent-specific utilities
 #[cfg(feature = "agent")]

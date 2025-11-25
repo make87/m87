@@ -1,4 +1,4 @@
-use crate::{auth::AuthManager, config::Config, devices};
+use crate::{auth::AuthManager, config::Config, devices, util::shutdown::SHUTDOWN};
 use anyhow::{anyhow, Result};
 use futures::{SinkExt, StreamExt};
 use tokio::io::AsyncWriteExt;
@@ -37,10 +37,10 @@ pub async fn run_logs(device: &str) -> Result<()> {
 
     println!("Connected. Press Ctrl+C to exit.\n");
 
-    // Channel to catch Ctrl+C / stdin EOF
+    // Channel to catch stdin EOF
     let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<()>();
 
-    // Thread watching stdin for Ctrl+C / EOF
+    // Thread watching stdin for EOF
     std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = [0u8; 1];
@@ -84,13 +84,19 @@ pub async fn run_logs(device: &str) -> Result<()> {
         Ok::<_, anyhow::Error>(())
     });
 
-    // Exit on Ctrl+C or WS
+    // Exit on Ctrl+C, stdin EOF, or WS close
     tokio::select! {
         _ = &mut ws_task => {
             // logs stream ended
         }
         _ = stdin_rx.recv() => {
-            // user pressed Ctrl+C or stdin closed
+            // stdin closed
+            let _ = ws_tx.send(
+                tokio_tungstenite::tungstenite::Message::Close(None)
+            ).await;
+        }
+        _ = SHUTDOWN.cancelled() => {
+            // Global cancellation (Ctrl+C caught by main)
             let _ = ws_tx.send(
                 tokio_tungstenite::tungstenite::Message::Close(None)
             ).await;

@@ -423,6 +423,7 @@ pub async fn tunnel_device_port(
     remote_port: u16,
     local_port: u16,
 ) -> Result<()> {
+    use crate::util::shutdown::SHUTDOWN;
     let url = format!(
         "wss://{}.{}/port/{}",
         device_short_id, host_name, remote_port
@@ -471,24 +472,34 @@ pub async fn tunnel_device_port(
     info!("Listening on 127.0.0.1:{local_port} and forwarding to {device_short_id}:{remote_port}");
 
     loop {
-        let (mut local_stream, addr) = listener.accept().await?;
-        info!("New local connection from {addr}");
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (mut local_stream, addr) = accept_result?;
+                info!("New local connection from {addr}");
 
-        // We open a new Yamux stream for each connection, sequentially
-        let mut remote_stream = control.open_stream().await.map_err(|e| {
-            error!("Failed to open Yamux stream: {e}");
-            e
-        })?;
+                // We open a new Yamux stream for each connection, sequentially
+                let mut remote_stream = control.open_stream().await.map_err(|e| {
+                    error!("Failed to open Yamux stream: {e}");
+                    e
+                })?;
 
-        tokio::spawn(async move {
-            match io::copy_bidirectional(&mut local_stream, &mut remote_stream).await {
-                Ok((_a, _b)) => {
-                    info!("Forward stream {addr} closed cleanly");
-                }
-                Err(e) => {
-                    error!("Forward stream {addr} closed with error: {e:?}");
-                }
+                tokio::spawn(async move {
+                    match io::copy_bidirectional(&mut local_stream, &mut remote_stream).await {
+                        Ok((_a, _b)) => {
+                            info!("Forward stream {addr} closed cleanly");
+                        }
+                        Err(e) => {
+                            error!("Forward stream {addr} closed with error: {e:?}");
+                        }
+                    }
+                });
             }
-        });
+            _ = SHUTDOWN.cancelled() => {
+                info!("Shutdown requested, closing tunnel");
+                break;
+            }
+        }
     }
+
+    Ok(())
 }

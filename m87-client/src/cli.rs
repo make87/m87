@@ -441,7 +441,7 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
         } => {
             let _log_tx = init_tracing_with_log_layer("info");
             let local_port = local_port.unwrap_or(remote_port);
-            let _ = tunnel::open_local_tunnel(&device, remote_port, local_port).await?;
+            tunnel::open_local_tunnel(&device, remote_port, local_port).await?;
             Ok(())
         }
         DeviceCommand::Ls { path } => {
@@ -454,7 +454,7 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             Ok(())
         }
 
-        DeviceCommand::Logs { follow, tail } => {
+        DeviceCommand::Logs { follow: _, tail: _ } => {
             tui::logs::run_logs(&device).await?;
             Ok(())
         }

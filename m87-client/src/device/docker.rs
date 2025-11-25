@@ -7,6 +7,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
 
+use crate::util::subprocess::SubprocessBuilder;
+
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
@@ -110,19 +112,13 @@ pub async fn run_docker_command(device_name: &str, args: Vec<String>) -> Result<
     // Create proxy (automatic cleanup via Drop)
     let proxy = DockerProxy::new(device_name).await?;
 
-    // Execute docker command with DOCKER_HOST pointing to our socket
-    let status = std::process::Command::new("docker")
-        .args(&args)
+    // Execute docker command with signal forwarding
+    // This ensures Ctrl+C is forwarded to docker, not caught by m87
+    SubprocessBuilder::new("docker")
+        .args(args)
         .env("DOCKER_HOST", proxy.socket_uri())
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("Failed to execute docker command")?;
-
-    // proxy.drop() called here automatically - socket cleaned up!
-
-    std::process::exit(status.code().unwrap_or(1));
+        .exec()
+        .await
 }
 
 fn check_docker_cli() -> Result<()> {
