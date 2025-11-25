@@ -1,6 +1,5 @@
 use anyhow::bail;
 use clap::{Parser, Subcommand};
-use tokio_util::sync::CancellationToken;
 
 use crate::auth;
 use crate::config::Config;
@@ -210,7 +209,7 @@ enum DevicesCommands {
     },
 }
 
-pub async fn cli(cancel: CancellationToken) -> anyhow::Result<()> {
+pub async fn cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -344,7 +343,7 @@ pub async fn cli(cancel: CancellationToken) -> anyhow::Result<()> {
             let parsed = DeviceRoot::try_parse_from(
                 std::iter::once("m87").chain(args.iter().map(|s| s.as_str())),
             )?;
-            handle_device_command(parsed, cancel).await?;
+            handle_device_command(parsed).await?;
         }
     }
 
@@ -427,7 +426,7 @@ async fn handle_sync_command(source: &str, dest: &str) -> anyhow::Result<()> {
     }
 }
 
-async fn handle_device_command(cmd: DeviceRoot, cancel: CancellationToken) -> anyhow::Result<()> {
+async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
     let device = cmd.device;
 
     match cmd.command {
@@ -442,7 +441,7 @@ async fn handle_device_command(cmd: DeviceRoot, cancel: CancellationToken) -> an
         } => {
             let _log_tx = init_tracing_with_log_layer("info");
             let local_port = local_port.unwrap_or(remote_port);
-            tunnel::open_local_tunnel(&device, remote_port, local_port, cancel).await?;
+            tunnel::open_local_tunnel(&device, remote_port, local_port).await?;
             Ok(())
         }
         DeviceCommand::Ls { path } => {
@@ -456,7 +455,7 @@ async fn handle_device_command(cmd: DeviceRoot, cancel: CancellationToken) -> an
         }
 
         DeviceCommand::Logs { follow: _, tail: _ } => {
-            tui::logs::run_logs(&device, cancel).await?;
+            tui::logs::run_logs(&device).await?;
             Ok(())
         }
 

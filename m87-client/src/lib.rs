@@ -18,9 +18,7 @@ pub mod tui;
 // === CLI entrypoint ===
 pub mod cli;
 
-use tokio_util::sync::CancellationToken;
-
 /// Entrypoint used by `main.rs` and tests to run the full CLI.
-pub async fn run_cli(cancel: CancellationToken) -> anyhow::Result<()> {
-    cli::cli(cancel).await
+pub async fn run_cli() -> anyhow::Result<()> {
+    cli::cli().await
 }

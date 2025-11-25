@@ -1,12 +1,11 @@
-use crate::{auth::AuthManager, config::Config, devices};
+use crate::{auth::AuthManager, config::Config, devices, util::shutdown::SHUTDOWN};
 use anyhow::{anyhow, Result};
 use futures::{SinkExt, StreamExt};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
-use tokio_util::sync::CancellationToken;
 
-pub async fn run_logs(device: &str, cancel: CancellationToken) -> Result<()> {
+pub async fn run_logs(device: &str) -> Result<()> {
     rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
         .unwrap();
 
@@ -96,7 +95,7 @@ pub async fn run_logs(device: &str, cancel: CancellationToken) -> Result<()> {
                 tokio_tungstenite::tungstenite::Message::Close(None)
             ).await;
         }
-        _ = cancel.cancelled() => {
+        _ = SHUTDOWN.cancelled() => {
             // Global cancellation (Ctrl+C caught by main)
             let _ = ws_tx.send(
                 tokio_tungstenite::tungstenite::Message::Close(None)

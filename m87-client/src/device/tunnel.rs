@@ -1,5 +1,4 @@
 use anyhow::Result;
-use tokio_util::sync::CancellationToken;
 
 use crate::devices;
 use crate::server;
@@ -9,7 +8,6 @@ pub async fn open_local_tunnel(
     device_name: &str,
     remote_port: u16,
     local_port: u16,
-    cancel: CancellationToken,
 ) -> Result<()> {
     rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
         .expect("failed to install ring crypto provider");
@@ -30,7 +28,6 @@ pub async fn open_local_tunnel(
         &device_short_id,
         remote_port,
         local_port,
-        cancel,
     )
     .await
 }

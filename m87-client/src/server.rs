@@ -7,7 +7,6 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
-use tokio_util::sync::CancellationToken;
 use tokio_yamux::{Config as YamuxConfig, Session};
 use tracing::{error, info, warn};
 
@@ -423,8 +422,8 @@ pub async fn tunnel_device_port(
     device_short_id: &str,
     remote_port: u16,
     local_port: u16,
-    cancel: CancellationToken,
 ) -> Result<()> {
+    use crate::util::shutdown::SHUTDOWN;
     let url = format!(
         "wss://{}.{}/port/{}",
         device_short_id, host_name, remote_port
@@ -495,7 +494,7 @@ pub async fn tunnel_device_port(
                     }
                 });
             }
-            _ = cancel.cancelled() => {
+            _ = SHUTDOWN.cancelled() => {
                 info!("Shutdown requested, closing tunnel");
                 break;
             }
