@@ -5,7 +5,8 @@ use tokio::net::UnixStream;
 use tracing::{error, info};
 
 pub async fn handle_docker_ws(socket: WebSocket) {
-    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (ws_tx, mut ws_rx) = socket.split();
+    let ws_tx = std::sync::Arc::new(tokio::sync::Mutex::new(ws_tx));
 
     // Connect to Docker socket
     let docker_sock = match UnixStream::connect("/var/run/docker.sock").await {
@@ -13,6 +14,8 @@ pub async fn handle_docker_ws(socket: WebSocket) {
         Err(e) => {
             error!("Failed to connect to Docker socket: {}", e);
             let _ = ws_tx
+                .lock()
+                .await
                 .send(Message::Text(format!("Failed to connect to Docker: {}\n", e).into()))
                 .await;
             return;
@@ -27,7 +30,6 @@ pub async fn handle_docker_ws(socket: WebSocket) {
     let ws_tx_clone = ws_tx.clone();
     let docker_to_ws = tokio::spawn(async move {
         let mut buf = vec![0u8; 8192];
-        let mut ws_tx = ws_tx_clone;
 
         loop {
             match docker_read.read(&mut buf).await {
@@ -36,7 +38,14 @@ pub async fn handle_docker_ws(socket: WebSocket) {
                     break;
                 }
                 Ok(n) => {
-                    if ws_tx.send(Message::Binary(buf[..n].to_vec())).await.is_err() {
+                    let data = buf[..n].to_vec();
+                    if ws_tx_clone
+                        .lock()
+                        .await
+                        .send(Message::Binary(data.into()))
+                        .await
+                        .is_err()
+                    {
                         error!("Failed to send to WebSocket");
                         break;
                     }
@@ -85,6 +94,6 @@ pub async fn handle_docker_ws(socket: WebSocket) {
     }
 
     // Cleanup
-    let _ = ws_tx.send(Message::Close(None)).await;
+    let _ = ws_tx.lock().await.send(Message::Close(None)).await;
     info!("Docker WebSocket proxy closed");
 }
