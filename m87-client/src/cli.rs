@@ -145,8 +145,12 @@ pub enum DeviceCommand {
     },
     Stats,
     Cmd {
+        /// Keep stdin open (for responding to prompts)
         #[arg(short = 'i', long)]
-        interactive: bool,
+        stdin: bool,
+        /// Allocate a pseudo-TTY (for TUI apps like vim, htop)
+        #[arg(short = 't', long)]
+        tty: bool,
         #[arg(required = true, last = true)]
         command: Vec<String>,
     },
@@ -465,15 +469,12 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
         }
 
         DeviceCommand::Cmd {
-            interactive,
+            stdin,
+            tty,
             command,
         } => {
-            println!(
-                "Would exec '{}' on {} (interactive={interactive})",
-                command.join(" "),
-                device
-            );
-            bail!("Not implemented");
+            tui::cmd::run_cmd(&device, command, stdin, tty).await?;
+            Ok(())
         }
     }
 }
