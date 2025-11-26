@@ -91,6 +91,19 @@ m87 rpi cmd -- 'docker kill $(docker ps -q)'  # Correct: expands on remote
 - `-i, --stdin` - Keep stdin open for responding to prompts
 - `-t, --tty` - Allocate pseudo-TTY for TUI applications
 
+## Ctrl+C Behavior
+
+| Mode | Ctrl+C Effect |
+|------|---------------|
+| No flags / `-i` | Terminates connection, exits with code 130 |
+| `-t` / `-it` | Sent to remote app (e.g., cancel in vim) |
+
+In TTY mode, Ctrl+C is forwarded to the remote application as a raw keystroke. To forcefully disconnect, close your terminal or use other means.
+
+## Process Cleanup
+
+When the connection closes (Ctrl+C, network drop, etc.), the remote process is automatically terminated. No orphaned processes are left on the device.
+
 ## Advanced
 
 For a persistent interactive shell, use `m87 <device> shell` instead.

@@ -2,7 +2,7 @@
 //!
 //! This provides clean command output without shell noise (MOTD, prompts, logout).
 
-use crate::{auth::AuthManager, config::Config, devices};
+use crate::{auth::AuthManager, config::Config, devices, util::shutdown::SHUTDOWN};
 use anyhow::{anyhow, Result};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -87,25 +87,33 @@ where
     let mut stdout = tokio::io::stdout();
     let mut exit_code = 0;
 
-    // Stream output until connection closes
-    while let Some(msg) = ws_rx.next().await {
-        match msg {
-            Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => {
-                // Check if this is the exit code message
-                if let Some(code) = try_parse_exit_code(&t) {
-                    exit_code = code;
-                } else {
-                    stdout.write_all(t.as_bytes()).await?;
-                    stdout.flush().await?;
+    // Stream output until connection closes or Ctrl+C
+    loop {
+        tokio::select! {
+            _ = SHUTDOWN.cancelled() => {
+                let _ = ws_tx.send(tokio_tungstenite::tungstenite::Message::Close(None)).await;
+                std::process::exit(130);
+            }
+            msg = ws_rx.next() => {
+                match msg {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => {
+                        if let Some(code) = try_parse_exit_code(&t) {
+                            exit_code = code;
+                        } else {
+                            stdout.write_all(t.as_bytes()).await?;
+                            stdout.flush().await?;
+                        }
+                    }
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(b))) => {
+                        stdout.write_all(&b).await?;
+                        stdout.flush().await?;
+                    }
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => break,
+                    Some(Err(_)) => break,
+                    None => break,
+                    _ => {}
                 }
             }
-            Ok(tokio_tungstenite::tungstenite::Message::Binary(b)) => {
-                stdout.write_all(&b).await?;
-                stdout.flush().await?;
-            }
-            Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
-            Err(_) => break,
-            _ => {}
         }
     }
 
@@ -180,27 +188,36 @@ where
         }
     });
 
-    // WebSocket -> Stdout (main task)
+    // WebSocket -> Stdout (main task) with Ctrl+C handling
     let mut ws_rx = ws_rx;
     let mut exit_code = 0;
     loop {
-        match ws_rx.next().await {
-            Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => {
-                if let Some(code) = try_parse_exit_code(&t) {
-                    exit_code = code;
-                } else {
-                    stdout.write_all(t.as_bytes()).await?;
-                    stdout.flush().await?;
+        tokio::select! {
+            _ = SHUTDOWN.cancelled() => {
+                let mut tx = ws_tx.lock().await;
+                let _ = tx.send(tokio_tungstenite::tungstenite::Message::Close(None)).await;
+                std::process::exit(130);
+            }
+            msg = ws_rx.next() => {
+                match msg {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => {
+                        if let Some(code) = try_parse_exit_code(&t) {
+                            exit_code = code;
+                        } else {
+                            stdout.write_all(t.as_bytes()).await?;
+                            stdout.flush().await?;
+                        }
+                    }
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(b))) => {
+                        stdout.write_all(&b).await?;
+                        stdout.flush().await?;
+                    }
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => break,
+                    Some(Err(_)) => break,
+                    None => break,
+                    _ => {}
                 }
             }
-            Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(b))) => {
-                stdout.write_all(&b).await?;
-                stdout.flush().await?;
-            }
-            Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => break,
-            Some(Err(_)) => break,
-            None => break,
-            _ => {}
         }
     }
 
@@ -313,20 +330,29 @@ where
         Ok::<_, anyhow::Error>(())
     });
 
-    // Wait for either task to complete
+    // Wait for either task to complete or shutdown signal
+    let final_code;
     tokio::select! {
-        _ = &mut ws_task => stdin_task.abort(),
+        _ = SHUTDOWN.cancelled() => {
+            ws_task.abort();
+            stdin_task.abort();
+            final_code = 130;
+        }
+        _ = &mut ws_task => {
+            stdin_task.abort();
+            final_code = *exit_code.lock().await;
+        }
         _ = &mut stdin_task => {
             let mut tx = ws_tx.lock().await;
             let _ = tx.send(tokio_tungstenite::tungstenite::Message::Close(None)).await;
+            final_code = *exit_code.lock().await;
         }
     }
 
     drop(raw_mode);
 
-    let code = *exit_code.lock().await;
-    if code != 0 {
-        std::process::exit(code);
+    if final_code != 0 {
+        std::process::exit(final_code);
     }
     Ok(())
 }
