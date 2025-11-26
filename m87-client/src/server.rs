@@ -420,14 +420,23 @@ pub async fn tunnel_device_port(
     host_name: &str,
     token: &str,
     device_short_id: &str,
+    remote_host: &str,
     remote_port: u16,
     local_port: u16,
 ) -> Result<()> {
     use crate::util::shutdown::SHUTDOWN;
-    let url = format!(
-        "wss://{}.{}/port/{}",
-        device_short_id, host_name, remote_port
-    );
+    // Add ?host= query param only if not localhost (backward compatible)
+    let url = if remote_host == "127.0.0.1" {
+        format!(
+            "wss://{}.{}/port/{}",
+            device_short_id, host_name, remote_port
+        )
+    } else {
+        format!(
+            "wss://{}.{}/port/{}?host={}",
+            device_short_id, host_name, remote_port, remote_host
+        )
+    };
 
     // 1) Build WS request with bearer.<jwt> subprotocol
     let mut req = url.clone().into_client_request()?;
@@ -469,7 +478,7 @@ pub async fn tunnel_device_port(
 
     // 6) Listen on local_port and open a Yamux stream per incoming TCP connection
     let listener = TcpListener::bind(("127.0.0.1", local_port)).await?;
-    info!("Listening on 127.0.0.1:{local_port} and forwarding to {device_short_id}:{remote_port}");
+    info!("Listening on 127.0.0.1:{local_port} and forwarding to {device_short_id} -> {remote_host}:{remote_port}");
 
     loop {
         tokio::select! {

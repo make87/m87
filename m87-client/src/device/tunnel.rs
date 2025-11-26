@@ -6,6 +6,7 @@ use crate::{auth::AuthManager, config::Config};
 
 pub async fn open_local_tunnel(
     device_name: &str,
+    remote_host: &str,
     remote_port: u16,
     local_port: u16,
 ) -> Result<()> {
@@ -26,6 +27,7 @@ pub async fn open_local_tunnel(
         &config.get_server_hostname(),
         &token,
         &device_short_id,
+        remote_host,
         remote_port,
         local_port,
     )
