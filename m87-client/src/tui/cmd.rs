@@ -1,11 +1,27 @@
+//! Remote command execution using the /exec endpoint.
+//!
+//! This provides clean command output without shell noise (MOTD, prompts, logout).
+
 use crate::{auth::AuthManager, config::Config, devices};
 use anyhow::{anyhow, Result};
 use futures::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use termion::raw::IntoRawMode;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
+
+#[derive(Serialize)]
+struct ExecRequest {
+    command: String,
+    tty: bool,
+}
+
+#[derive(Deserialize)]
+struct ExecResult {
+    exit_code: i32,
+}
 
 /// Run a command on a remote device.
 ///
@@ -23,7 +39,8 @@ pub async fn run_cmd(device: &str, command: Vec<String>, stdin: bool, tty: bool)
         .find(|d| d.name == device)
         .ok_or_else(|| anyhow!("Device '{}' not found", device))?;
 
-    let url = format!("wss://{}.{}/terminal", dev.short_id, base);
+    // Use /exec endpoint for clean output
+    let url = format!("wss://{}.{}/exec", dev.short_id, base);
 
     let token = AuthManager::get_cli_token().await?;
     let mut req = url.into_client_request()?;
@@ -31,24 +48,10 @@ pub async fn run_cmd(device: &str, command: Vec<String>, stdin: bool, tty: bool)
         .insert("Sec-WebSocket-Protocol", format!("bearer.{token}").parse()?);
 
     let (ws_stream, _) = connect_async(req).await?;
-    let (ws_tx, mut ws_rx) = ws_stream.split();
+    let (ws_tx, ws_rx) = ws_stream.split();
 
-    // Build command string - run command then exit with its exit code
-    let cmd_str = format!("{}; exit $?\n", shell_escape(&command));
-
-    // Wait for shell to be ready (skip init messages)
-    loop {
-        match ws_rx.next().await {
-            Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => {
-                if t.contains("Shell connected") {
-                    break;
-                }
-            }
-            Some(Err(e)) => return Err(anyhow!("WebSocket error during init: {}", e)),
-            None => return Err(anyhow!("WebSocket closed during init")),
-            _ => {}
-        }
-    }
+    // Join command into single string (shell will interpret operators like && |)
+    let cmd_str = command.join(" ");
 
     match (stdin, tty) {
         (false, false) => run_output_only(ws_tx, ws_rx, cmd_str).await,
@@ -57,27 +60,44 @@ pub async fn run_cmd(device: &str, command: Vec<String>, stdin: bool, tty: bool)
     }
 }
 
-/// No stdin, no tty: just send command and stream output
+/// Try to parse exit code from a message (server sends JSON before close)
+fn try_parse_exit_code(text: &str) -> Option<i32> {
+    serde_json::from_str::<ExecResult>(text).ok().map(|r| r.exit_code)
+}
+
+/// No stdin, no tty: just send command config and stream output
 async fn run_output_only<S, R>(mut ws_tx: S, mut ws_rx: R, cmd_str: String) -> Result<()>
 where
     S: SinkExt<tokio_tungstenite::tungstenite::Message> + Unpin,
     R: StreamExt<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>>
         + Unpin,
 {
-    // Send the command
+    // Send command config
+    let config = ExecRequest {
+        command: cmd_str,
+        tty: false,
+    };
     ws_tx
-        .send(tokio_tungstenite::tungstenite::Message::Text(cmd_str.into()))
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&config)?.into(),
+        ))
         .await
-        .map_err(|_| anyhow!("Failed to send command"))?;
+        .map_err(|_| anyhow!("Failed to send command config"))?;
 
     let mut stdout = tokio::io::stdout();
+    let mut exit_code = 0;
 
     // Stream output until connection closes
     while let Some(msg) = ws_rx.next().await {
         match msg {
             Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => {
-                stdout.write_all(t.as_bytes()).await?;
-                stdout.flush().await?;
+                // Check if this is the exit code message
+                if let Some(code) = try_parse_exit_code(&t) {
+                    exit_code = code;
+                } else {
+                    stdout.write_all(t.as_bytes()).await?;
+                    stdout.flush().await?;
+                }
             }
             Ok(tokio_tungstenite::tungstenite::Message::Binary(b)) => {
                 stdout.write_all(&b).await?;
@@ -89,6 +109,9 @@ where
         }
     }
 
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     Ok(())
 }
 
@@ -103,12 +126,18 @@ where
 {
     let ws_tx = Arc::new(Mutex::new(ws_tx));
 
-    // Send the command first
+    // Send command config
     {
+        let config = ExecRequest {
+            command: cmd_str,
+            tty: false,
+        };
         let mut tx = ws_tx.lock().await;
-        tx.send(tokio_tungstenite::tungstenite::Message::Text(cmd_str.into()))
-            .await
-            .map_err(|_| anyhow!("Failed to send command"))?;
+        tx.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&config)?.into(),
+        ))
+        .await
+        .map_err(|_| anyhow!("Failed to send command config"))?;
     }
 
     let mut stdout = tokio::io::stdout();
@@ -153,11 +182,16 @@ where
 
     // WebSocket -> Stdout (main task)
     let mut ws_rx = ws_rx;
+    let mut exit_code = 0;
     loop {
         match ws_rx.next().await {
             Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => {
-                stdout.write_all(t.as_bytes()).await?;
-                stdout.flush().await?;
+                if let Some(code) = try_parse_exit_code(&t) {
+                    exit_code = code;
+                } else {
+                    stdout.write_all(t.as_bytes()).await?;
+                    stdout.flush().await?;
+                }
             }
             Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(b))) => {
                 stdout.write_all(&b).await?;
@@ -171,6 +205,10 @@ where
     }
 
     stdin_task.abort();
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     Ok(())
 }
 
@@ -189,12 +227,18 @@ where
     let raw_mode = std::io::stdout().into_raw_mode()?;
     let mut stdout = tokio::io::stdout();
 
-    // Send the command first
+    // Send command config with tty: true
     {
+        let config = ExecRequest {
+            command: cmd_str,
+            tty: true,
+        };
         let mut tx = ws_tx.lock().await;
-        tx.send(tokio_tungstenite::tungstenite::Message::Text(cmd_str.into()))
-            .await
-            .map_err(|_| anyhow!("Failed to send command"))?;
+        tx.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&config)?.into(),
+        ))
+        .await
+        .map_err(|_| anyhow!("Failed to send command config"))?;
     }
 
     // Stdin reader thread (raw mode - every keystroke sent immediately)
@@ -239,6 +283,9 @@ where
     // WebSocket -> Stdout task
     let ws_tx_close = ws_tx.clone();
     let mut ws_rx = ws_rx;
+    let exit_code = Arc::new(Mutex::new(0i32));
+    let exit_code_ws = exit_code.clone();
+
     let mut ws_task = tokio::spawn(async move {
         while let Some(m) = ws_rx.next().await {
             let m = m?;
@@ -248,8 +295,12 @@ where
                     stdout.flush().await?;
                 }
                 tokio_tungstenite::tungstenite::Message::Text(t) => {
-                    stdout.write_all(t.as_bytes()).await?;
-                    stdout.flush().await?;
+                    if let Some(code) = try_parse_exit_code(&t) {
+                        *exit_code_ws.lock().await = code;
+                    } else {
+                        stdout.write_all(t.as_bytes()).await?;
+                        stdout.flush().await?;
+                    }
                 }
                 tokio_tungstenite::tungstenite::Message::Close(_) => break,
                 _ => {}
@@ -272,11 +323,10 @@ where
     }
 
     drop(raw_mode);
-    Ok(())
-}
 
-/// Join command arguments for shell execution.
-/// No escaping - let the remote shell interpret operators like && || ; |
-fn shell_escape(args: &[String]) -> String {
-    args.join(" ")
+    let code = *exit_code.lock().await;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
 }
