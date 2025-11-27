@@ -9,4 +9,7 @@ pub mod services;
 pub mod system_metrics;
 
 pub mod docker;
+pub mod fs;
 pub mod tunnel;
+
+pub mod ssh;

@@ -1,20 +1,23 @@
 use anyhow::{anyhow, Context, Result};
-use axum::http::HeaderValue;
 use futures::StreamExt;
 use reqwest::Client;
 use tokio::{
     io::{self},
     net::{TcpListener, TcpStream},
 };
-use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
 use tokio_yamux::{Config as YamuxConfig, Session};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "agent")]
 use crate::device::services::service_info::ServiceInfo;
 #[cfg(feature = "agent")]
 use crate::device::system_metrics::SystemMetrics;
-use crate::{auth::AuthManager, config::Config, retry_async, util::websocket::ClientByteWebSocket};
+use crate::{
+    auth::AuthManager,
+    config::Config,
+    retry_async,
+    util::{raw_connection::open_raw_io, shutdown::SHUTDOWN},
+};
 
 use crate::util::tls::get_tls_connection;
 
@@ -423,53 +426,15 @@ pub async fn tunnel_device_port(
     remote_port: u16,
     local_port: u16,
 ) -> Result<()> {
-    use crate::util::shutdown::SHUTDOWN;
-    let url = format!(
-        "wss://{}.{}/port/{}",
-        device_short_id, host_name, remote_port
+    // Path is `/port/<remote_port>`
+    let path = format!("/port/{remote_port}");
+
+    info!(
+        "Connected raw port-forward tunnel to {device_short_id}:{remote_port}, \
+         listening locally on 127.0.0.1:{local_port}"
     );
 
-    // 1) Build WS request with bearer.<jwt> subprotocol
-    let mut req = url.clone().into_client_request()?;
-    req.headers_mut().insert(
-        "Sec-WebSocket-Protocol",
-        HeaderValue::from_str(&format!("bearer.{token}"))?,
-    );
-
-    // 2) Connect WebSocket to server
-    let (ws, _) = connect_async(req).await.map_err(|e| {
-        error!("connect_async failed: {e}");
-        e
-    })?;
-    info!("Connected WebSocket to {}", &url);
-
-    // 3) Wrap WS as byte stream
-    let ws_bytes = ClientByteWebSocket::new(ws);
-
-    // 4) Create Yamux client session
-    let yamux_cfg = YamuxConfig::default();
-    let mut session = Session::new_client(ws_bytes, yamux_cfg);
-    let mut control = session.control();
-
-    // 5) Spawn driver task to poll the Yamux session
-    tokio::spawn(async move {
-        while let Some(item) = session.next().await {
-            match item {
-                Ok(_stream) => {
-                    // In this design, server never opens streams; we just ignore.
-                }
-                Err(e) => {
-                    error!("Yamux session driver error: {e}");
-                    break;
-                }
-            }
-        }
-        info!("Yamux session driver exited");
-    });
-
-    // 6) Listen on local_port and open a Yamux stream per incoming TCP connection
     let listener = TcpListener::bind(("127.0.0.1", local_port)).await?;
-    info!("Listening on 127.0.0.1:{local_port} and forwarding to {device_short_id}:{remote_port}");
 
     loop {
         tokio::select! {
@@ -477,25 +442,31 @@ pub async fn tunnel_device_port(
                 let (mut local_stream, addr) = accept_result?;
                 info!("New local connection from {addr}");
 
-                // We open a new Yamux stream for each connection, sequentially
-                let mut remote_stream = control.open_stream().await.map_err(|e| {
-                    error!("Failed to open Yamux stream: {e}");
-                    e
-                })?;
+                // Clone the raw tunnel uniquely for every connection:
+                // We MUST NOT reuse the same raw IO for multiple forwards.
+                //
+                // Instead, reopen a raw IO for each TCP connection.
+                //
+                // This is identical to how SSH LocalForward works.
+                let mut remote_io = open_raw_io(
+                    host_name,
+                    device_short_id,
+                    &path,
+                    token,
+                    false,
+                ).await?;
 
                 tokio::spawn(async move {
-                    match io::copy_bidirectional(&mut local_stream, &mut remote_stream).await {
-                        Ok((_a, _b)) => {
-                            info!("Forward stream {addr} closed cleanly");
-                        }
-                        Err(e) => {
-                            error!("Forward stream {addr} closed with error: {e:?}");
-                        }
+                    let res = io::copy_bidirectional(&mut local_stream, &mut remote_io).await;
+                    match res {
+                        Ok(_) => info!("Port-forward connection {addr} closed cleanly"),
+                        Err(e) => error!("Port-forward connection {addr} closed with error: {e:?}"),
                     }
                 });
             }
+
             _ = SHUTDOWN.cancelled() => {
-                info!("Shutdown requested, closing tunnel");
+                info!("Shutdown requested — closing port forward");
                 break;
             }
         }

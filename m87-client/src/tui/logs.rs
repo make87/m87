@@ -1,19 +1,13 @@
+use crate::util::raw_connection::open_raw_io;
 use crate::{auth::AuthManager, config::Config, devices, util::shutdown::SHUTDOWN};
 use anyhow::{anyhow, Result};
-use futures::{SinkExt, StreamExt};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
 
+/// Stream live logs from a device using RAW upgraded connection.
 pub async fn run_logs(device: &str) -> Result<()> {
-    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
-        .unwrap();
-
     let config = Config::load()?;
-    let server_url = config.get_server_url();
-    let base = server_url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
+    let base = config.get_server_hostname();
 
     let dev = devices::list_devices()
         .await?
@@ -21,30 +15,31 @@ pub async fn run_logs(device: &str) -> Result<()> {
         .find(|d| d.name == device)
         .ok_or_else(|| anyhow!("Device '{}' not found", device))?;
 
-    let url = format!("wss://{}.{}{}", dev.short_id, base, "/logs");
+    let token = AuthManager::get_cli_token().await?;
 
     println!("Connecting to logs of {} ...", device);
 
-    let token = AuthManager::get_cli_token().await?;
-    let mut req = url.into_client_request()?;
-    req.headers_mut()
-        .insert("Sec-WebSocket-Protocol", format!("bearer.{token}").parse()?);
-
-    let (ws_stream, _) = connect_async(req).await?;
-    let (mut ws_tx, mut ws_rx) = ws_stream.split();
-
-    let mut stdout = tokio::io::stdout();
+    // --- open RAW upgraded IO ---
+    let mut io = open_raw_io(
+        &base,
+        &dev.short_id,
+        "/logs",
+        &token,
+        config.trust_invalid_server_cert,
+    )
+    .await?;
 
     println!("Connected. Press Ctrl+C to exit.\n");
 
-    // Channel to catch stdin EOF
+    let mut stdout = tokio::io::stdout();
+
+    // Channel to detect stdin EOF (pressing Ctrl+D)
     let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<()>();
 
-    // Thread watching stdin for EOF
     std::thread::spawn(move || {
         use std::io::Read;
-        let mut buf = [0u8; 1];
         let mut stdin = std::io::stdin();
+        let mut buf = [0u8; 1];
 
         loop {
             match stdin.read(&mut buf) {
@@ -58,49 +53,28 @@ pub async fn run_logs(device: &str) -> Result<()> {
         }
     });
 
-    // WS → stdout task
-    let mut ws_task = tokio::spawn(async move {
-        while let Some(msg) = ws_rx.next().await {
-            let msg = match msg {
-                Ok(m) => m,
-                Err(_) => break,
-            };
-
-            match msg {
-                tokio_tungstenite::tungstenite::Message::Text(t) => {
-                    stdout.write_all(t.as_bytes()).await?;
-                    stdout.write_all(b"\n").await?;
-                    stdout.flush().await?;
-                }
-                tokio_tungstenite::tungstenite::Message::Binary(b) => {
-                    stdout.write_all(&b).await?;
-                    stdout.write_all(b"\n").await?;
-                    stdout.flush().await?;
-                }
-                tokio_tungstenite::tungstenite::Message::Close(_) => break,
-                _ => {}
+    // Task: device logs → stdout
+    let mut read_task = tokio::spawn(async move {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = io.read(&mut buf).await?;
+            if n == 0 {
+                break; // remote closed
             }
+            stdout.write_all(&buf[..n]).await?;
+            stdout.flush().await?;
         }
         Ok::<_, anyhow::Error>(())
     });
 
-    // Exit on Ctrl+C, stdin EOF, or WS close
+    // Exit on one of:
+    // - device closed stream
+    // - stdin EOF
+    // - global shutdown (Ctrl+C)
     tokio::select! {
-        _ = &mut ws_task => {
-            // logs stream ended
-        }
-        _ = stdin_rx.recv() => {
-            // stdin closed
-            let _ = ws_tx.send(
-                tokio_tungstenite::tungstenite::Message::Close(None)
-            ).await;
-        }
-        _ = SHUTDOWN.cancelled() => {
-            // Global cancellation (Ctrl+C caught by main)
-            let _ = ws_tx.send(
-                tokio_tungstenite::tungstenite::Message::Close(None)
-            ).await;
-        }
+        _ = &mut read_task => {},
+        _ = stdin_rx.recv() => {},
+        _ = SHUTDOWN.cancelled() => {},
     }
 
     println!("\nLogs stream closed.");

@@ -67,6 +67,16 @@ ratatui = { version = "0.29", features = ["termion"] }
 # STUN client for public IP detection (WebRTC-compatible)
 stun = "0.9.0"
 
+# custom upgrade handling
+hyper = "1"
+hyper-util = "0.1"
+bytes = "1"
+base64 = "0.22"
+futures-util = "0.3"
+# ssh
+russh = "0.54.6"
+russh-sftp = "2.1.1"
+
 # Signal handling and cancellation
 tokio-util = "0.7"
 

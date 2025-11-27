@@ -7,4 +7,6 @@ mod metrics;
 mod port;
 pub mod routes;
 mod shared;
+mod ssh;
 mod terminal;
+mod upgrade;

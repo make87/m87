@@ -1,26 +1,9 @@
-use crate::{auth::AuthManager, config::Config, devices};
+use crate::{auth::AuthManager, config::Config, devices, util::raw_connection::open_raw_io};
 use anyhow::{anyhow, Context, Result};
-use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
 
-use ratatui::{
-    backend::TermionBackend,
-    layout::{Constraint, Direction, Layout},
-    style::Style,
-    text::Line,
-    widgets::{Block, Borders, Gauge, Paragraph, Row, Table},
-    Terminal,
-};
-use termion::{
-    async_stdin,
-    event::Key,
-    input::TermRead,
-    raw::IntoRawMode,
-    screen::{AlternateScreen, IntoAlternateScreen},
-};
+use ratatui::Terminal;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Deserialize, Debug)]
 pub struct CpuInfo {
@@ -69,40 +52,37 @@ pub struct Metrics {
 }
 
 pub async fn run_metrics(device: &str) -> Result<()> {
-    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
-        .unwrap();
-
     let config = Config::load()?;
-    let base = config.get_server_hostname();
+    let host = config.get_server_hostname();
 
-    let dev = devices::list_devices()
-        .await?
-        .into_iter()
-        .find(|d| d.name == device)
-        .ok_or_else(|| anyhow!("Device not found"))?;
+    let dev = devices::get_device_by_name(device).await?;
 
-    let url = format!("wss://{}.{}{}", dev.short_id, base, "/metrics");
     let token = AuthManager::get_cli_token().await?;
 
-    let mut req = url.into_client_request()?;
-    req.headers_mut()
-        .insert("Sec-WebSocket-Protocol", format!("bearer.{token}").parse()?);
+    let io = open_raw_io(
+        &host,
+        &dev.short_id,
+        "/metrics",
+        &token,
+        config.trust_invalid_server_cert,
+    )
+    .await
+    .context("Failed to connect to RAW metrics stream")?;
 
-    let (ws, _) = connect_async(req).await?;
-    let (mut ws_tx, mut ws_rx) = ws.split();
+    // We'll read line-delimited JSON
+    let reader = BufReader::new(io);
+    let mut lines = reader.lines();
 
-    // channel for streaming metrics into UI
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Metrics>(32);
+    // Channel to feed UI
+    let (tx, rx) = tokio::sync::mpsc::channel::<Metrics>(32);
 
-    // spawn reader task
     tokio::spawn(async move {
-        while let Some(msg) = ws_rx.next().await {
-            if let Ok(m) = msg {
-                if let Ok(text) = m.into_text() {
-                    if let Ok(parsed) = serde_json::from_str::<Metrics>(&text) {
-                        let _ = tx.send(parsed).await;
-                    }
-                }
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(parsed) = serde_json::from_str::<Metrics>(&line) {
+                let _ = tx.send(parsed).await;
             }
         }
     });

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use anyhow::{anyhow, Context, Result};
 use rustls::{
@@ -112,4 +112,13 @@ impl ServerCertVerifier for NoVerify {
             SignatureScheme::RSA_PKCS1_SHA256,
         ]
     }
+}
+
+static INIT: Once = Once::new();
+
+pub fn set_tls_provider() {
+    INIT.call_once(|| {
+        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+            .expect("failed to install ring crypto provider");
+    });
 }

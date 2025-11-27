@@ -102,10 +102,6 @@ impl Drop for DockerProxy {
 
 /// Execute docker command on remote device
 pub async fn run_docker_command(device_name: &str, args: Vec<String>) -> Result<()> {
-    // Install crypto provider for rustls
-    let _ =
-        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
-
     // Check if docker CLI exists
     check_docker_cli()?;
 

@@ -14,11 +14,12 @@ use crate::{
     device::{services::collect_all_services, system_metrics::collect_system_metrics},
     rest::routes::build_router,
     server,
+    util::tls::set_tls_provider,
 };
 use crate::{auth::AuthManager, config::Config};
 
 use crate::server::send_heartbeat;
-use crate::util::logging::init_tracing_with_log_layer;
+use crate::util::logging::init_logging;
 use crate::util::system_info::get_system_info;
 
 const SERVICE_NAME: &str = "m87-agent";
@@ -284,7 +285,7 @@ pub async fn status() -> Result<()> {
 }
 
 pub async fn run() -> Result<()> {
-    let _log_tx = init_tracing_with_log_layer("info");
+    init_logging("info");
     info!("Running device");
     let shutdown = signal::ctrl_c();
     pin!(shutdown);
@@ -300,9 +301,8 @@ pub async fn run() -> Result<()> {
 
 async fn login_and_run() -> Result<()> {
     // retry login/register until wit works, then call device_loop
-    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
-        .expect("failed to install ring crypto provider");
-    //
+    set_tls_provider();
+
     let config = Config::load()?;
     let system_info = get_system_info(config.enable_geo_lookup).await?;
     loop {

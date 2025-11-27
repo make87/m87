@@ -9,7 +9,8 @@ use crate::devices;
 use crate::tui;
 use crate::update;
 use crate::util;
-use crate::util::logging::init_tracing_with_log_layer;
+use crate::util::logging::init_logging;
+use crate::util::tls::set_tls_provider;
 
 /// Represents a parsed device path (either local or remote)
 struct DevicePath {
@@ -108,6 +109,18 @@ enum Commands {
 
         /// Destination path (<path> for local, <device>:<path> for remote)
         dest: String,
+
+        /// Delete files from destination that are not present in source default false
+        #[arg(long, default_value_t = false)]
+        delete: bool,
+
+        /// Watch for changes and sync automatically
+        #[arg(long, default_value_t = false)]
+        watch: bool,
+    },
+
+    Ls {
+        path: String,
     },
 
     #[command(external_subcommand)]
@@ -130,9 +143,7 @@ pub enum DeviceCommand {
         remote_port: u16,
         local_port: Option<u16>,
     },
-    Ls {
-        path: Vec<String>,
-    },
+
     Docker {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -211,6 +222,8 @@ enum DevicesCommands {
 
 pub async fn cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    init_logging("info");
+    set_tls_provider();
 
     match cli.command {
         Commands::Login {
@@ -332,11 +345,25 @@ pub async fn cli() -> anyhow::Result<()> {
         }
 
         Commands::Cp { source, dest } => {
-            handle_cp_command(&source, &dest).await?;
+            // let _ = device::fs::copy(&source, &dest).await?;
         }
 
-        Commands::Sync { source, dest } => {
-            handle_sync_command(&source, &dest).await?;
+        Commands::Sync {
+            source,
+            dest,
+            delete,
+            watch,
+        } => {
+            if watch {
+                device::fs::watch_sync(&source, &dest, delete).await?;
+            } else {
+                device::fs::sync(&source, &dest, delete).await?;
+            }
+        }
+        Commands::Ls { path } => {
+            let resp = device::fs::list(&path).await?;
+            println!("{:#?}", resp);
+            // tui::fs::print_fs_response(&resp);
         }
 
         Commands::Device(args) => {
@@ -348,82 +375,6 @@ pub async fn cli() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-async fn handle_cp_command(source: &str, dest: &str) -> anyhow::Result<()> {
-    let src_path = parse_device_path(source);
-    let dst_path = parse_device_path(dest);
-
-    match (&src_path.device, &dst_path.device) {
-        (None, None) => {
-            bail!("At least one path must specify a device (use <device>:<path> syntax)");
-        }
-        (Some(src_dev), Some(dst_dev)) => {
-            // Remote to remote copy
-            eprintln!("Error: 'cp' command is not yet implemented");
-            eprintln!(
-                "Would copy from '{}:{}' to '{}:{}'",
-                src_dev, src_path.path, dst_dev, dst_path.path
-            );
-            bail!("Not implemented");
-        }
-        (None, Some(dst_dev)) => {
-            // Local to remote copy
-            eprintln!("Error: 'cp' command is not yet implemented");
-            eprintln!(
-                "Would copy local '{}' to '{}:{}'",
-                src_path.path, dst_dev, dst_path.path
-            );
-            bail!("Not implemented");
-        }
-        (Some(src_dev), None) => {
-            // Remote to local copy
-            eprintln!("Error: 'cp' command is not yet implemented");
-            eprintln!(
-                "Would copy from '{}:{}' to local '{}'",
-                src_dev, src_path.path, dst_path.path
-            );
-            bail!("Not implemented");
-        }
-    }
-}
-
-async fn handle_sync_command(source: &str, dest: &str) -> anyhow::Result<()> {
-    let src_path = parse_device_path(source);
-    let dst_path = parse_device_path(dest);
-
-    match (&src_path.device, &dst_path.device) {
-        (None, None) => {
-            bail!("At least one path must specify a device (use <device>:<path> syntax)");
-        }
-        (Some(src_dev), Some(dst_dev)) => {
-            // Remote to remote sync
-            eprintln!("Error: 'sync' command is not yet implemented");
-            eprintln!(
-                "Would sync from '{}:{}' to '{}:{}'",
-                src_dev, src_path.path, dst_dev, dst_path.path
-            );
-            bail!("Not implemented");
-        }
-        (None, Some(dst_dev)) => {
-            // Local to remote sync
-            eprintln!("Error: 'sync' command is not yet implemented");
-            eprintln!(
-                "Would sync local '{}' to '{}:{}'",
-                src_path.path, dst_dev, dst_path.path
-            );
-            bail!("Not implemented");
-        }
-        (Some(src_dev), None) => {
-            // Remote to local sync
-            eprintln!("Error: 'sync' command is not yet implemented");
-            eprintln!(
-                "Would sync from '{}:{}' to local '{}'",
-                src_dev, src_path.path, dst_path.path
-            );
-            bail!("Not implemented");
-        }
-    }
 }
 
 async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
@@ -439,14 +390,9 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             remote_port,
             local_port,
         } => {
-            let _log_tx = init_tracing_with_log_layer("info");
             let local_port = local_port.unwrap_or(remote_port);
             tunnel::open_local_tunnel(&device, remote_port, local_port).await?;
             Ok(())
-        }
-        DeviceCommand::Ls { path } => {
-            println!("Would run ls on {} with {:?}", device, path);
-            bail!("Not implemented");
         }
 
         DeviceCommand::Docker { args } => {

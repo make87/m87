@@ -1,47 +1,44 @@
+use crate::util::raw_connection::open_raw_io;
 use crate::{auth::AuthManager, config::Config, devices};
-use anyhow::{Context, Result};
-use futures::{SinkExt, StreamExt};
-use termion::raw::IntoRawMode;
-use tokio::io::AsyncWriteExt;
+use anyhow::Result;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest};
 
 pub async fn run_shell(device: &str) -> Result<()> {
-    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
-        .unwrap();
-
     let config = Config::load()?;
     let base = config.get_server_hostname();
     let dev = devices::list_devices()
         .await?
         .into_iter()
         .find(|d| d.name == device)
-        .ok_or_else(|| anyhow::anyhow!("Device '{}' not found", device))?;
-    let url = format!("wss://{}.{}{}", dev.short_id, base, "/terminal");
-
-    println!("Connecting to shell on {} ...", device);
+        .ok_or_else(|| anyhow::anyhow!("Device not found"))?;
 
     let token = AuthManager::get_cli_token().await?;
-    let mut req = url.into_client_request()?;
-    req.headers_mut()
-        .insert("Sec-WebSocket-Protocol", format!("bearer.{token}").parse()?);
 
-    let (ws_stream, _) = connect_async(req).await?;
-    let (ws_tx, ws_rx) = ws_stream.split();
+    // --- open raw upgraded TLS stream ---
+    let io = open_raw_io(
+        &base,
+        &dev.short_id,
+        "/terminal",
+        &token,
+        config.trust_invalid_server_cert,
+    )
+    .await?;
 
-    let ws_tx = std::sync::Arc::new(tokio::sync::Mutex::new(ws_tx));
-
-    let raw_mode = std::io::stdout().into_raw_mode()?;
-    let mut stdout = tokio::io::stdout();
+    // --- split for bidirectional tasks ---
+    let (mut reader, mut writer) = io::split(io);
 
     println!("Connected. Press Ctrl+C to exit.\n\r");
 
+    // === Spawn task: stdin → writer ===
     let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
+    // Blocking thread to read raw stdin (termion)
     std::thread::spawn(move || {
         use std::io::Read;
         let mut stdin = std::io::stdin();
         let mut buf = [0u8; 1024];
+
         loop {
             match stdin.read(&mut buf) {
                 Ok(0) => {
@@ -56,56 +53,42 @@ pub async fn run_shell(device: &str) -> Result<()> {
         }
     });
 
-    let ws_tx_stdin = ws_tx.clone();
-    let mut stdin_task = tokio::spawn(async move {
+    // async writer task
+    let mut writer_task = tokio::spawn(async move {
         while let Some(bytes) = stdin_rx.recv().await {
             if bytes.is_empty() {
-                let mut tx = ws_tx_stdin.lock().await;
-                let _ = tx
-                    .send(tokio_tungstenite::tungstenite::Message::Close(None))
-                    .await;
+                // EOF / Ctrl+D → shutdown
+                let _ = writer.shutdown().await;
                 break;
             }
-            let mut tx = ws_tx_stdin.lock().await;
-            tx.send(tokio_tungstenite::tungstenite::Message::binary(bytes))
-                .await?;
+            writer.write_all(&bytes).await?;
+            writer.flush().await?;
         }
         Ok::<_, anyhow::Error>(())
     });
 
-    let ws_tx_close = ws_tx.clone();
-    let mut ws_rx = ws_rx;
-    let mut ws_task = tokio::spawn(async move {
-        while let Some(m) = ws_rx.next().await {
-            let m = m?;
-            match m {
-                tokio_tungstenite::tungstenite::Message::Binary(d) => {
-                    stdout.write_all(&d).await?;
-                    stdout.flush().await?;
-                }
-                tokio_tungstenite::tungstenite::Message::Text(t) => {
-                    stdout.write_all(t.as_bytes()).await?;
-                    stdout.flush().await?;
-                }
-                tokio_tungstenite::tungstenite::Message::Close(_) => break,
-                _ => {}
+    // === Spawn task: reader → stdout ===
+    let mut reader_task = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        let mut buf = [0u8; 8192];
+
+        loop {
+            let n = reader.read(&mut buf).await?;
+            if n == 0 {
+                break; // remote closed
             }
+            stdout.write_all(&buf[..n]).await?;
+            stdout.flush().await?;
         }
-        let mut tx = ws_tx_close.lock().await;
-        let _ = tx
-            .send(tokio_tungstenite::tungstenite::Message::Close(None))
-            .await;
+
         Ok::<_, anyhow::Error>(())
     });
 
+    // === Wait until one side closes ===
     tokio::select! {
-        _ = &mut ws_task => stdin_task.abort(),
-        _ = &mut stdin_task => {
-            let mut tx = ws_tx.lock().await;
-            let _ = tx.send(tokio_tungstenite::tungstenite::Message::Close(None)).await;
-        }
+        _ = &mut reader_task => writer_task.abort(),
+        _ = &mut writer_task => {},
     }
 
-    drop(raw_mode);
     Ok(())
 }

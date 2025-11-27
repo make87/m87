@@ -29,3 +29,11 @@ pub async fn get_ssh_url(_device_id: &str) -> Result<String> {
 pub async fn connect_ssh(_device_id: &str) -> Result<()> {
     Ok(())
 }
+
+pub async fn get_device_by_name(name: &str) -> Result<PublicDevice> {
+    list_devices()
+        .await?
+        .into_iter()
+        .find(|d| d.name == name)
+        .ok_or_else(|| anyhow::anyhow!("Device '{}' not found", name))
+}

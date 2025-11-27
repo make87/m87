@@ -66,42 +66,7 @@ pub async fn validate_token(token: &str) -> Result<Auth0Claims> {
     let decoded = decode::<Auth0Claims>(token, &decoding_key, &validation)
         .map_err(|e| anyhow!("Token verification failed: {}", e))?;
 
+    // todo get claims from m87 server
+
     Ok(decoded.claims)
-}
-
-pub async fn validate_token_via_ws(
-    ws_tx: &mut futures::stream::SplitSink<WebSocket, Message>,
-    ws_rx: &mut futures::stream::SplitStream<WebSocket>,
-    send_updates: bool,
-) -> Result<()> {
-    if send_updates {
-        let _ = ws_tx
-            .send(Message::Text("Authenticating...\n\r".into()))
-            .await;
-    }
-
-    // Wait for first message (token)
-    let token_msg = ws_rx
-        .next()
-        .await
-        .and_then(|m| m.ok())
-        .and_then(|m| match m {
-            Message::Text(t) => Some(t.to_string()),
-            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Close(_) => None,
-        });
-
-    let token = match token_msg {
-        Some(t) => t.trim_start_matches("Bearer ").to_string(),
-        None => return Err(anyhow!("No protocol provided")),
-    };
-
-    validate_token(&token).await?;
-
-    if send_updates {
-        let _ = ws_tx
-            .send(Message::Text("Connected successfully\n\r".into()))
-            .await;
-    }
-
-    Ok(())
 }

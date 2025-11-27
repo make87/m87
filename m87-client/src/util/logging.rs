@@ -1,5 +1,5 @@
 use std::fmt::{self, Write};
-use std::sync::OnceLock;
+use std::sync::{Once, OnceLock};
 use tokio::sync::broadcast;
 use tracing::field::Visit;
 use tracing::{Event, Subscriber};
@@ -84,21 +84,77 @@ pub fn init_tracing_with_log_layer(log_level: &str) -> broadcast::Sender<String>
     tx
 }
 
+static INIT: Once = Once::new();
+
+pub fn init_logging(log_level: &str) {
+    INIT.call_once(|| {
+        let _ = init_tracing_with_log_layer(log_level);
+    });
+}
+
 pub fn get_log_rx() -> Option<broadcast::Receiver<String>> {
     LOG_TX.get().map(|tx| tx.subscribe())
 }
 
-fn timestamp_hms() -> String {
+pub fn timestamp_hms() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
 
-    let secs = now.as_secs() % 86_400;
+    human_time(now.as_secs())
+}
+
+pub fn human_time(ts: u64) -> String {
+    let secs = ts % 86_400;
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
     let s = secs % 60;
 
     format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+pub fn human_date(ts: u64) -> String {
+    // Break into days + seconds
+    let days = ts / 86_400;
+    let secs_of_day = ts % 86_400;
+
+    let hour = secs_of_day / 3600;
+    let min = (secs_of_day % 3600) / 60;
+
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    let (year, month, day) = unix_days_to_ymd(days as i64);
+
+    format!(
+        "{} {:>2} {:02}:{:02}",
+        MONTHS[(month - 1) as usize],
+        day,
+        hour,
+        min
+    )
+}
+
+fn unix_days_to_ymd(mut days: i64) -> (i32, u32, u32) {
+    // Days since 1970-01-01
+    // Algorithm from Howard Hinnant's date algorithms (public domain)
+
+    // 1. Shift epoch to March-based year so leap years are simpler
+    days += 719468; // shift to civil_from_days epoch
+
+    let era = (days >= 0)
+        .then_some(days / 146097)
+        .unwrap_or((days - 146096) / 146097);
+    let doe = days - era * 146097; // Day of era
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // Year of era
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // Day of year
+    let mp = (5 * doy + 2) / 153; // Month parameter
+    let d = doy - (153 * mp + 2) / 5 + 1; // Day of month
+    let m = mp + if mp < 10 { 3 } else { -9 }; // Month number
+    let y = yoe + era * 400 + (m <= 2) as i64; // Year
+
+    (y as i32, m as u32, d as u32)
 }

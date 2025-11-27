@@ -1,135 +1,31 @@
 use anyhow::Result;
-use axum::{
-    extract::{
-        ws::{WebSocket, WebSocketUpgrade},
-        Path,
-    },
-    http::HeaderMap,
-    response::{IntoResponse, Response},
-    routing::get,
-    Router,
-};
-use reqwest::header;
-use std::{future::Future, net::SocketAddr, pin::Pin};
+use axum::{routing::any, Router};
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
-use crate::rest::auth::validate_token;
+use crate::rest::upgrade::io_upgrade;
 use crate::rest::{
-    container_logs::handle_container_logs_ws, container_terminal::handle_container_terminal_ws,
-    docker::handle_docker_ws, logs::handle_logs_ws, metrics::handle_system_metrics_ws,
-    port::handle_port_forward_ws, terminal::handle_terminal_ws,
+    docker::handle_docker_io, logs::handle_logs_io, metrics::handle_system_metrics_io,
+    port::handle_port_forward_io, ssh::handle_ssh_io, terminal::handle_terminal_io,
 };
 
 pub fn build_router() -> Router {
     Router::new()
-        .route("/docker", get(ws_upgrade(handle_docker_ws)))
-        .route("/logs", get(ws_upgrade(handle_logs_ws)))
-        .route("/terminal", get(ws_upgrade(handle_terminal_ws)))
-        .route("/metrics", get(ws_upgrade(handle_system_metrics_ws)))
-        .route(
-            "/port/{port}",
-            get(ws_upgrade_with_param(handle_port_forward_ws)),
-        )
-        .route(
-            "/container/{name}",
-            get(ws_upgrade_with_param(handle_container_terminal_ws)),
-        )
-        .route(
-            "/container-logs/{name}",
-            get(ws_upgrade_with_param(handle_container_logs_ws)),
-        )
-}
-
-fn ws_upgrade<H>(
-    handler: fn(WebSocket) -> H,
-) -> impl Fn(WebSocketUpgrade, HeaderMap) -> Pin<Box<dyn Future<Output = Response> + Send>>
-       + Clone
-       + Send
-       + 'static
-where
-    H: Future<Output = ()> + Send + 'static,
-{
-    move |ws: WebSocketUpgrade, headers: HeaderMap| {
-        Box::pin(async move {
-            // Extract protocol: "bearer.<jwt>"
-            let proto = headers
-                .get(header::SEC_WEBSOCKET_PROTOCOL)
-                .and_then(|h| h.to_str().ok());
-
-            let jwt = match &proto {
-                Some(p) if p.starts_with("bearer.") => p.trim_start_matches("bearer.").to_string(),
-                _ => {
-                    return (
-                        axum::http::StatusCode::UNAUTHORIZED,
-                        "Missing or invalid WebSocket protocol",
-                    )
-                        .into_response();
-                }
-            };
-
-            // Validate token
-            match validate_token(&jwt).await {
-                Ok(c) => c,
-                Err(_) => {
-                    return (axum::http::StatusCode::UNAUTHORIZED, "Invalid auth token")
-                        .into_response();
-                }
-            };
-            let protocol_string = format!("bearer.{jwt}");
-            let ws = ws.protocols([protocol_string]);
-
-            ws.on_upgrade(move |socket| handler(socket)).into_response()
-        })
-    }
-}
-
-/// WebSocket upgrade helper (with path params)
-fn ws_upgrade_with_param<H>(
-    handler: fn(String, WebSocket) -> H,
-) -> impl Fn(
-    Path<String>,
-    WebSocketUpgrade,
-    HeaderMap,
-) -> Pin<Box<dyn Future<Output = Response> + Send>>
-       + Clone
-       + Send
-       + 'static
-where
-    H: Future<Output = ()> + Send + 'static,
-{
-    move |Path(param): Path<String>, ws: WebSocketUpgrade, headers: HeaderMap| {
-        Box::pin(async move {
-            // Extract protocol: "bearer.<jwt>"
-            let proto = headers
-                .get(header::SEC_WEBSOCKET_PROTOCOL)
-                .and_then(|h| h.to_str().ok());
-
-            let jwt = match &proto {
-                Some(p) if p.starts_with("bearer.") => p.trim_start_matches("bearer.").to_string(),
-                _ => {
-                    return (
-                        axum::http::StatusCode::UNAUTHORIZED,
-                        "Missing or invalid WebSocket protocol",
-                    )
-                        .into_response();
-                }
-            };
-
-            // Validate token
-            match validate_token(&jwt).await {
-                Ok(c) => c,
-                Err(_) => {
-                    return (axum::http::StatusCode::UNAUTHORIZED, "Invalid auth token")
-                        .into_response();
-                }
-            };
-            let protocol_string = format!("bearer.{jwt}");
-            let ws = ws.protocols([protocol_string]);
-
-            let resp = ws.on_upgrade(move |socket| handler(param.clone(), socket));
-            resp.into_response()
-        })
-    }
+        .route("/docker", any(io_upgrade(handle_docker_io)))
+        .route("/logs", any(io_upgrade(handle_logs_io)))
+        .route("/terminal", any(io_upgrade(handle_terminal_io)))
+        .route("/metrics", any(io_upgrade(handle_system_metrics_io)))
+        .route("/ssh", any(io_upgrade(handle_ssh_io)))
+        // .route("/fs", any(io_upgrade(handle_fs_io)))
+        .route("/port/{port}", any(io_upgrade(handle_port_forward_io)))
+    // .route(
+    //     "/container/{name}",
+    //     any(io_upgrade_with_param(handle_container_terminal_ws)),
+    // )
+    // .route(
+    //     "/container-logs/{name}",
+    //     any(io_upgrade_with_param(handle_container_logs_ws)),
+    // )
 }
 
 /// Start the Axum server (safe to call in a spawn loop)
