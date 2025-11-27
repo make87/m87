@@ -423,18 +423,15 @@ pub async fn tunnel_device_port(
     host_name: &str,
     token: &str,
     device_short_id: &str,
+    remote_host: &str,
     remote_port: u16,
     local_port: u16,
 ) -> Result<()> {
     // Path is `/port/<remote_port>`
-    let path = format!("/port/{remote_port}");
-
-    info!(
-        "Connected raw port-forward tunnel to {device_short_id}:{remote_port}, \
-         listening locally on 127.0.0.1:{local_port}"
-    );
+    let path = format!("/port/{remote_port}?host={remote_host}");
 
     let listener = TcpListener::bind(("127.0.0.1", local_port)).await?;
+    info!("Listening on 127.0.0.1:{local_port} and forwarding to {device_short_id} -> {remote_host}:{remote_port}");
 
     loop {
         tokio::select! {

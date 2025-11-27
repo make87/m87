@@ -18,6 +18,22 @@ struct DevicePath {
     path: String,
 }
 
+/// Parse tunnel target: "[ip:]port" -> (host, port)
+/// Examples: "8080" -> ("127.0.0.1", 8080), "192.168.1.50:554" -> ("192.168.1.50", 554)
+fn parse_tunnel_target(target: &str) -> anyhow::Result<(String, u16)> {
+    if let Some((ip, port_str)) = target.rsplit_once(':') {
+        let port = port_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid port: {}", port_str))?;
+        Ok((ip.to_string(), port))
+    } else {
+        let port = target
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid port: {}", target))?;
+        Ok(("127.0.0.1".to_string(), port))
+    }
+}
+
 /// Parse a path string into DevicePath, detecting device:path syntax
 fn parse_device_path(input: &str) -> DevicePath {
     // Check for device:path pattern
@@ -140,7 +156,9 @@ pub struct DeviceRoot {
 pub enum DeviceCommand {
     Shell,
     Tunnel {
-        remote_port: u16,
+        /// Remote target as [ip:]port (e.g., "8080" or "192.168.1.50:554")
+        target: String,
+        /// Local port to listen on (defaults to remote port)
         local_port: Option<u16>,
     },
 
@@ -156,8 +174,12 @@ pub enum DeviceCommand {
     },
     Stats,
     Cmd {
+        /// Keep stdin open (for responding to prompts)
         #[arg(short = 'i', long)]
-        interactive: bool,
+        stdin: bool,
+        /// Allocate a pseudo-TTY (for TUI apps like vim, htop)
+        #[arg(short = 't', long)]
+        tty: bool,
         #[arg(required = true, last = true)]
         command: Vec<String>,
     },
@@ -387,11 +409,12 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
         }
 
         DeviceCommand::Tunnel {
-            remote_port,
+            target,
             local_port,
         } => {
+            let (host, remote_port) = parse_tunnel_target(&target)?;
             let local_port = local_port.unwrap_or(remote_port);
-            tunnel::open_local_tunnel(&device, remote_port, local_port).await?;
+            tunnel::open_local_tunnel(&device, &host, remote_port, local_port).await?;
             Ok(())
         }
 
@@ -411,15 +434,12 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
         }
 
         DeviceCommand::Cmd {
-            interactive,
+            stdin,
+            tty,
             command,
         } => {
-            println!(
-                "Would exec '{}' on {} (interactive={interactive})",
-                command.join(" "),
-                device
-            );
-            bail!("Not implemented");
+            tui::cmd::run_cmd(&device, command, stdin, tty).await?;
+            Ok(())
         }
     }
 }

@@ -7,6 +7,7 @@ use tracing::{error, info};
 
 use crate::rest::upgrade::BoxedIo;
 
+
 #[derive(Debug, serde::Deserialize)]
 pub struct HostQuery {
     pub host: Option<String>,
@@ -16,6 +17,7 @@ pub async fn handle_port_forward_io(
     (Path(port), Query(HostQuery { host })): (Path<String>, Query<HostQuery>),
     mut io: BoxedIo,
 ) {
+
     let port: u16 = match port.parse() {
         Ok(p) => p,
         Err(e) => {
