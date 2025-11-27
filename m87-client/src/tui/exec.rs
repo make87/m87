@@ -56,7 +56,8 @@ pub async fn run_exec(device: &str, command: Vec<String>, stdin: bool, tty: bool
     match (stdin, tty) {
         (false, false) => run_output_only(io, cmd_str).await,
         (true, false) => run_with_stdin(io, cmd_str).await,
-        (_, true) => run_with_tty(io, cmd_str).await, // tty implies stdin
+        (false, true) => run_tty_readonly(io, cmd_str).await,
+        (true, true) => run_with_tty(io, cmd_str).await,
     }
 }
 
@@ -204,6 +205,83 @@ where
     }
 
     stdin_task.abort();
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+/// TTY mode without stdin: raw terminal output only (read-only view of TUI apps)
+async fn run_tty_readonly<IO>(io: IO, cmd_str: String) -> Result<()>
+where
+    IO: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
+{
+    let (mut reader, mut writer) = tokio::io::split(io);
+
+    // Enter raw mode for proper escape sequence rendering
+    let raw_mode = std::io::stdout().into_raw_mode()?;
+    let mut stdout = tokio::io::stdout();
+
+    // Send command config with tty: true
+    let config = ExecRequest {
+        command: cmd_str,
+        tty: true,
+    };
+    writer
+        .write_all(format!("{}\n", serde_json::to_string(&config)?).as_bytes())
+        .await?;
+    writer.flush().await?;
+
+    let mut exit_code = 0;
+    let mut buf = [0u8; 4096];
+    let mut pending = Vec::new();
+
+    // Stream output until connection closes or Ctrl+C
+    loop {
+        tokio::select! {
+            _ = SHUTDOWN.cancelled() => {
+                drop(raw_mode);
+                std::process::exit(130);
+            }
+            result = reader.read(&mut buf) => {
+                match result {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        pending.extend_from_slice(&buf[..n]);
+
+                        // Look for potential exit code JSON at the end
+                        if let Some(newline_pos) = pending.iter().rposition(|&b| b == b'\n') {
+                            let last_line = String::from_utf8_lossy(&pending[..=newline_pos]);
+                            let lines: Vec<&str> = last_line.lines().collect();
+
+                            if let Some(last) = lines.last() {
+                                if let Some(code) = try_parse_exit_code(last) {
+                                    exit_code = code;
+                                    // Output everything except the JSON line
+                                    let output_end = pending.len() - last.len() - 1;
+                                    if output_end > 0 {
+                                        stdout.write_all(&pending[..output_end]).await?;
+                                        stdout.flush().await?;
+                                    }
+                                    pending.clear();
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // No exit code found, output everything
+                        stdout.write_all(&pending).await?;
+                        stdout.flush().await?;
+                        pending.clear();
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+
+    drop(raw_mode);
 
     if exit_code != 0 {
         std::process::exit(exit_code);
