@@ -1,17 +1,21 @@
-//! WebSocket endpoint for clean command execution.
+//! Raw TCP/TLS endpoint for clean command execution.
 //!
 //! Unlike `/terminal` which spawns an interactive login shell,
 //! this endpoint runs commands directly via `$SHELL -c "command"`,
 //! producing clean output without MOTD, prompts, or logout messages.
+//!
+//! Protocol:
+//! 1. Client sends JSON config line: {"command":"...", "tty":false}\n
+//! 2. Bidirectional raw bytes for stdin/stdout
+//! 3. Server sends exit code JSON before closing: {"exit_code":N}\n
 
-use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
-use futures::{SinkExt, StreamExt};
+use crate::rest::upgrade::BoxedIo;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 use tokio::{select, time::Duration};
@@ -33,43 +37,41 @@ fn get_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
-pub async fn handle_exec_ws(socket: WebSocket) {
-    let (mut ws_tx, mut ws_rx) = socket.split();
+pub async fn handle_exec_io(_: (), io: BoxedIo) {
+    // Split into reader/writer
+    let (reader, writer) = tokio::io::split(io);
+    let mut reader = BufReader::new(reader);
+    let writer = Arc::new(Mutex::new(writer));
 
-    // Wait for command config
-    let config: ExecRequest = match ws_rx.next().await {
-        Some(Ok(Message::Text(t))) => match serde_json::from_str(&t) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = ws_tx
-                    .send(Message::Text(
-                        format!("Invalid request: {e}\n").into(),
-                    ))
-                    .await;
-                return;
-            }
-        },
-        Some(Ok(Message::Close(_))) | None => return,
-        _ => {
-            let _ = ws_tx
-                .send(Message::Text("Expected JSON config message\n".into()))
+    // Read first line as JSON config
+    let mut config_line = String::new();
+    if reader.read_line(&mut config_line).await.is_err() {
+        return;
+    }
+
+    let config: ExecRequest = match serde_json::from_str(config_line.trim()) {
+        Ok(c) => c,
+        Err(e) => {
+            let mut w = writer.lock().await;
+            let _ = w
+                .write_all(format!("Invalid request: {e}\n").as_bytes())
                 .await;
             return;
         }
     };
 
     if config.tty {
-        run_with_pty(ws_tx, ws_rx, config).await;
+        run_with_pty(reader, writer, config).await;
     } else {
-        run_piped(ws_tx, ws_rx, config).await;
+        run_piped(reader, writer, config).await;
     }
 }
 
 /// Run command with piped stdio (no PTY) - for simple commands and -i mode
-async fn run_piped<S, R>(mut ws_tx: S, mut ws_rx: R, config: ExecRequest)
+async fn run_piped<R, W>(mut reader: R, writer: Arc<Mutex<W>>, config: ExecRequest)
 where
-    S: SinkExt<Message> + Unpin + Send + 'static,
-    R: StreamExt<Item = Result<Message, axum::Error>> + Unpin + Send + 'static,
+    R: AsyncReadExt + Unpin + Send + 'static,
+    W: AsyncWriteExt + Unpin + Send + 'static,
 {
     let shell = get_shell();
 
@@ -83,8 +85,9 @@ where
     {
         Ok(c) => c,
         Err(e) => {
-            let _ = ws_tx
-                .send(Message::Text(format!("Failed to spawn command: {e}\n").into()))
+            let mut w = writer.lock().await;
+            let _ = w
+                .write_all(format!("Failed to spawn command: {e}\n").as_bytes())
                 .await;
             return;
         }
@@ -94,7 +97,7 @@ where
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
-    // Channel for collecting output to send via WebSocket
+    // Channel for collecting output
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
     // Stdout reader task
@@ -129,29 +132,24 @@ where
         }
     });
 
-    // Stdin writer task (forwards WebSocket input to child stdin)
+    // Stdin writer task (forwards client input to child stdin)
     let stdin_task = if let Some(mut stdin) = stdin {
         Some(tokio::spawn(async move {
-            while let Some(Ok(msg)) = ws_rx.next().await {
-                match msg {
-                    Message::Text(t) => {
-                        if stdin.write_all(t.as_bytes()).await.is_err() {
-                            break;
-                        }
-                        let _ = stdin.flush().await;
-                    }
-                    Message::Binary(b) => {
-                        if stdin.write_all(&b).await.is_err() {
-                            break;
-                        }
-                        let _ = stdin.flush().await;
-                    }
-                    Message::Close(_) => {
-                        // Close stdin to signal EOF to child
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) => {
+                        // EOF - close stdin to signal end to child
                         drop(stdin);
                         break;
                     }
-                    _ => {}
+                    Ok(n) => {
+                        if stdin.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                        let _ = stdin.flush().await;
+                    }
+                    Err(_) => break,
                 }
             }
         }))
@@ -159,15 +157,12 @@ where
         None
     };
 
-    // Main loop: forward output to WebSocket
-    let ws_tx = Arc::new(Mutex::new(ws_tx));
-    let ws_tx_output = ws_tx.clone();
-
+    // Output forwarding task
+    let writer_output = writer.clone();
     let output_task = tokio::spawn(async move {
         while let Some(data) = out_rx.recv().await {
-            let text = String::from_utf8_lossy(&data).to_string();
-            let mut tx = ws_tx_output.lock().await;
-            if tx.send(Message::Text(text.into())).await.is_err() {
+            let mut w = writer_output.lock().await;
+            if w.write_all(&data).await.is_err() {
                 break;
             }
         }
@@ -185,24 +180,20 @@ where
     }
 
     // Send exit code
-    let exit_code = status
-        .ok()
-        .and_then(|s| s.code())
-        .unwrap_or(-1);
-
+    let exit_code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
     let result = ExecResult { exit_code };
-    let mut tx = ws_tx.lock().await;
-    let _ = tx
-        .send(Message::Text(serde_json::to_string(&result).unwrap().into()))
+    let mut w = writer.lock().await;
+    let _ = w
+        .write_all(format!("{}\n", serde_json::to_string(&result).unwrap()).as_bytes())
         .await;
-    let _ = tx.send(Message::Close(None)).await;
+    let _ = w.shutdown().await;
 }
 
 /// Run command with PTY - for TUI applications (vim, htop, etc.)
-async fn run_with_pty<S, R>(mut ws_tx: S, mut ws_rx: R, config: ExecRequest)
+async fn run_with_pty<R, W>(mut reader: R, writer: Arc<Mutex<W>>, config: ExecRequest)
 where
-    S: SinkExt<Message> + Unpin + Send + 'static,
-    R: StreamExt<Item = Result<Message, axum::Error>> + Unpin + Send + 'static,
+    R: AsyncReadExt + Unpin + Send + 'static,
+    W: AsyncWriteExt + Unpin + Send + 'static,
 {
     let shell = get_shell();
 
@@ -216,8 +207,9 @@ where
     }) {
         Ok(p) => p,
         Err(e) => {
-            let _ = ws_tx
-                .send(Message::Text(format!("Failed to create PTY: {e}\n").into()))
+            let mut w = writer.lock().await;
+            let _ = w
+                .write_all(format!("Failed to create PTY: {e}\n").as_bytes())
                 .await;
             return;
         }
@@ -231,93 +223,82 @@ where
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
         Err(e) => {
-            let _ = ws_tx
-                .send(Message::Text(format!("Failed to spawn command: {e}\n").into()))
+            let mut w = writer.lock().await;
+            let _ = w
+                .write_all(format!("Failed to spawn command: {e}\n").as_bytes())
                 .await;
             return;
         }
     };
 
     // Get PTY master reader/writer
-    let reader = match pair.master.try_clone_reader() {
+    let pty_reader = match pair.master.try_clone_reader() {
         Ok(r) => r,
         Err(e) => {
-            let _ = ws_tx
-                .send(Message::Text(format!("Failed to get PTY reader: {e}\n").into()))
+            let mut w = writer.lock().await;
+            let _ = w
+                .write_all(format!("Failed to get PTY reader: {e}\n").as_bytes())
                 .await;
             let _ = child.kill();
             return;
         }
     };
-    let writer = match pair.master.take_writer() {
+    let pty_writer = match pair.master.take_writer() {
         Ok(w) => w,
         Err(e) => {
-            let _ = ws_tx
-                .send(Message::Text(format!("Failed to get PTY writer: {e}\n").into()))
+            let mut w = writer.lock().await;
+            let _ = w
+                .write_all(format!("Failed to get PTY writer: {e}\n").as_bytes())
                 .await;
             let _ = child.kill();
             return;
         }
     };
-    let writer = Arc::new(Mutex::new(writer));
+    let pty_writer = Arc::new(Mutex::new(pty_writer));
 
-    // PTY -> WebSocket reader task
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    // PTY -> channel (blocking reader thread)
+    let (pty_tx, mut pty_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     tokio::task::spawn_blocking(move || {
-        let mut reader = reader;
+        let mut pty_reader = pty_reader;
         let mut buf = [0u8; 4096];
         loop {
-            match reader.read(&mut buf) {
+            match pty_reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let _ = tx.send(buf[..n].to_vec());
+                    let _ = pty_tx.send(buf[..n].to_vec());
                 }
                 Err(_) => break,
             }
         }
     });
 
-    let ws_tx = Arc::new(Mutex::new(ws_tx));
-    let ws_tx_output = ws_tx.clone();
-
     // Main loop
+    let mut read_buf = [0u8; 4096];
     'outer: loop {
         select! {
-            // WebSocket -> PTY
-            Some(Ok(msg)) = ws_rx.next() => {
-                match msg {
-                    Message::Text(text) => {
-                        let data = text.to_string();
-                        let writer = Arc::clone(&writer);
+            // Client -> PTY
+            r = reader.read(&mut read_buf) => {
+                match r {
+                    Ok(0) => break 'outer,
+                    Ok(n) => {
+                        let data = read_buf[..n].to_vec();
+                        let pty_w = pty_writer.clone();
                         if tokio::task::spawn_blocking(move || {
-                            let mut w = writer.blocking_lock();
-                            w.write_all(data.as_bytes())?;
-                            w.flush()
-                        }).await.is_err() {
-                            break 'outer;
-                        }
-                    }
-                    Message::Binary(bin) => {
-                        let data = bin.to_vec();
-                        let writer = Arc::clone(&writer);
-                        if tokio::task::spawn_blocking(move || {
-                            let mut w = writer.blocking_lock();
+                            let mut w = pty_w.blocking_lock();
                             w.write_all(&data)?;
                             w.flush()
                         }).await.is_err() {
                             break 'outer;
                         }
                     }
-                    Message::Close(_) => break 'outer,
-                    _ => {}
+                    Err(_) => break 'outer,
                 }
             }
 
-            // PTY -> WebSocket
-            Some(out) = rx.recv() => {
-                let text = String::from_utf8_lossy(&out).to_string();
-                let mut tx = ws_tx_output.lock().await;
-                if tx.send(Message::Text(Utf8Bytes::from(text))).await.is_err() {
+            // PTY -> Client
+            Some(out) = pty_rx.recv() => {
+                let mut w = writer.lock().await;
+                if w.write_all(&out).await.is_err() {
                     break 'outer;
                 }
             }
@@ -328,9 +309,9 @@ where
                     // Send exit code
                     let exit_code = status.exit_code() as i32;
                     let result = ExecResult { exit_code };
-                    let mut tx = ws_tx.lock().await;
-                    let _ = tx
-                        .send(Message::Text(serde_json::to_string(&result).unwrap().into()))
+                    let mut w = writer.lock().await;
+                    let _ = w
+                        .write_all(format!("{}\n", serde_json::to_string(&result).unwrap()).as_bytes())
                         .await;
                     break 'outer;
                 }
@@ -342,6 +323,6 @@ where
 
     // Cleanup
     let _ = child.kill();
-    let mut tx = ws_tx.lock().await;
-    let _ = tx.send(Message::Close(None)).await;
+    let mut w = writer.lock().await;
+    let _ = w.shutdown().await;
 }
