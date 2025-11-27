@@ -5,8 +5,9 @@ use tokio::net::TcpListener;
 
 use crate::rest::upgrade::io_upgrade;
 use crate::rest::{
-    docker::handle_docker_io, logs::handle_logs_io, metrics::handle_system_metrics_io,
-    port::handle_port_forward_io, ssh::handle_ssh_io, terminal::handle_terminal_io,
+    docker::handle_docker_io, exec::handle_exec_io, logs::handle_logs_io,
+    metrics::handle_system_metrics_io, port::handle_port_forward_io, ssh::handle_ssh_io,
+    terminal::handle_terminal_io,
 };
 
 pub fn build_router() -> Router {
@@ -16,6 +17,7 @@ pub fn build_router() -> Router {
         .route("/terminal", any(io_upgrade(handle_terminal_io)))
         .route("/metrics", any(io_upgrade(handle_system_metrics_io)))
         .route("/ssh", any(io_upgrade(handle_ssh_io)))
+        .route("/exec", any(io_upgrade(handle_exec_io)))
         .route("/port/{port}", any(io_upgrade(handle_port_forward_io)))
 
 }

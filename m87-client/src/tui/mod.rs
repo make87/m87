@@ -1,4 +1,4 @@
-pub mod cmd;
+pub mod exec;
 pub mod logs;
 pub mod metrics;
 pub mod shell;

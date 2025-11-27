@@ -4,19 +4,19 @@ Run commands on remote devices.
 
 ## Overview
 
-m87 cmd allows you to execute commands on remote devices, with optional stdin forwarding and TTY support for interactive applications.
+m87 exec allows you to execute commands on remote devices, with optional stdin forwarding and TTY support for interactive applications.
 
 ## Basic Usage
 
 ```bash
 # Run a simple command
-m87 <device> cmd -- ls -la
+m87 <device> exec -- ls -la
 
 # Run with stdin forwarding (for prompts)
-m87 <device> cmd -i -- sudo apt upgrade
+m87 <device> exec -i -- sudo apt upgrade
 
 # Run with TTY for interactive apps
-m87 <device> cmd -it -- vim config.yaml
+m87 <device> exec -it -- vim config.yaml
 ```
 
 ## Modes
@@ -25,6 +25,7 @@ m87 <device> cmd -it -- vim config.yaml
 |-------|------|----------|
 | (none) | Output only | Simple commands, scripts |
 | `-i` | Stdin forwarding | Respond to prompts (Y/n) |
+| `-t` | TTY read-only | Colored output, watch mode |
 | `-it` | Full TTY | TUI apps (vim, htop, less) |
 
 ## Examples
@@ -32,46 +33,46 @@ m87 <device> cmd -it -- vim config.yaml
 ### System Administration
 ```bash
 # Check disk usage
-m87 rpi cmd -- df -h
+m87 rpi exec -- df -h
 
 # Update packages (needs stdin for confirmation)
-m87 rpi cmd -i -- 'sudo apt update && sudo apt upgrade'
+m87 rpi exec -i -- 'sudo apt update && sudo apt upgrade'
 
 # View system logs
-m87 rpi cmd -- journalctl -n 100
+m87 rpi exec -- journalctl -n 100
 ```
 
 ### Docker Management
 ```bash
 # List containers
-m87 rpi cmd -- docker ps -a
+m87 rpi exec -- docker ps -a
 
 # View container logs
-m87 rpi cmd -- docker logs myapp
+m87 rpi exec -- docker logs myapp
 
 # Stop all containers
-m87 rpi cmd -- 'docker stop $(docker ps -q)'
+m87 rpi exec -- 'docker stop $(docker ps -q)'
 ```
 
 ### Interactive Applications
 ```bash
 # Edit a file with vim
-m87 rpi cmd -it -- vim /etc/hosts
+m87 rpi exec -it -- vim /etc/hosts
 
 # Monitor with htop
-m87 rpi cmd -it -- htop
+m87 rpi exec -it -- htop
 
 # Browse files with less
-m87 rpi cmd -it -- less /var/log/syslog
+m87 rpi exec -it -- less /var/log/syslog
 ```
 
 ### Chained Commands
 ```bash
 # Multiple commands with &&
-m87 rpi cmd -- 'cd /app && git pull && npm install'
+m87 rpi exec -- 'cd /app && git pull && npm install'
 
 # Pipeline
-m87 rpi cmd -- 'ps aux | grep nginx'
+m87 rpi exec -- 'ps aux | grep nginx'
 ```
 
 ## Shell Quoting
@@ -80,10 +81,10 @@ Commands are interpreted by your local shell first. Use single quotes to send co
 
 ```bash
 # Local shell expands $(...)
-m87 rpi cmd -- docker kill $(docker ps -q)  # Runs docker ps -q locally!
+m87 rpi exec -- docker kill $(docker ps -q)  # Runs docker ps -q locally!
 
 # Single quotes send literally to remote
-m87 rpi cmd -- 'docker kill $(docker ps -q)'  # Correct: expands on remote
+m87 rpi exec -- 'docker kill $(docker ps -q)'  # Correct: expands on remote
 ```
 
 ## Flags
@@ -96,9 +97,12 @@ m87 rpi cmd -- 'docker kill $(docker ps -q)'  # Correct: expands on remote
 | Mode | Ctrl+C Effect |
 |------|---------------|
 | No flags / `-i` | Terminates connection, exits with code 130 |
-| `-t` / `-it` | Sent to remote app (e.g., cancel in vim) |
+| `-t` | No effect (stdin not connected) |
+| `-it` | Sent to remote app (e.g., cancel in vim) |
 
-In TTY mode, Ctrl+C is forwarded to the remote application as a raw keystroke. To forcefully disconnect, close your terminal or use other means.
+In `-it` mode, Ctrl+C is forwarded to the remote application as a raw keystroke. To forcefully disconnect, close your terminal or use other means.
+
+**Note:** The `-t` flag without `-i` allocates a TTY for output formatting but does not connect stdin. This means keyboard input (including Ctrl+C) has no effect. Use `-t` alone for commands that need colored/formatted output but no interaction, or close your terminal to exit.
 
 ## Process Cleanup
 

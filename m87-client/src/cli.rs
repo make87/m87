@@ -173,7 +173,7 @@ pub enum DeviceCommand {
         tail: usize,
     },
     Stats,
-    Cmd {
+    Exec {
         /// Keep stdin open (for responding to prompts)
         #[arg(short = 'i', long)]
         stdin: bool,
@@ -433,12 +433,12 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             Ok(())
         }
 
-        DeviceCommand::Cmd {
+        DeviceCommand::Exec {
             stdin,
             tty,
             command,
         } => {
-            tui::cmd::run_cmd(&device, command, stdin, tty).await?;
+            tui::exec::run_exec(&device, command, stdin, tty).await?;
             Ok(())
         }
     }
