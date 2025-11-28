@@ -1,0 +1,79 @@
+use anyhow::Result;
+use libc;
+use std::ffi::CStr;
+use std::os::fd::{FromRawFd, RawFd};
+use tokio::io::split;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::task;
+use tracing::info;
+
+use crate::{
+    auth::AuthManager,
+    config::Config,
+    devices,
+    util::{raw_connection::open_raw_io, shutdown::SHUTDOWN},
+};
+
+// Create a PTY pair (master + slave)
+fn open_pty() -> Result<(RawFd, String)> {
+    unsafe {
+        let mut master: libc::c_int = 0;
+        let mut slave: libc::c_int = 0;
+
+        if libc::openpty(
+            &mut master as *mut _,
+            &mut slave as *mut _,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        ) != 0
+        {
+            return Err(anyhow::anyhow!("openpty failed"));
+        }
+
+        let name_ptr = libc::ttyname(slave);
+        if name_ptr.is_null() {
+            return Err(anyhow::anyhow!("ttyname failed"));
+        }
+
+        let slave_name = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
+        Ok((master, slave_name))
+    }
+}
+
+pub async fn open_serial(device: &str, port: &str, baud: u32) -> Result<()> {
+    let cfg = Config::load()?;
+    let token = AuthManager::get_cli_token().await?;
+    let dev = devices::get_device_by_name(device).await?;
+    let host = cfg.get_server_hostname();
+
+    let path = format!("/serial/{port}?baud={baud}");
+    let remote_io = open_raw_io(&host, &dev.short_id, &path, &token, false).await?;
+
+    // Create pty
+    let (master_fd, slave_path) = open_pty()?;
+
+    info!("Local virtual serial device: {}", slave_path);
+
+    // Convert master FD → tokio file
+    let master = unsafe { tokio::fs::File::from_raw_fd(master_fd) };
+
+    let (mut m_read, mut m_write) = split(master);
+    let (mut r_read, mut r_write) = split(remote_io);
+
+    let t1 = task::spawn(async move { tokio::io::copy(&mut r_read, &mut m_write).await });
+    let t2 = task::spawn(async move { tokio::io::copy(&mut m_read, &mut r_write).await });
+
+    tokio::select! {
+        a = t1 => { a??; }
+        b = t2 => { b??; }
+        _ = SHUTDOWN.cancelled() => { }
+    }
+
+    // Cleanup handled automatically because:
+    // - PTY master FD drops → slave disappears automatically
+    // - remote_io drops → remote closes serial
+    // - tasks end
+
+    Ok(())
+}
