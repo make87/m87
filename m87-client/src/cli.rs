@@ -15,12 +15,6 @@ use crate::util;
 use crate::util::logging::init_logging;
 use crate::util::tls::set_tls_provider;
 
-/// Represents a parsed device path (either local or remote)
-struct DevicePath {
-    device: Option<String>, // None = local, Some(name) = remote
-    path: String,
-}
-
 /// Parse tunnel target: "[ip:]port" -> (host, port)
 /// Examples: "8080" -> ("127.0.0.1", 8080), "192.168.1.50:554" -> ("192.168.1.50", 554)
 fn parse_tunnel_target(target: &str) -> anyhow::Result<(String, u16)> {
@@ -34,31 +28,6 @@ fn parse_tunnel_target(target: &str) -> anyhow::Result<(String, u16)> {
             .parse()
             .map_err(|_| anyhow::anyhow!("Invalid port: {}", target))?;
         Ok(("127.0.0.1".to_string(), port))
-    }
-}
-
-/// Parse a path string into DevicePath, detecting device:path syntax
-fn parse_device_path(input: &str) -> DevicePath {
-    // Check for device:path pattern
-    if let Some(colon_pos) = input.find(':') {
-        // Handle Windows drive letters (e.g., C:\path)
-        // If it's a single char followed by colon and backslash, treat as local Windows path
-        if colon_pos == 1 && input.len() > 2 && &input[2..3] == "\\" {
-            DevicePath {
-                device: None,
-                path: input.to_string(),
-            }
-        } else {
-            DevicePath {
-                device: Some(input[..colon_pos].to_string()),
-                path: input[colon_pos + 1..].to_string(),
-            }
-        }
-    } else {
-        DevicePath {
-            device: None,
-            path: input.to_string(),
-        }
     }
 }
 

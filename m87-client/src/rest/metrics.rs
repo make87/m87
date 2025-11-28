@@ -1,13 +1,16 @@
 use tokio::io::AsyncWriteExt;
 
-use crate::rest::{shared::acquire_metrics_task, upgrade::BoxedIo};
+use crate::rest::{
+    shared::{acquire_metrics_task, SharedReceiver},
+    upgrade::BoxedIo,
+};
 
 pub async fn handle_system_metrics_io(_: (), mut io: BoxedIo) {
     // Start metrics subscription task
-    let (task, mut rx) = acquire_metrics_task("system-metrics").await;
+    let (_task, mut rx): (_, SharedReceiver) = acquire_metrics_task("system-metrics").await;
 
-    // Forward metrics until client disconnects or task ends
-    while let Ok(json) = rx.recv().await {
+    // Forward metrics until client disconnects or producer shuts down
+    while let Ok(json) = rx.inner_mut().recv().await {
         if io.write_all(json.as_bytes()).await.is_err() {
             break;
         }
@@ -16,9 +19,9 @@ pub async fn handle_system_metrics_io(_: (), mut io: BoxedIo) {
         }
     }
 
-    // Shutdown metrics producer
-    task.dec_or_shutdown();
+    // No manual ref decrement — dropping rx handles it
+    drop(rx);
 
-    // Explicitly flush & close
+    // Flush & close
     let _ = io.shutdown().await;
 }

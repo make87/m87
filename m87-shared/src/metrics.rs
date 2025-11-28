@@ -6,6 +6,7 @@ pub struct SystemMetrics {
     pub os: String,
     pub arch: String,
     pub uptime_secs: u64,
+
     pub cpu: CpuMetrics,
     pub memory: MemoryMetrics,
     pub disk: DiskMetrics,
@@ -15,9 +16,19 @@ pub struct SystemMetrics {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CpuMetrics {
-    pub usage_percent: f32,
+    /// existing fields
+    pub usage_percent: f32, // average over all cores
     pub cores: usize,
     pub load_avg: (f32, f32, f32),
+
+    /// new detailed per-core metrics
+    pub per_core: Vec<CpuCoreMetrics>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CpuCoreMetrics {
+    pub id: usize,
+    pub usage_percent: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -36,8 +47,19 @@ pub struct DiskMetrics {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NetworkMetrics {
+    /// existing aggregate metrics
     pub rx_mbps: f32,
     pub tx_mbps: f32,
+
+    /// new per-interface stats
+    pub interfaces: Vec<NetworkInterfaceMetrics>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NetworkInterfaceMetrics {
+    pub name: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

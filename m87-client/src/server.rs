@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
+#[cfg(feature = "agent")]
+use m87_shared::metrics::SystemMetrics;
 use reqwest::Client;
 use tokio::{
     io::{self},
@@ -11,7 +13,6 @@ use tracing::{debug, error, info, warn};
 #[cfg(feature = "agent")]
 use crate::device::services::service_info::ServiceInfo;
 #[cfg(feature = "agent")]
-use crate::device::system_metrics::SystemMetrics;
 use crate::{
     auth::AuthManager,
     config::Config,
