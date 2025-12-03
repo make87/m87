@@ -150,13 +150,18 @@ jobs:
             > m87-server/THIRDPARTY_LICENSES.html
           ls -lh m87-server/THIRDPARTY_LICENSES.html
 
+      - name: Rename attribution files for release
+        run: |
+          mv m87-client/THIRDPARTY_LICENSES.html m87-client/THIRDPARTY_LICENSES_CLIENT.html
+          mv m87-server/THIRDPARTY_LICENSES.html m87-server/THIRDPARTY_LICENSES_SERVER.html
+
       - name: Upload attribution artifacts
         uses: actions/upload-artifact@v4
         with:
           name: attribution
           path: |
-            m87-client/THIRDPARTY_LICENSES.html
-            m87-server/THIRDPARTY_LICENSES.html
+            m87-client/THIRDPARTY_LICENSES_CLIENT.html
+            m87-server/THIRDPARTY_LICENSES_SERVER.html
           if-no-files-found: error
 
   docker-build:
