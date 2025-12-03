@@ -72,7 +72,7 @@ bytes = "1"
 base64 = "0.22"
 futures-util = "0.3"
 # ssh
-russh = "0.54.6"
+russh = "0.55.0"
 russh-sftp = "2.1.1"
 filetime = "0.2"
 
