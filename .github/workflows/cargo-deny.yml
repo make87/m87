@@ -1,0 +1,45 @@
+name: Rust dependency & license checks
+
+on:
+  push:
+    branches:
+      - main
+      - "release/*"
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (licenses, bans, advisories)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust (toolchain from rust-toolchain.toml if present)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Check licenses
+        run: cargo deny check licenses
+
+      - name: Check advisories
+        run: cargo deny check advisories
+
+      - name: Check bans
+        run: cargo deny check bans
+
