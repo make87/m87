@@ -17,7 +17,7 @@ use tokio::{
 };
 
 use russh_sftp::protocol::{
-    Attrs, Data, File, FileAttributes, FileType, Handle, Name, OpenFlags, Status, StatusCode,
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode,
     Version,
 };
 
@@ -359,11 +359,11 @@ impl russh_sftp::server::Handler for M87SftpHandler {
         while let Ok(Some(entry)) = rd.next_entry().await {
             let file_name = entry.file_name().to_string_lossy().into_owned();
             let meta_std = match entry.metadata().await {
-                Ok(m) => {
+                Ok(_) => {
                     // Convert to std::fs::Metadata; tokio uses the same underlying
                     // representation so we cheat a bit by re-stat’ing.
                     match std::fs::metadata(entry.path()) {
-                        Ok(m2) => m2,
+                        Ok(m) => m,
                         Err(_) => continue,
                     }
                 }

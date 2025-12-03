@@ -6,7 +6,7 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{FromRequest, FromRequestParts, Path},
+    extract::FromRequestParts,
     http::{HeaderMap, Request, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -14,7 +14,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use bytes::BytesMut;
 use futures::{Sink, Stream};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use hyper::{header, upgrade};
 use hyper_util::rt::TokioIo;
 use sha1::{Digest, Sha1};

@@ -3,9 +3,9 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use russh::keys::ssh_key::rand_core::OsRng;
-use russh::keys::{PrivateKey, PublicKey};
+use russh::keys::PublicKey;
 use tokio::{io, net::TcpStream, process::Command, sync::Mutex, task};
-use tracing::{debug, error, info};
+use tracing::error;
 
 use russh::server::{self, Auth, Config as ServerConfig, Handle, Msg, Session};
 use russh::{Channel, ChannelId};

@@ -166,7 +166,7 @@ async fn start_docker_proxy(device_name: &str, socket_path: &Path) -> Result<()>
 
 /// Handle single Docker API connection via WebSocket
 #[cfg(unix)]
-async fn handle_docker_connection(mut local: UnixStream, device_name: &str) -> Result<()> {
+async fn handle_docker_connection(local: UnixStream, device_name: &str) -> Result<()> {
     use crate::auth::AuthManager;
     use crate::config::Config;
     use crate::devices;

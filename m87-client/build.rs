@@ -1,20 +1,26 @@
 fn main() {
-    // Automatically enable features based on target OS
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    // Check if features were explicitly provided via CLI/Cargo.toml
+    let agent_from_cli = std::env::var("CARGO_FEATURE_AGENT").is_ok();
+    let manager_from_cli = std::env::var("CARGO_FEATURE_MANAGER").is_ok();
 
-    match target_os.as_str() {
-        "linux" => {
-            // Linux gets both agent and manager capabilities
-            println!("cargo:rustc-cfg=feature=\"agent\"");
-            println!("cargo:rustc-cfg=feature=\"manager\"");
-        }
-        "macos" | "windows" => {
-            // macOS and Windows get manager-only capabilities
-            println!("cargo:rustc-cfg=feature=\"manager\"");
-        }
-        _ => {
-            // Other platforms default to manager-only
-            println!("cargo:rustc-cfg=feature=\"manager\"");
+    // Only auto-detect features based on OS if none were explicitly specified
+    if !agent_from_cli && !manager_from_cli {
+        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+
+        match target_os.as_str() {
+            "linux" => {
+                // Linux gets both agent and manager capabilities
+                println!("cargo:rustc-cfg=feature=\"agent\"");
+                println!("cargo:rustc-cfg=feature=\"manager\"");
+            }
+            "macos" | "windows" => {
+                // macOS and Windows get manager-only capabilities
+                println!("cargo:rustc-cfg=feature=\"manager\"");
+            }
+            _ => {
+                // Other platforms default to manager-only
+                println!("cargo:rustc-cfg=feature=\"manager\"");
+            }
         }
     }
 

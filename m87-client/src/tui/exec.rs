@@ -251,23 +251,19 @@ where
                         pending.extend_from_slice(&buf[..n]);
 
                         // Look for potential exit code JSON at the end
-                        if let Some(newline_pos) = pending.iter().rposition(|&b| b == b'\n') {
-                            let last_line = String::from_utf8_lossy(&pending[..=newline_pos]);
-                            let lines: Vec<&str> = last_line.lines().collect();
-
-                            if let Some(last) = lines.last() {
-                                if let Some(code) = try_parse_exit_code(last) {
-                                    exit_code = code;
-                                    // Output everything except the JSON line
-                                    let output_end = pending.len() - last.len() - 1;
-                                    if output_end > 0 {
-                                        stdout.write_all(&pending[..output_end]).await?;
-                                        stdout.flush().await?;
-                                    }
-                                    pending.clear();
-                                    continue;
-                                }
+                        if let Some(newline_pos) = pending.iter().rposition(|&b| b == b'\n')
+                            && let Some(last) = String::from_utf8_lossy(&pending[..=newline_pos]).lines().last()
+                            && let Some(code) = try_parse_exit_code(last)
+                        {
+                            exit_code = code;
+                            // Output everything except the JSON line
+                            let output_end = pending.len() - last.len() - 1;
+                            if output_end > 0 {
+                                stdout.write_all(&pending[..output_end]).await?;
+                                stdout.flush().await?;
                             }
+                            pending.clear();
+                            continue;
                         }
 
                         // No exit code found, output everything
@@ -368,24 +364,19 @@ where
             pending.extend_from_slice(&buf[..n]);
 
             // Look for potential exit code JSON at the end
-            if let Some(newline_pos) = pending.iter().rposition(|&b| b == b'\n') {
-                // Check the last line
-                let last_line = String::from_utf8_lossy(&pending[..=newline_pos]);
-                let lines: Vec<&str> = last_line.lines().collect();
-
-                if let Some(last) = lines.last() {
-                    if let Some(code) = try_parse_exit_code(last) {
-                        *exit_code_reader.lock().await = code;
-                        // Output everything except the JSON line
-                        let output_end = pending.len() - last.len() - 1;
-                        if output_end > 0 {
-                            stdout.write_all(&pending[..output_end]).await?;
-                            stdout.flush().await?;
-                        }
-                        pending.clear();
-                        continue;
-                    }
+            if let Some(newline_pos) = pending.iter().rposition(|&b| b == b'\n')
+                && let Some(last) = String::from_utf8_lossy(&pending[..=newline_pos]).lines().last()
+                && let Some(code) = try_parse_exit_code(last)
+            {
+                *exit_code_reader.lock().await = code;
+                // Output everything except the JSON line
+                let output_end = pending.len() - last.len() - 1;
+                if output_end > 0 {
+                    stdout.write_all(&pending[..output_end]).await?;
+                    stdout.flush().await?;
                 }
+                pending.clear();
+                continue;
             }
 
             // No exit code found, output everything

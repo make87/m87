@@ -1,79 +1,67 @@
-use libmacchina::{GeneralReadout, MemoryReadout};
+use sysinfo::System;
 
 pub struct Readout {
     pub cpu_cores: u32,
     pub cpu: String,
     pub name: String,
     pub distribution: String,
-    pub gpus: Vec<String>,
     pub memory: u64,
 }
 
 pub fn get_detailed_printout() -> String {
-    use libmacchina::traits::GeneralReadout as _;
+    let mut sys = System::new_all();
+    sys.refresh_all();
 
-    let general_readout = GeneralReadout::new();
-
-    // There are many more metrics we can query
-    // i.e. username, distribution, terminal, shell, etc.
-    let cpu_cores = general_readout.cpu_cores().unwrap_or(0); // 8 [logical cores]
-    let cpu = general_readout
-        .cpu_model_name()
-        .unwrap_or("not found".to_string()); // Intel(R) Core(TM) i5-8265U CPU @ 1.60GHz
-    let uptime = general_readout.uptime().unwrap_or(0); // 1500 [in seconds]
-    let name = general_readout
-        .hostname()
-        .unwrap_or("not found".to_string()); // my-hostname
-    let distribution = general_readout
-        .distribution()
-        .unwrap_or("not found".to_string()); // Ubuntu 20.04.2 LTS
-    let gpus = general_readout.gpus().unwrap_or(vec![]);
-    // joined string
-    let gpus = gpus.join(", "); // NVIDIA GeForce MX250, Intel UHD Graphics 620
-
-    // Now we'll import the MemoryReadout trait to get an
-    // idea of what the host's memory usage looks like.
-    use libmacchina::traits::MemoryReadout as _;
-
-    let memory_readout = MemoryReadout::new();
-
-    let total_mem = memory_readout.total().unwrap_or(0); // 20242204 [in kB]
-    let machine = general_readout.machine().unwrap_or("not found".to_string()); // x86_64
-                                                                                // create nicely formatted string
+    let cpu_cores = sys.cpus().len();
+    let cpu = sys
+        .cpus()
+        .first()
+        .map(|c| c.brand().to_string())
+        .unwrap_or_else(|| "not found".to_string());
+    let uptime = System::uptime();
+    let name = System::host_name().unwrap_or_else(|| "not found".to_string());
+    let distribution = format!(
+        "{} {}",
+        System::name().unwrap_or_else(|| "Unknown".to_string()),
+        System::os_version().unwrap_or_else(|| "".to_string())
+    );
+    let machine = System::cpu_arch();
+    let total_mem = sys.total_memory() / 1024; // bytes to kB
 
     let system_info = format!(
         "System Info:\n\
         CPU: {} with {} cores\n\
-        GPUs: {}\n\
+        GPUs: \n\
         Uptime: {} seconds\n\
         Hostname: {}\n\
         Distribution: {}\n\
         Machine: {}\n\
         Memory: {} kB",
-        cpu, cpu_cores, gpus, uptime, name, distribution, machine, total_mem
+        cpu, cpu_cores, uptime, name, distribution, machine, total_mem
     );
 
     system_info
 }
 
 pub fn get_readout() -> Readout {
-    use libmacchina::traits::GeneralReadout as _;
-    use libmacchina::traits::MemoryReadout as _;
-    let general_readout = GeneralReadout::new();
-    let memory_readout = MemoryReadout::new();
-    let memory = memory_readout.total().unwrap_or(0);
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    let memory = sys.total_memory() / 1024; // bytes to kB
+
     Readout {
-        cpu_cores: general_readout.cpu_cores().unwrap_or(0) as u32,
-        cpu: general_readout
-            .cpu_model_name()
-            .unwrap_or("not found".to_string()),
-        name: general_readout
-            .hostname()
-            .unwrap_or("not found".to_string()),
-        distribution: general_readout
-            .distribution()
-            .unwrap_or("not found".to_string()),
-        gpus: general_readout.gpus().unwrap_or(vec![]),
+        cpu_cores: sys.cpus().len() as u32,
+        cpu: sys
+            .cpus()
+            .first()
+            .map(|c| c.brand().to_string())
+            .unwrap_or_else(|| "not found".to_string()),
+        name: System::host_name().unwrap_or_else(|| "not found".to_string()),
+        distribution: format!(
+            "{} {}",
+            System::name().unwrap_or_else(|| "Unknown".to_string()),
+            System::os_version().unwrap_or_else(|| "".to_string())
+        ),
         memory,
     }
 }

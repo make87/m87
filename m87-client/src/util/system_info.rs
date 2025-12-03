@@ -75,7 +75,6 @@ pub async fn get_system_info(enable_geo_lookup: bool) -> Result<server::DeviceSy
     sys_info.cores = Some(readout.cpu_cores);
     sys_info.cpu_name = readout.cpu;
     sys_info.memory = Some((readout.memory as f64) / 1024. / 1024.);
-    sys_info.gpus = readout.gpus;
     sys_info.hostname = readout.name;
     sys_info.operating_system = readout.distribution;
 

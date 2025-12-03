@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use m87_shared::device::PublicDevice;
 
 use crate::auth;
+#[cfg(feature = "agent")]
 use crate::config::Config;
 use crate::device;
 use crate::device::serial;
@@ -11,6 +12,7 @@ use crate::device::tunnel;
 use crate::devices;
 use crate::tui;
 use crate::update;
+#[cfg(feature = "agent")]
 use crate::util;
 use crate::util::logging::init_logging;
 use crate::util::tls::set_tls_provider;
@@ -416,6 +418,7 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             Ok(())
         }
 
+        #[cfg(unix)]
         DeviceCommand::Serial { path, baud } => {
             let baud = baud.unwrap_or(115200);
             serial::open_serial(&device, &path, baud).await?;

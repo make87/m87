@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "agent")]
 use sha1::{Digest, Sha1};
 use std::{fs, path::PathBuf};
 use tracing::{error, info, warn};

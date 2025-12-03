@@ -1,6 +1,7 @@
 use anyhow::Result;
-use std::{collections::HashMap, process::Command, sync::Once};
+use std::{collections::HashMap, process::Command, sync::OnceLock};
 use sysinfo::{Disks, Networks, System};
+use tokio::sync::Mutex;
 
 use m87_shared::metrics::{
     CpuCoreMetrics, CpuMetrics, DiskMetrics, GpuMetrics, MemoryMetrics, NetworkInterfaceMetrics,
@@ -8,34 +9,23 @@ use m87_shared::metrics::{
 };
 
 // ---------------------------------------------------------
-// Global System instance
+// Global System instance (safe)
 // ---------------------------------------------------------
 
-static INIT: Once = Once::new();
-static mut SYS: Option<System> = None;
+static SYS: OnceLock<Mutex<System>> = OnceLock::new();
 
-fn sys_mut() -> &'static mut System {
-    unsafe {
-        INIT.call_once(|| {
-            let mut sys = System::new_all();
-            // First refresh to populate data
-            sys.refresh_all();
-            SYS = Some(sys);
-        });
-        SYS.as_mut().unwrap()
-    }
+fn sys() -> &'static Mutex<System> {
+    SYS.get_or_init(|| {
+        let mut sys = System::new_all();
+        sys.refresh_all();
+        Mutex::new(sys)
+    })
 }
 
-static mut PREV_NET: Option<HashMap<String, (u64, u64)>> = None;
-static PREV_INIT: Once = Once::new();
+static PREV_NET: OnceLock<Mutex<HashMap<String, (u64, u64)>>> = OnceLock::new();
 
-fn prev_net() -> &'static mut HashMap<String, (u64, u64)> {
-    unsafe {
-        PREV_INIT.call_once(|| {
-            PREV_NET = Some(HashMap::new());
-        });
-        PREV_NET.as_mut().unwrap()
-    }
+fn prev_net() -> &'static Mutex<HashMap<String, (u64, u64)>> {
+    PREV_NET.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 // ---------------------------------------------------------
@@ -43,54 +33,59 @@ fn prev_net() -> &'static mut HashMap<String, (u64, u64)> {
 // ---------------------------------------------------------
 
 pub async fn collect_system_metrics() -> Result<SystemMetrics> {
-    let sys = sys_mut();
+    // Scope for sys lock
+    let (cpu, memory) = {
+        let mut sys = sys().lock().await;
 
-    // ---------------- CPU ----------------
-    // CPU usage needs TWO calls with a pause
-    sys.refresh_cpu_usage();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    sys.refresh_cpu_usage();
+        // ---------------- CPU ----------------
+        // CPU usage needs TWO calls with a pause
+        sys.refresh_cpu_usage();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        sys.refresh_cpu_usage();
 
-    let cores = sys.cpus().len();
+        let cores = sys.cpus().len();
 
-    let avg_usage = if cores == 0 {
-        0.0
-    } else {
-        sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / cores as f32
-    };
-
-    let per_core = sys
-        .cpus()
-        .iter()
-        .enumerate()
-        .map(|(i, c)| CpuCoreMetrics {
-            id: i,
-            usage_percent: c.cpu_usage(),
-        })
-        .collect();
-
-    let load = System::load_average();
-    let cpu = CpuMetrics {
-        usage_percent: avg_usage,
-        cores,
-        load_avg: (load.one as f32, load.five as f32, load.fifteen as f32),
-        per_core,
-    };
-
-    // ---------------- MEMORY ----------------
-    sys.refresh_memory();
-
-    let total_mb = sys.total_memory() / 1024;
-    let used_mb = sys.used_memory() / 1024;
-
-    let memory = MemoryMetrics {
-        total_mb,
-        used_mb,
-        usage_percent: if total_mb == 0 {
+        let avg_usage = if cores == 0 {
             0.0
         } else {
-            (used_mb as f32 / total_mb as f32) * 100.0
-        },
+            sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / cores as f32
+        };
+
+        let per_core = sys
+            .cpus()
+            .iter()
+            .enumerate()
+            .map(|(i, c)| CpuCoreMetrics {
+                id: i,
+                usage_percent: c.cpu_usage(),
+            })
+            .collect();
+
+        let load = System::load_average();
+        let cpu = CpuMetrics {
+            usage_percent: avg_usage,
+            cores,
+            load_avg: (load.one as f32, load.five as f32, load.fifteen as f32),
+            per_core,
+        };
+
+        // ---------------- MEMORY ----------------
+        sys.refresh_memory();
+
+        let total_mb = sys.total_memory() / 1024;
+        let used_mb = sys.used_memory() / 1024;
+
+        let memory = MemoryMetrics {
+            total_mb,
+            used_mb,
+            usage_percent: if total_mb == 0 {
+                0.0
+            } else {
+                (used_mb as f32 / total_mb as f32) * 100.0
+            },
+        };
+
+        (cpu, memory)
     };
 
     // ---------------- DISKS ----------------
@@ -122,31 +117,33 @@ pub async fn collect_system_metrics() -> Result<SystemMetrics> {
     // Create a fresh snapshot of all interfaces
     let networks = Networks::new_with_refreshed_list();
 
-    // Persistent map to track previous counters
-    let prev = prev_net();
+    let interfaces = {
+        let mut prev = prev_net().lock().await;
+        let mut interfaces = Vec::new();
 
-    let mut interfaces = Vec::new();
+        for (name, data) in &networks {
+            let rx_now = data.total_received();
+            let tx_now = data.total_transmitted();
 
-    for (name, data) in &networks {
-        let rx_now = data.total_received();
-        let tx_now = data.total_transmitted();
+            // Prev values (default 0)
+            let (rx_prev, tx_prev) = prev.get(name).cloned().unwrap_or((rx_now, tx_now));
 
-        // Prev values (default 0)
-        let (rx_prev, tx_prev) = prev.get(name).cloned().unwrap_or((rx_now, tx_now));
+            // Deltas = amount of data since last update
+            let rx_delta = rx_now.saturating_sub(rx_prev);
+            let tx_delta = tx_now.saturating_sub(tx_prev);
 
-        // Deltas = amount of data since last update
-        let rx_delta = rx_now.saturating_sub(rx_prev);
-        let tx_delta = tx_now.saturating_sub(tx_prev);
+            // Store new snapshot
+            prev.insert(name.to_string(), (rx_now, tx_now));
 
-        // Store new snapshot
-        prev.insert(name.to_string(), (rx_now, tx_now));
+            interfaces.push(NetworkInterfaceMetrics {
+                name: name.to_string(),
+                rx_bytes: rx_delta,
+                tx_bytes: tx_delta,
+            });
+        }
 
-        interfaces.push(NetworkInterfaceMetrics {
-            name: name.to_string(),
-            rx_bytes: rx_delta,
-            tx_bytes: tx_delta,
-        });
-    }
+        interfaces
+    };
 
     // total aggregated MB/s (optional)
     let total_rx: u64 = interfaces.iter().map(|i| i.rx_bytes).sum();
@@ -184,26 +181,20 @@ pub async fn collect_system_metrics() -> Result<SystemMetrics> {
 // GPU detection
 // ---------------------------------------------------------
 
-static CHECK_NVIDIA_SMI: Once = Once::new();
-static mut HAS_NVIDIA_SMI: bool = false;
+static HAS_NVIDIA_SMI: OnceLock<bool> = OnceLock::new();
 
-fn detect_nvidia_smi() {
-    let found = Command::new("nvidia-smi")
-        .arg("--help")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    unsafe {
-        HAS_NVIDIA_SMI = found;
-    }
+fn has_nvidia_smi() -> bool {
+    *HAS_NVIDIA_SMI.get_or_init(|| {
+        Command::new("nvidia-smi")
+            .arg("--help")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
 }
 
 fn collect_gpu_metrics() -> Result<Vec<GpuMetrics>> {
-    CHECK_NVIDIA_SMI.call_once(|| detect_nvidia_smi());
-
-    let has = unsafe { HAS_NVIDIA_SMI };
-    if !has {
+    if !has_nvidia_smi() {
         return Ok(Vec::new());
     }
 

@@ -35,7 +35,7 @@ impl<S> Layer<S> for LogBroadcastLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         // Extract message field
         let mut visitor = MsgVisitor { msg: String::new() };
         event.record(&mut visitor);
@@ -127,7 +127,7 @@ pub fn human_date(ts: u64) -> String {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
 
-    let (year, month, day) = unix_days_to_ymd(days as i64);
+    let (_year, month, day) = unix_days_to_ymd(days as i64);
 
     format!(
         "{} {:>2} {:02}:{:02}",

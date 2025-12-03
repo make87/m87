@@ -7,7 +7,6 @@ use tokio::{
     time::{timeout, Duration},
 };
 
-use std::env;
 use std::path::Path;
 use std::{io::Read, io::Write, sync::Arc};
 

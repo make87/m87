@@ -1,8 +1,10 @@
 [package]
 name = "m87-server"
 version = "0.0.0-dev0"
-edition = "2021"
-authors = ["Phillip Thomas <phillip@make87.com>"]
+edition = "2024"
+authors = ["Phillip Thomas <phillip@make87.com>", "Nisse Knudsen <nisse@make87.com>"]
+publish = false
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 # Local workspace crates
@@ -11,14 +13,11 @@ m87-shared = { path = "../m87-shared" }
 # Common workspace dependencies
 tokio = { workspace = true, features = ["net", "time", "fs", "process", "signal"] }
 tokio-stream.workspace = true
-tokio-util.workspace = true
-async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-once_cell.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 hex.workspace = true
@@ -42,10 +41,7 @@ bson = { version = "3", features = ["serde_with-3", "chrono-0_4"] }
 
 # Server-specific web framework
 axum = { version = "0.8.6", features = ["ws", "macros"] }
-# make sure to match axums verison here
-hyper = { version = "^1.1.0", features = ["server"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-axum-extra = { version = "0.10", features = ["typed-header"] }
+axum-extra = { version = "0.12.2", features = ["typed-header"] }
 tower-http = { version = "0.6.1", features = ["cors", "trace", "timeout", "sensitive-headers", "compression-full"] }
 headers = "0.4.1"
 

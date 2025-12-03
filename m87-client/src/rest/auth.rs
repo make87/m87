@@ -1,6 +1,4 @@
 use anyhow::{anyhow, Result};
-use axum::extract::ws::{Message, WebSocket};
-use futures::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

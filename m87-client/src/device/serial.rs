@@ -3,7 +3,6 @@ use libc;
 use std::ffi::CStr;
 use std::os::fd::{FromRawFd, RawFd};
 use tokio::io::split;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task;
 use tracing::info;
 
@@ -24,8 +23,8 @@ fn open_pty() -> Result<(RawFd, String)> {
             &mut master as *mut _,
             &mut slave as *mut _,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
         ) != 0
         {
             return Err(anyhow::anyhow!("openpty failed"));

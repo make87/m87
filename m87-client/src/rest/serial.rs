@@ -1,7 +1,7 @@
 use crate::rest::upgrade::BoxedIo;
 use axum::extract::{Path, Query};
 use tokio::{io, io::AsyncWriteExt};
-use tokio_serial::{SerialPortBuilderExt, SerialStream};
+use tokio_serial::SerialPortBuilderExt;
 use tracing::{error, info};
 
 #[derive(Debug, serde::Deserialize)]

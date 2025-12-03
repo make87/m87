@@ -1,7 +1,7 @@
 [package]
 name = "m87-client"
 version = "0.0.0-dev0"
-edition = "2021"
+edition = "2024"
 authors = ["Phillip Thomas <phillip@make87.com>", "Nisse Knudsen <nisse@make87.com>"]
 description = "Unified CLI and device for connecting edge systems to the make87 platform"
 license = "Apache-2.0"
@@ -53,10 +53,8 @@ hostname = "0.4.1"
 clap = { version = "4.5", features = ["derive", "cargo"] }
 self_update = { version = "0.42.0", default-features = false, features = ["archive-tar", "compression-flate2", "rustls"] }
 dirs = "6.0.0"
-libmacchina = "8.1.0"
 openidconnect = { version = "3.5.0", default-features = false, features = ["accept-rfc3339-timestamps", "rustls-tls", "reqwest"] }
 sysinfo = "0.37.2"
-pty-process = { version = "0.5.3", features = ["async"] }
 webpki-roots = "1.0.3"
 
 portable-pty = "0.9"

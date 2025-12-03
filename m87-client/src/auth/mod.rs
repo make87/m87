@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 #[cfg(feature = "agent")]
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::info;
 
 #[cfg(feature = "agent")]
 mod device;

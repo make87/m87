@@ -8,7 +8,7 @@ use rustls::{
 };
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use webpki_roots::TLS_SERVER_ROOTS;
 
 pub async fn connect_host(host: &str, port: u16) -> anyhow::Result<TcpStream> {

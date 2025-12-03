@@ -12,5 +12,6 @@ pub mod docker;
 pub mod fs;
 pub mod tunnel;
 
+#[cfg(unix)]  // won't compile on Windows because no PTY
 pub mod serial;
 pub mod ssh;

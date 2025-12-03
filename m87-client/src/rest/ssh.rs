@@ -1,10 +1,9 @@
 use russh::server;
-use tracing::error;
 
 use crate::rest::upgrade::BoxedIo;
 use crate::util::ssh::{make_server_config, M87SshHandler};
 
-pub async fn handle_ssh_io(_: (), mut io: BoxedIo) {
+pub async fn handle_ssh_io(_: (), io: BoxedIo) {
     let home_dir = dirs::home_dir().unwrap();
     let home_dir = home_dir.to_path_buf();
 

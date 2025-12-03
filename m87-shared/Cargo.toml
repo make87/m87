@@ -1,10 +1,9 @@
 [package]
 name = "m87-shared"
 version = "0.0.0-dev0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 description = "Shared types and utilities for the make87 platform"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"

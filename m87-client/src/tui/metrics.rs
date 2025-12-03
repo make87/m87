@@ -1,11 +1,9 @@
 use crate::{auth::AuthManager, config::Config, devices, util::raw_connection::open_raw_io};
 use anyhow::{anyhow, Context, Result};
-use m87_shared::metrics::{
-    CpuMetrics, DiskMetrics, GpuMetrics, MemoryMetrics, NetworkMetrics, SystemMetrics,
-};
+use m87_shared::metrics::SystemMetrics;
 
 use ratatui::Terminal;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub async fn run_metrics(device: &str) -> Result<()> {
     let config = Config::load()?;
@@ -54,9 +52,8 @@ pub async fn ui_loop(
         backend::TermionBackend,
         layout::{Alignment, Constraint, Direction, Layout, Rect},
         style::{Color, Style},
-        text::Line,
         widgets::{
-            Axis, Block, Borders, Chart, Dataset, Gauge, GraphType, Paragraph, Row, Sparkline,
+            Block, Borders, Gauge, Paragraph, Row, Sparkline,
             Table,
         },
     };
@@ -157,7 +154,7 @@ pub async fn ui_loop(
         }
 
         terminal.draw(|f| {
-            let size = f.size();
+            let size = f.area();
             if latest.is_none() {
                 return;
             }

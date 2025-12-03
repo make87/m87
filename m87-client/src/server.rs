@@ -1,27 +1,30 @@
-use anyhow::{anyhow, Context, Result};
+#[cfg(feature = "agent")]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
+#[cfg(feature = "agent")]
 use futures::StreamExt;
 #[cfg(feature = "agent")]
 use m87_shared::metrics::SystemMetrics;
 use reqwest::Client;
+#[cfg(feature = "agent")]
+use tokio::net::TcpStream;
 use tokio::{
     io::{self},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
 };
-use tokio_yamux::{Config as YamuxConfig, Session};
-use tracing::{debug, error, info, warn};
-
 #[cfg(feature = "agent")]
-use crate::device::services::service_info::ServiceInfo;
+use tokio_yamux::{Config as YamuxConfig, Session};
+#[cfg(feature = "agent")]
+use tracing::warn;
+use tracing::{error, info};
+
 #[cfg(feature = "agent")]
 use crate::{
-    auth::AuthManager,
-    config::Config,
-    retry_async,
-    util::{raw_connection::open_raw_io, shutdown::SHUTDOWN},
+    auth::AuthManager, config::Config, device::services::service_info::ServiceInfo,
+    util::tls::get_tls_connection,
 };
 
-use crate::util::tls::get_tls_connection;
-
+use crate::{retry_async, util::raw_connection::open_raw_io, util::shutdown::SHUTDOWN};
 // Import shared types
 pub use m87_shared::auth::{
     AuthRequestAction, CheckAuthRequest, DeviceAuthRequest, DeviceAuthRequestBody,
