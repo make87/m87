@@ -15,20 +15,103 @@ use crate::util;
 use crate::util::logging::init_logging;
 use crate::util::tls::set_tls_provider;
 
-/// Parse tunnel target: "[ip:]port" -> (host, port)
-/// Examples: "8080" -> ("127.0.0.1", 8080), "192.168.1.50:554" -> ("192.168.1.50", 554)
-fn parse_tunnel_target(target: &str) -> anyhow::Result<(String, u16)> {
-    if let Some((ip, port_str)) = target.rsplit_once(':') {
-        let port = port_str
-            .parse()
-            .map_err(|_| anyhow::anyhow!("Invalid port: {}", port_str))?;
-        Ok((ip.to_string(), port))
+/// Protocol for tunnel forwarding
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum TunnelProtocol {
+    #[default]
+    Tcp,
+    Udp,
+}
+
+/// Parsed tunnel specification
+#[derive(Debug, Clone)]
+pub struct TunnelSpec {
+    pub local_port: u16,
+    pub remote_host: String,
+    pub remote_port: u16,
+    pub protocol: TunnelProtocol,
+}
+
+/// Parse tunnel spec: "[local_port:]remote_target[/protocol]"
+/// where remote_target is "[host:]port"
+///
+/// Protocol defaults to TCP. Use /udp suffix for UDP.
+///
+/// Examples:
+/// - "8080" -> local 8080, remote 127.0.0.1:8080, tcp
+/// - "8080/tcp" -> local 8080, remote 127.0.0.1:8080, tcp (explicit)
+/// - "8080/udp" -> local 8080, remote 127.0.0.1:8080, udp
+/// - "9090:8080" -> local 9090, remote 127.0.0.1:8080, tcp
+/// - "192.168.1.50:554" -> local 554, remote 192.168.1.50:554, tcp
+/// - "9554:192.168.1.50:554/udp" -> local 9554, remote 192.168.1.50:554, udp
+fn parse_tunnel_spec(spec: &str) -> anyhow::Result<TunnelSpec> {
+    // Split off protocol suffix if present (default is TCP)
+    let (main_part, protocol) = if let Some((main, proto)) = spec.rsplit_once('/') {
+        let protocol = match proto.to_lowercase().as_str() {
+            "tcp" => TunnelProtocol::Tcp,
+            "udp" => TunnelProtocol::Udp,
+            other => bail!("Invalid protocol '{}': expected 'tcp' or 'udp'", other),
+        };
+        (main, protocol)
     } else {
-        let port = target
-            .parse()
-            .map_err(|_| anyhow::anyhow!("Invalid port: {}", target))?;
-        Ok(("127.0.0.1".to_string(), port))
-    }
+        (spec, TunnelProtocol::Tcp)
+    };
+
+    // Count colons to determine format
+    let parts: Vec<&str> = main_part.split(':').collect();
+
+    let (local_port, remote_host, remote_port) = match parts.len() {
+        // "8080" -> local=8080, host=127.0.0.1, remote=8080
+        1 => {
+            let port: u16 = parts[0]
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid port: {}", parts[0]))?;
+            (port, "127.0.0.1".to_string(), port)
+        }
+        // "x:y" -> need to disambiguate
+        // If first part is pure digits, it's local:remote
+        // If first part contains non-digits (like '.'), it's host:port
+        2 => {
+            let first_is_port = parts[0].chars().all(|c| c.is_ascii_digit());
+            if first_is_port {
+                // "9090:8080" -> local=9090, host=127.0.0.1, remote=8080
+                let local: u16 = parts[0]
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("Invalid local port: {}", parts[0]))?;
+                let remote: u16 = parts[1]
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("Invalid remote port: {}", parts[1]))?;
+                (local, "127.0.0.1".to_string(), remote)
+            } else {
+                // "192.168.1.50:554" -> local=554, host=192.168.1.50, remote=554
+                let remote: u16 = parts[1]
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("Invalid port: {}", parts[1]))?;
+                (remote, parts[0].to_string(), remote)
+            }
+        }
+        // "x:y:z" -> local:host:port
+        3 => {
+            let local: u16 = parts[0]
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid local port: {}", parts[0]))?;
+            let remote: u16 = parts[2]
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid remote port: {}", parts[2]))?;
+            (local, parts[1].to_string(), remote)
+        }
+        _ => bail!(
+            "Invalid tunnel spec '{}': expected [local:]remote_target[/protocol]",
+            spec
+        ),
+    };
+
+    Ok(TunnelSpec {
+        local_port,
+        remote_host,
+        remote_port,
+        protocol,
+    })
 }
 
 /// Print help with dynamically generated device commands section
@@ -147,12 +230,11 @@ pub struct DeviceRoot {
 pub enum DeviceCommand {
     /// Open interactive shell on the device
     Shell,
-    /// Forward a remote port to localhost
+    /// Forward remote port(s) to localhost
     Tunnel {
-        /// Remote target as [ip:]port (e.g., "8080" or "192.168.1.50:554")
-        target: String,
-        /// Local port to listen on (defaults to remote port)
-        local_port: Option<u16>,
+        /// Port specs: [local:]remote[/protocol] (e.g., "8080", "9090:8080/tcp")
+        #[arg(required = true)]
+        targets: Vec<String>,
     },
     /// Run docker commands on the device
     Docker {
@@ -409,10 +491,14 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             Ok(())
         }
 
-        DeviceCommand::Tunnel { target, local_port } => {
-            let (host, remote_port) = parse_tunnel_target(&target)?;
-            let local_port = local_port.unwrap_or(remote_port);
-            tunnel::open_local_tunnel(&device, &host, remote_port, local_port).await?;
+        DeviceCommand::Tunnel { targets } => {
+            // Parse all specs first (fail fast on any invalid spec)
+            let specs: Vec<TunnelSpec> = targets
+                .iter()
+                .map(|t| parse_tunnel_spec(t))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+
+            tunnel::open_tunnels(&device, specs).await?;
             Ok(())
         }
 
