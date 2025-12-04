@@ -35,12 +35,6 @@ pub struct DeviceSystemInfo {
     pub memory: Option<f64>,
     #[serde(default)]
     pub gpus: Vec<String>,
-    #[serde(default)]
-    pub latitude: Option<f64>,
-    #[serde(default)]
-    pub longitude: Option<f64>,
-    #[serde(default)]
-    pub country_code: Option<String>,
 }
 
 impl Hash for DeviceSystemInfo {
@@ -56,13 +50,6 @@ impl Hash for DeviceSystemInfo {
         if let Some(memory) = &self.memory {
             memory.to_bits().hash(state);
         }
-        if let Some(latitude) = &self.latitude {
-            latitude.to_bits().hash(state);
-        }
-        if let Some(longitude) = &self.longitude {
-            longitude.to_bits().hash(state);
-        }
-        self.country_code.hash(state);
         self.cpu_name.hash(state);
         self.gpus.hash(state);
     }

@@ -243,8 +243,7 @@ pub async fn cli() -> anyhow::Result<()> {
 
                 // Agent registration flow (headless, requires approval)
                 println!("Registering device as agent...");
-                let config = Config::load()?;
-                let sysinfo = util::system_info::get_system_info(config.enable_geo_lookup).await?;
+                let sysinfo = util::system_info::get_system_info().await?;
                 auth::register_device(owner_scope, sysinfo).await?;
                 println!("Device registered as agent successfully");
             } else {

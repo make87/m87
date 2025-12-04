@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "agent")]
 use sha1::{Digest, Sha1};
@@ -6,7 +6,7 @@ use std::{fs, path::PathBuf};
 use tracing::{error, info, warn};
 
 #[cfg(feature = "agent")]
-use crate::util::mac;
+use crate::{device, util::mac};
 
 fn default_heartbeat_interval() -> u64 {
     300 // 5 min
@@ -48,9 +48,6 @@ pub struct Config {
     pub server_port: u16,
     #[serde(default)]
     pub trust_invalid_server_cert: bool,
-    #[serde(default)]
-    /// If the client should lookup its public ip and geo location based on the ip and report to the server
-    pub enable_geo_lookup: bool,
 }
 
 impl Default for Config {
@@ -59,7 +56,7 @@ impl Default for Config {
             api_url: None,
             make87_api_url: "https://api.make87.com".to_string(),
             make87_app_url: "https://app.make87.com".to_string(),
-            device_id: Config::deterministic_device_id(),
+            device_id: get_default_device_id(),
             log_level: "info".to_string(),
             heartbeat_interval_secs: default_heartbeat_interval(),
             update_check_interval_secs: default_update_check_interval(),
@@ -69,8 +66,18 @@ impl Default for Config {
             auth_client_id: "E2J7xfFLgexzvhHhz4YqaJBy8Ys82SmM".to_string(),
             server_port: 8337,
             trust_invalid_server_cert: false,
-            enable_geo_lookup: true,
         }
+    }
+}
+
+fn get_default_device_id() -> String {
+    #[cfg(feature = "agent")]
+    {
+        Config::deterministic_device_id()
+    }
+    #[cfg(not(feature = "agent"))]
+    {
+        "".to_string()
     }
 }
 
@@ -108,10 +115,9 @@ impl Config {
     /// Agent-specific: Used for device registration
     #[cfg(feature = "agent")]
     pub fn deterministic_device_id() -> String {
-        let hostname = hostname::get()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        use sysinfo::System;
+
+        let hostname = System::host_name().unwrap_or_else(|| "not found".to_string());
         let mac = mac::get_mac_address().unwrap_or_else(|| "00:00:00:00:00:00".into());
 
         // Hash hostname + mac
@@ -121,25 +127,6 @@ impl Config {
         let hash = hasher.finalize();
 
         // Take first 12 bytes and convert to hex
-        hash[..12].iter().map(|b| format!("{:02x}", b)).collect()
-    }
-
-    /// Manager-only fallback: Generate a device ID based on hostname
-    #[cfg(not(feature = "agent"))]
-    pub fn deterministic_device_id() -> String {
-        // For manager-only builds, generate an ID from hostname
-        // This won't be used for agent registration, only for config storage
-        use sha1::{Digest, Sha1};
-        let hostname = hostname::get()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
-        let mut hasher = Sha1::new();
-        hasher.update(hostname.as_bytes());
-        hasher.update(b"manager-device");
-        let hash = hasher.finalize();
-
         hash[..12].iter().map(|b| format!("{:02x}", b)).collect()
     }
 

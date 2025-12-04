@@ -8,9 +8,6 @@ pub mod subprocess;
 #[cfg(feature = "agent")]
 pub mod mac;
 
-#[cfg(feature = "agent")]
-pub mod macchina;
-
 pub mod retry;
 
 #[cfg(feature = "agent")]

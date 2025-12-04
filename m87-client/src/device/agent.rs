@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use tokio::{
     net::TcpListener,
     pin, signal,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 use tracing::{error, info};
 
 use std::process::Command;
 use std::{net::SocketAddr, path::Path};
 
+use crate::{auth::AuthManager, config::Config};
 use crate::{
     auth::register_device,
     device::{services::collect_all_services, system_metrics::collect_system_metrics},
@@ -16,7 +17,6 @@ use crate::{
     server,
     util::tls::set_tls_provider,
 };
-use crate::{auth::AuthManager, config::Config};
 
 use crate::server::send_heartbeat;
 use crate::util::logging::init_logging;
@@ -304,7 +304,7 @@ async fn login_and_run() -> Result<()> {
     set_tls_provider();
 
     let config = Config::load()?;
-    let system_info = get_system_info(config.enable_geo_lookup).await?;
+    let system_info = get_system_info().await?;
     loop {
         let success = register_device(config.owner_reference.clone(), system_info.clone()).await;
         if success.is_ok() {
@@ -319,7 +319,6 @@ async fn login_and_run() -> Result<()> {
         &config.get_server_url(),
         &config.device_id,
         &token,
-        config.enable_geo_lookup,
         config.trust_invalid_server_cert,
     )
     .await;
@@ -370,7 +369,8 @@ async fn device_loop() -> Result<()> {
         if let Err(e) = sync_with_backend().await {
             error!("Sync failed: {:?}", e);
         }
-        sleep(Duration::from_secs(60)).await; // 5 minutes
+        let config = Config::load().context("Failed to load configuration")?;
+        sleep(Duration::from_secs(config.heartbeat_interval_secs)).await; // 5 minutes
     }
 }
 
@@ -401,7 +401,6 @@ pub async fn report_device_details(
     api_url: &str,
     device_id: &str,
     token: &str,
-    enable_geo_lookup: bool,
     trust_invalid_server_cert: bool,
 ) -> Result<()> {
     info!("Reporting device details");
@@ -409,7 +408,7 @@ pub async fn report_device_details(
     // Build update body
     let body = server::UpdateDeviceBody {
         client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        system_info: Some(get_system_info(enable_geo_lookup).await?),
+        system_info: Some(get_system_info().await?),
     };
     server::report_device_details(api_url, token, device_id, body, trust_invalid_server_cert).await
 }

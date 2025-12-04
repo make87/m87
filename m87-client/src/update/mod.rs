@@ -2,9 +2,18 @@ use anyhow::Result;
 use self_update::cargo_crate_version;
 use tracing::{error, info, warn};
 
-/// Check for updates and apply them if available.
-///
-/// Used both by the CLI (`m87 update`) and the daemon’s self-check.
+fn arch_bin_name() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        "m87-x86_64-unknown-linux-gnu"
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        "m87-aarch64-unknown-linux-gnu"
+    }
+}
+
 pub async fn update(interactive: bool) -> Result<bool> {
     info!("Checking for updates...");
     let current_version = cargo_crate_version!();
@@ -12,7 +21,7 @@ pub async fn update(interactive: bool) -> Result<bool> {
     let maybe_status = self_update::backends::github::Update::configure()
         .repo_owner("make87")
         .repo_name("make87")
-        .bin_name("m87")
+        .bin_name(arch_bin_name())
         .current_version(current_version)
         .no_confirm(!interactive)
         .build()
