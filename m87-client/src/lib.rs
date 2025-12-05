@@ -5,8 +5,6 @@ pub mod config;
 pub mod device;
 pub mod devices;
 
-// Agent-specific modules (Linux-only via build.rs)
-#[cfg(feature = "agent")]
 pub mod streams;
 
 pub mod server;
