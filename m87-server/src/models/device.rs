@@ -3,11 +3,10 @@ use std::sync::Arc;
 use mongodb::bson::{DateTime, Document, doc, oid::ObjectId};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 // Import shared types
 pub use m87_shared::config::DeviceClientConfig;
-pub use m87_shared::device::{DeviceSystemInfo, PublicDevice};
+pub use m87_shared::device::{short_device_id, DeviceSystemInfo, PublicDevice};
 pub use m87_shared::heartbeat::{HeartbeatRequest, HeartbeatResponse};
 
 use crate::{
@@ -123,7 +122,7 @@ impl DeviceDoc {
         let now = DateTime::now();
         let node = DeviceDoc {
             id: Some(device_id.clone()),
-            short_id: short_device_id(device_id.to_string()),
+            short_id: short_device_id(&device_id.to_string()),
             name: create_body.name,
             updated_at: now,
             created_at: now,
@@ -190,14 +189,6 @@ impl DeviceDoc {
 
         Ok(resp)
     }
-}
-
-fn short_device_id(device_id: String) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(device_id.as_bytes());
-    let hash = hex::encode(&hasher.finalize());
-    let short = &hash[..6]; // 24 bits — should be enough entropy
-    short.to_string()
 }
 
 impl Into<PublicDevice> for DeviceDoc {

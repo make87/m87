@@ -48,6 +48,19 @@ pub enum StreamType {
 }
 
 impl StreamType {
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            StreamType::Terminal { .. } => "Terminal",
+            StreamType::Exec { .. } => "Exec",
+            StreamType::Logs { .. } => "Logs",
+            StreamType::Port { .. } => "Port",
+            StreamType::Serial { .. } => "Serial",
+            StreamType::Metrics { .. } => "Metrics",
+            StreamType::Docker { .. } => "Docker",
+            StreamType::Ssh { .. } => "Ssh",
+        }
+    }
+
     pub fn get_token(&self) -> &str {
         match self {
             StreamType::Terminal { token } => token,

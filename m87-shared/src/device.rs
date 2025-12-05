@@ -1,8 +1,18 @@
 use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::DeviceClientConfig;
+
+/// Compute short device ID (first 6 chars of SHA256 hash)
+/// Used for tunnel routing - must be consistent across server and client
+pub fn short_device_id(device_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(device_id.as_bytes());
+    let hash = hex::encode(hasher.finalize());
+    hash[..6].to_string()
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PublicDevice {

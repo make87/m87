@@ -7,3 +7,5 @@ description = "Shared types and utilities for the make87 platform"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"

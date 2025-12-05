@@ -292,6 +292,7 @@ pub async fn request_control_tunnel_token(
 // Agent-specific: Maintain persistent control tunnel connection
 #[cfg(feature = "agent")]
 pub async fn connect_control_tunnel() -> Result<()> {
+    use m87_shared::device::short_device_id;
     use quinn::Connection;
 
     use crate::streams::quic::get_quic_connection;
@@ -299,6 +300,7 @@ pub async fn connect_control_tunnel() -> Result<()> {
     let config = Config::load().context("Failed to load configuration")?;
     let token = AuthManager::get_device_token()?;
     let device_id = config.device_id.clone();
+    let short_id = short_device_id(&device_id);
 
     // 1) Request tunnel token
     let control_tunnel_token = request_control_tunnel_token(
@@ -311,7 +313,7 @@ pub async fn connect_control_tunnel() -> Result<()> {
 
     // 2) Build hostname control.<domain>
     let control_host = format!("control.{}", config.get_server_hostname());
-    info!("Connecting QUIC control tunnel to {}", control_host);
+    info!("Connecting QUIC control tunnel to {} (short_id={})", control_host, short_id);
 
     // 3) Establish QUIC connection
     let (_endpoint, quic_conn): (_, Connection) =
@@ -323,6 +325,7 @@ pub async fn connect_control_tunnel() -> Result<()> {
 
     // ------------------------------------------------------------
     // 4) Send handshake over a dedicated control stream (bidi)
+    // Use short_id for tunnel registration (must match client's SNI lookup)
     // ------------------------------------------------------------
     let mut send = quic_conn
         .open_bi()
@@ -332,7 +335,7 @@ pub async fn connect_control_tunnel() -> Result<()> {
 
     let handshake = format!(
         "M87 device_id={} token={}\n",
-        device_id, control_tunnel_token
+        short_id, control_tunnel_token
     );
     send.write_all(handshake.as_bytes())
         .await

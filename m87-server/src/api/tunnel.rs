@@ -6,7 +6,7 @@ use std::{net::SocketAddr, sync::Arc};
 use quinn::{ConnectionError, Endpoint};
 use tokio::io;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::response::ServerError;
 use crate::{
@@ -93,19 +93,23 @@ async fn handle_quic_connection(
     let control_host = format!("control.{public}");
 
     if sni == control_host {
+        debug!(%sni, "control tunnel connection");
         let _ = handle_control_tunnel(conn, relay, &cfg.forward_secret).await;
         return;
     }
 
     if let Some(device_id) = extract_device_id_from_sni(&sni, public) {
         if let Some(device_conn) = relay.get_tunnel(&device_id).await {
+            debug!(%device_id, "forwarding to device");
             let _ = handle_forward(conn, device_conn).await;
         } else {
+            warn!(%device_id, "no tunnel registered for device");
             conn.close(0u32.into(), b"No tunnel");
         }
         return;
     }
 
+    warn!(%sni, "invalid SNI — no match");
     conn.close(0u32.into(), b"Invalid SNI");
 }
 
@@ -212,11 +216,16 @@ async fn handle_forward(
     client_conn: quinn::Connection, // forward client (CLI/browser)
     device_conn: quinn::Connection, // control-registered device conn
 ) -> io::Result<()> {
+    debug!("handle_forward: waiting for client stream");
+
     // 1. Accept the client's first bidi stream
     let (mut client_send, mut client_recv) = match client_conn.accept_bi().await {
-        Ok(s) => s,
+        Ok(s) => {
+            debug!("handle_forward: accepted client bidi stream");
+            s
+        }
         Err(e) => {
-            // client closed before opening a stream
+            warn!("handle_forward: client accept_bi failed: {e:?}");
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 format!("client_bi: {e:?}"),
@@ -224,11 +233,16 @@ async fn handle_forward(
         }
     };
 
+    debug!("handle_forward: opening stream to device");
+
     // 2. Open a bidi stream to the device
     let (mut dev_send, mut dev_recv) = match device_conn.open_bi().await {
-        Ok(s) => s,
+        Ok(s) => {
+            debug!("handle_forward: opened device bidi stream");
+            s
+        }
         Err(e) => {
-            // device lost / restarting / tunnel down
+            warn!("handle_forward: device open_bi failed: {e:?}");
             let _ = client_send.write_all(b"NO_TUNNEL").await;
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -237,6 +251,8 @@ async fn handle_forward(
         }
     };
 
+    debug!("handle_forward: starting bidirectional copy");
+
     // 3. Copy both directions simultaneously
     let uplink = tokio::io::copy(&mut client_recv, &mut dev_send); // client → device
     let downlink = tokio::io::copy(&mut dev_recv, &mut client_send); // device → client
@@ -244,17 +260,24 @@ async fn handle_forward(
     // 4. Whichever side closes first, we gracefully finish the opposite send stream
     tokio::select! {
         result = uplink => {
-            // Client → Device finished
             let _ = dev_send.finish();
+            match &result {
+                Ok(bytes) => debug!(bytes, "handle_forward: uplink finished"),
+                Err(e) => warn!("handle_forward: uplink error: {e:?}"),
+            }
             result?;
         }
         result = downlink => {
-            // Device → Client finished
             let _ = client_send.finish();
+            match &result {
+                Ok(bytes) => debug!(bytes, "handle_forward: downlink finished"),
+                Err(e) => warn!("handle_forward: downlink error: {e:?}"),
+            }
             result?;
         }
     }
 
+    debug!("handle_forward: complete");
     Ok(())
 }
 

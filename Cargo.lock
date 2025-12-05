@@ -2584,7 +2584,9 @@ dependencies = [
 name = "m87-shared"
 version = "0.0.0-dev0"
 dependencies = [
+ "hex",
  "serde",
+ "sha2",
 ]
 
 [[package]]
