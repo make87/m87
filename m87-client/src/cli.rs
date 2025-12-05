@@ -1,10 +1,9 @@
 use anyhow::bail;
 use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use m87_shared::device::PublicDevice;
 
 use crate::auth;
-
 use crate::device;
 use crate::device::serial;
 use crate::device::tunnel;
@@ -16,6 +15,40 @@ use crate::util;
 use crate::util::logging::init_logging;
 use crate::util::tls::set_tls_provider;
 
+/// Print help with dynamically generated device commands section
+fn print_help_with_device_commands() {
+    let mut cmd = Cli::command();
+
+    // Get device subcommands dynamically from DeviceCommand enum
+    let device_cmd = DeviceRoot::command();
+    let subcommands: Vec<_> = device_cmd
+        .get_subcommands()
+        .filter(|sc| sc.get_name() != "help") // Skip the auto-generated help subcommand
+        .map(|sc| {
+            format!(
+                "    {:12} {}",
+                sc.get_name(),
+                sc.get_about().map(|s| s.to_string()).unwrap_or_default()
+            )
+        })
+        .collect();
+
+    let device_help = format!(
+        "DEVICE COMMANDS:\n  \
+         Run commands on a specific device: m87 <DEVICE> <COMMAND>\n\n\
+         {}\n\n  \
+         Examples:\n    \
+         m87 my-device shell\n    \
+         m87 my-device tunnel 8080\n    \
+         m87 my-device docker ps\n    \
+         m87 my-device exec -- ls -la",
+        subcommands.join("\n")
+    );
+
+    cmd = cmd.after_help(device_help);
+    let _ = cmd.print_help();
+}
+
 #[derive(Parser)]
 #[command(name = "m87")]
 #[command(version, about = "m87 CLI - Unified CLI for the make87 platform", long_about = None)]
@@ -26,23 +59,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Authenticate with make87 (defaults to manager login)
-    Login {
-        /// Configure device as agent for remote management (Linux only, headless flow)
-        #[cfg(feature = "agent")]
-        #[arg(long)]
-        agent: bool,
-
-        /// Organization ID to register agent under (only with --agent)
-        #[cfg(feature = "agent")]
-        #[arg(long = "org-id", conflicts_with = "email")]
-        org_id: Option<String>,
-
-        /// Email address to register agent under (only with --agent)
-        #[cfg(feature = "agent")]
-        #[arg(long, conflicts_with = "org_id")]
-        email: Option<String>,
-    },
+    /// Authenticate with make87 (manager login via browser)
+    Login,
 
     /// Logout and deauthenticate this device
     Logout,
@@ -111,23 +129,28 @@ pub struct DeviceRoot {
 
 #[derive(Subcommand, Debug)]
 pub enum DeviceCommand {
+    /// Open interactive shell on the device
     Shell,
+    /// Forward remote port(s) to localhost
     Tunnel {
         /// Remote target as [ip:]port[/proto] (e.g., "8080" or "192.168.1.50:554" or "192.168.1.50:554/tcp" or "192.168.1.50:554/udp" or "192.168.1.50:554/udp+mcast")
         targets: String,
     },
-
+    /// Run docker commands on the device
     Docker {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Stream container logs from the device
     Logs {
         #[arg(short = 'f', long)]
         follow: bool,
         #[arg(long, default_value = "100")]
         tail: usize,
     },
+    /// Show device system metrics
     Stats,
+    /// Execute a command on the device
     Exec {
         /// Keep stdin open (for responding to prompts)
         #[arg(short = 'i', long)]
@@ -138,6 +161,7 @@ pub enum DeviceCommand {
         #[arg(required = true, last = true)]
         command: Vec<String>,
     },
+    /// Connect to a serial device
     Serial {
         /// path to serial device (e.g., "/dev/ttyUSB0")
         path: String,
@@ -149,6 +173,17 @@ pub enum DeviceCommand {
 #[cfg(feature = "agent")]
 #[derive(Subcommand)]
 enum AgentCommands {
+    /// Register this device as an agent (headless flow, requires approval)
+    Login {
+        /// Organization ID to register agent under
+        #[arg(long = "org-id", conflicts_with = "email")]
+        org_id: Option<String>,
+
+        /// Email address to register agent under
+        #[arg(long, conflicts_with = "org_id")]
+        email: Option<String>,
+    },
+
     /// Run the agent daemon (blocking, used by systemd service)
     Run,
 
@@ -204,43 +239,22 @@ enum DevicesCommands {
 }
 
 pub async fn cli() -> anyhow::Result<()> {
+    // Handle help before full parsing to inject device commands section
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && (args[1] == "--help" || args[1] == "-h" || args[1] == "help") {
+        print_help_with_device_commands();
+        return Ok(());
+    }
+
     let cli = Cli::parse();
     init_logging("info");
     set_tls_provider();
 
     match cli.command {
-        Commands::Login {
-            #[cfg(feature = "agent")]
-            agent,
-            #[cfg(feature = "agent")]
-            org_id,
-            #[cfg(feature = "agent")]
-            email,
-        } => {
-            #[cfg(feature = "agent")]
-            if agent {
-                // Determine owner_scope from provided flags
-                let owner_scope = org_id.or(email);
-
-                // Agent registration flow (headless, requires approval)
-                println!("Registering device as agent...");
-                let sysinfo = util::system_info::get_system_info().await?;
-                auth::register_device(owner_scope, sysinfo).await?;
-                println!("Device registered as agent successfully");
-            } else {
-                // Default: Manager login flow (OAuth)
-                println!("Logging in as manager...");
-                auth::login_cli().await?;
-                println!("Logged in as manager successfully");
-            }
-
-            #[cfg(not(feature = "agent"))]
-            {
-                // Manager-only builds: always do manager login
-                println!("Logging in as manager...");
-                auth::login_cli().await?;
-                println!("Logged in as manager successfully");
-            }
+        Commands::Login => {
+            println!("Logging in as manager...");
+            auth::login_cli().await?;
+            println!("Logged in as manager successfully");
         }
 
         Commands::Logout => {
@@ -253,6 +267,13 @@ pub async fn cli() -> anyhow::Result<()> {
 
         #[cfg(feature = "agent")]
         Commands::Agent(cmd) => match cmd {
+            AgentCommands::Login { org_id, email } => {
+                let owner_scope = org_id.or(email);
+                println!("Registering device as agent...");
+                let sysinfo = util::system_info::get_system_info().await?;
+                auth::register_device(owner_scope, sysinfo).await?;
+                println!("Device registered as agent successfully");
+            }
             AgentCommands::Run => {
                 device::agent::run().await?;
             }
@@ -348,9 +369,12 @@ pub async fn cli() -> anyhow::Result<()> {
         }
 
         Commands::Device(args) => {
-            let parsed = DeviceRoot::try_parse_from(
+            let parsed = match DeviceRoot::try_parse_from(
                 std::iter::once("m87").chain(args.iter().map(|s| s.as_str())),
-            )?;
+            ) {
+                Ok(p) => p,
+                Err(e) => e.exit(), // Clean exit for help/version, error message for parse errors
+            };
             handle_device_command(parsed).await?;
         }
     }

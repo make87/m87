@@ -6,7 +6,7 @@ use std::{fs, path::PathBuf};
 use tracing::{error, info, warn};
 
 #[cfg(feature = "agent")]
-use crate::{device, util::mac};
+use crate::{util::mac};
 
 fn default_heartbeat_interval() -> u64 {
     300 // 5 min
