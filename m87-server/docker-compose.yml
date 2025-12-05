@@ -15,7 +15,6 @@ services:
       - PUBLIC_ADDRESS=${PUBLIC_ADDRESS:-localhost}
       - FORWARD_SECRET=${FORWARD_SECRET:-dev_secret_change_me}
       - UNIFIED_PORT=${UNIFIED_PORT:-8084}
-      - REST_PORT=${REST_PORT:-8085}
       - STAGING=${STAGING:-1}
       - ADMIN_KEY=${ADMIN_KEY:-}
     depends_on:
@@ -24,7 +23,6 @@ services:
       - nexus-network
     ports:
       - "443:8084"
-      - "8085:8085"
     volumes:
       - backend-data:/data/m87/certs
 

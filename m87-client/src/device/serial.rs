@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use libc;
 use std::ffi::CStr;
 use std::os::fd::{FromRawFd, RawFd};
@@ -6,12 +6,9 @@ use tokio::io::split;
 use tokio::task;
 use tracing::info;
 
-use crate::{
-    auth::AuthManager,
-    config::Config,
-    devices,
-    util::{raw_connection::open_raw_io, shutdown::SHUTDOWN},
-};
+use crate::streams::quic::open_quic_io;
+use crate::streams::stream_type::StreamType;
+use crate::{auth::AuthManager, config::Config, devices, util::shutdown::SHUTDOWN};
 
 // Create a PTY pair (master + slave)
 fn open_pty() -> Result<(RawFd, String)> {
@@ -46,10 +43,20 @@ pub async fn open_serial(device: &str, port: &str, baud: u32) -> Result<()> {
     let dev = devices::get_device_by_name(device).await?;
     let host = cfg.get_server_hostname();
 
-    let path = format!("/serial/{port}?baud={baud}");
-    let remote_io = open_raw_io(&host, &dev.short_id, &path, &token, false).await?;
+    let stream_type = StreamType::Serial {
+        token: token.to_string(),
+        baud: Some(baud),
+        name: port.to_string(),
+    };
+    let (_, remote_io) = open_quic_io(
+        &host,
+        &dev.short_id,
+        stream_type,
+        cfg.trust_invalid_server_cert,
+    )
+    .await
+    .context("Failed to connect to RAW metrics stream")?;
 
-    // Create pty
     let (master_fd, slave_path) = open_pty()?;
 
     info!("Local virtual serial device: {}", slave_path);
@@ -68,11 +75,6 @@ pub async fn open_serial(device: &str, port: &str, baud: u32) -> Result<()> {
         b = t2 => { b??; }
         _ = SHUTDOWN.cancelled() => { }
     }
-
-    // Cleanup handled automatically because:
-    // - PTY master FD drops → slave disappears automatically
-    // - remote_io drops → remote closes serial
-    // - tasks end
 
     Ok(())
 }

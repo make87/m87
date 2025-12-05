@@ -1,19 +1,17 @@
 use anyhow::{Context, Result};
 use tokio::{
-    net::TcpListener,
     pin, signal,
     time::{Duration, sleep},
 };
 use tracing::{error, info};
 
+use std::path::Path;
 use std::process::Command;
-use std::{net::SocketAddr, path::Path};
 
 use crate::{auth::AuthManager, config::Config};
 use crate::{
     auth::register_device,
     device::{services::collect_all_services, system_metrics::collect_system_metrics},
-    rest::routes::build_router,
     server,
     util::tls::set_tls_provider,
 };
@@ -322,27 +320,6 @@ async fn login_and_run() -> Result<()> {
         config.trust_invalid_server_cert,
     )
     .await;
-
-    let port = config.server_port.clone();
-    tokio::task::spawn(async move {
-        loop {
-            info!("Starting log server...");
-            let app = build_router();
-            let addr = SocketAddr::from(([0, 0, 0, 0], port));
-            let listener = TcpListener::bind(addr).await;
-            if let Err(e) = listener {
-                eprintln!("Failed to bind log server: {e}. Restarting in 2 seconds...");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-            let listener = listener.unwrap();
-            let res = axum::serve(listener, app.into_make_service()).await;
-            if let Err(e) = res {
-                eprintln!("Log server crashed with error: {e}. Restarting in 2 seconds...");
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-    });
 
     tokio::task::spawn(async {
         loop {

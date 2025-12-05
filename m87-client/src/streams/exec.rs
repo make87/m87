@@ -9,16 +9,17 @@
 //! 2. Bidirectional raw bytes for stdin/stdout
 //! 3. Server sends exit code JSON before closing: {"exit_code":N}\n
 
-use crate::rest::upgrade::BoxedIo;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::{select, time::Duration};
+
+use crate::streams::quic::QuicIo;
 
 #[derive(Deserialize)]
 struct ExecRequest {
@@ -37,7 +38,7 @@ fn get_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
-pub async fn handle_exec_io(_: (), io: BoxedIo) {
+pub async fn handle_exec_io(io: QuicIo) {
     // Split into reader/writer
     let (reader, writer) = tokio::io::split(io);
     let mut reader = BufReader::new(reader);

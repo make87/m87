@@ -1,6 +1,7 @@
-use crate::util::raw_connection::open_raw_io;
+use crate::streams::quic::open_quic_io;
+use crate::streams::stream_type::StreamType;
 use crate::{auth::AuthManager, config::Config, devices, util::shutdown::SHUTDOWN};
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result, anyhow};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -19,15 +20,17 @@ pub async fn run_logs(device: &str) -> Result<()> {
 
     println!("Connecting to logs of {} ...", device);
 
-    // --- open RAW upgraded IO ---
-    let mut io = open_raw_io(
+    let stream_type = StreamType::Logs {
+        token: token.to_string(),
+    };
+    let (_, mut io) = open_quic_io(
         &base,
         &dev.short_id,
-        "/logs",
-        &token,
+        stream_type,
         config.trust_invalid_server_cert,
     )
-    .await?;
+    .await
+    .context("Failed to connect to RAW metrics stream")?;
 
     println!("Connected. Press Ctrl+C to exit.\n");
 

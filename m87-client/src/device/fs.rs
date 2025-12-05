@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
-use filetime::{set_file_times, FileTime};
+use anyhow::{Context, Result, bail};
+use filetime::{FileTime, set_file_times};
 use russh::keys::ssh_key;
 use russh_sftp::client::fs::{DirEntry, Metadata};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,7 +16,8 @@ use russh::client::{Config as ClientConfig, Handler};
 use russh_sftp::client::SftpSession;
 
 use crate::devices;
-use crate::util::raw_connection::open_raw_io;
+use crate::streams::quic::open_quic_io;
+use crate::streams::stream_type::StreamType;
 use crate::util::shutdown::SHUTDOWN;
 use crate::{auth::AuthManager, config::Config};
 
@@ -57,7 +58,17 @@ pub async fn open_sftp_session(device_name: &str) -> anyhow::Result<SftpSession>
     let host = &cfg.get_server_hostname();
 
     // open raw tunnel through HTTPS upgrade
-    let io = open_raw_io(&host, &dev.short_id, "/ssh", &token, false).await?;
+    let stream_type = StreamType::Ssh {
+        token: token.to_string(),
+    };
+    let (_, io) = open_quic_io(
+        &host,
+        &dev.short_id,
+        stream_type,
+        cfg.trust_invalid_server_cert,
+    )
+    .await
+    .context("Failed to connect to RAW metrics stream")?;
 
     // minimal ssh client config
     let mut config = ClientConfig::default();

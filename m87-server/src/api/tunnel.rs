@@ -1,278 +1,260 @@
-use futures::StreamExt;
-use m87_shared::roles::Role;
-use mongodb::bson::doc;
-use std::sync::Arc;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio_rustls::server::TlsStream;
+// tunnel.rs
+
+use std::time::Duration;
+use std::{net::SocketAddr, sync::Arc};
+
+use quinn::{ConnectionError, Endpoint};
+use tokio::io;
+use tokio::sync::watch;
 use tracing::{info, warn};
 
+use crate::response::ServerError;
 use crate::{
-    auth::claims::Claims,
-    models::device::DeviceDoc,
-    relay::relay_state::RelayState,
-    response::{ServerError, ServerResult},
-    util::{app_state::AppState, tcp_proxy::proxy_bidirectional},
+    auth::tunnel_token::verify_tunnel_token, config::AppConfig, relay::relay_state::RelayState,
+    response::ServerResult,
 };
 
-use tokio_yamux::{Config as YamuxConfig, Session};
+pub async fn run_quic_endpoint(
+    cfg: Arc<AppConfig>,
+    relay: Arc<RelayState>,
+    mut reload_rx: watch::Receiver<()>,
+) -> ServerResult<()> {
+    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.unified_port));
 
-pub async fn handle_sni(sni: &str, mut tls: TlsStream<tokio::net::TcpStream>, state: &AppState) {
-    if sni.is_empty() {
-        warn!("TLS no SNI; proxy to rest");
-        if let Err(e) = proxy_to_rest(&mut tls, state.config.rest_port).await {
-            warn!("REST proxy failed: {e:?}");
-        }
-        return;
-    }
+    loop {
+        // Build fresh TLS config
+        let server_config = crate::api::certificate::create_quic_server_config(&cfg).await?;
 
-    let public = &state.config.public_address;
-    let control_host = format!("control.{public}");
+        // Create fresh endpoint
+        let endpoint = Endpoint::server(server_config, addr)
+            .map_err(|e| ServerError::internal_error(&format!("bind QUIC: {e:?}")))?;
 
-    if sni == *public {
-        if let Err(e) = proxy_to_rest(&mut tls, state.config.rest_port).await {
-            warn!("REST proxy failed: {e:?}");
-        }
-        return;
-    }
+        info!("QUIC listening on udp://{}", addr);
 
-    if sni == control_host {
-        if let Err(e) =
-            handle_control_tunnel(state.relay.clone(), tls, &state.config.forward_secret).await
-        {
-            warn!("control tunnel failed: {e:?}");
-        }
-        return;
-    }
+        // Accept loop for this endpoint
+        loop {
+            tokio::select! {
+                // === TLS reload request ===
+                _ = reload_rx.changed() => {
+                    info!("QUIC TLS reload requested — restarting QUIC endpoint");
+                    endpoint.close(0u32.into(), b"tls-reload");
+                    break;
+                }
 
-    if let Some(prefix) = sni.strip_suffix(public) {
-        // e.g. "device123.", "myapp-device123."
-        let prefix = prefix.trim_end_matches('.');
+                // === Incoming QUIC connection ===
+                incoming = endpoint.accept() => {
+                    match incoming {
+                        Some(incoming_conn) => {
+                            let relay = relay.clone();
+                            let cfg = cfg.clone();
 
-        if let Err(e) = proxy_to_device_rest(&mut tls, prefix, state).await {
-            warn!("device proxy failed: {e:?}");
-        }
-    }
-
-    warn!("unmatched SNI: {}", sni);
-    let _ = tls.shutdown().await;
-}
-
-fn extract_bearer_token(request: &str) -> Option<String> {
-    for line in request.lines() {
-        let lower = line.to_ascii_lowercase();
-
-        if lower.starts_with("authorization: bearer ") {
-            return line
-                .split_once("Bearer ")
-                .map(|(_, v)| v.trim().to_string());
-        }
-
-        if lower.starts_with("sec-websocket-protocol:") {
-            let original = line.splitn(2, ':').nth(1)?.trim();
-
-            for proto in original.split(',') {
-                let proto_trim = proto.trim();
-                if proto_trim.to_ascii_lowercase().starts_with("bearer.") {
-                    return Some(proto_trim["bearer.".len()..].to_string());
+                            tokio::spawn(async move {
+                                match incoming_conn.await {
+                                    Ok(conn) => {
+                                        handle_quic_connection(conn, relay, cfg).await;
+                                    }
+                                    Err(e) => {
+                                        warn!("Incoming QUIC handshake failed: {e:?}");
+                                    }
+                                }
+                            });
+                        }
+                        None => {
+                            warn!("Endpoint accept() returned None — endpoint driver lost?");
+                            break;
+                        }
+                    }
                 }
             }
         }
+
+        // Drop endpoint -> closes UDP socket
+        drop(endpoint);
+
+        // Loop repeats → rebuild server with new certificate
+    }
+}
+
+async fn handle_quic_connection(
+    conn: quinn::Connection,
+    relay: Arc<RelayState>,
+    cfg: Arc<AppConfig>,
+) {
+    // Extract SNI from handshake_data
+    let sni = conn
+        .handshake_data()
+        .and_then(|data| {
+            data.downcast_ref::<quinn::crypto::rustls::HandshakeData>()
+                .and_then(|hd| hd.server_name.clone())
+        })
+        .unwrap_or_default();
+
+    let public = &cfg.public_address;
+    let control_host = format!("control.{public}");
+
+    if sni == control_host {
+        let _ = handle_control_tunnel(conn, relay, &cfg.forward_secret).await;
+        return;
     }
 
+    if let Some(device_id) = extract_device_id_from_sni(&sni, public) {
+        if let Some(device_conn) = relay.get_tunnel(&device_id).await {
+            let _ = handle_forward(conn, device_conn).await;
+        } else {
+            conn.close(0u32.into(), b"No tunnel");
+        }
+        return;
+    }
+
+    conn.close(0u32.into(), b"Invalid SNI");
+}
+
+fn extract_device_id_from_sni(sni: &str, public_domain: &str) -> Option<String> {
+    // Expected patterns:
+    //   "<deviceid>.<public_domain>"
+    //   "whatever-<deviceid>.<public_domain>" (you can refine this later)
+    if let Some(stripped) = sni.strip_suffix(public_domain) {
+        let stripped = stripped.trim_end_matches('.'); // remove trailing dot
+        if stripped.is_empty() {
+            return None;
+        }
+        // For now, assume the whole left label is the device id.
+        // If you encode more data (like "app-deviceid"), adapt this.
+        return Some(stripped.to_string());
+    }
     None
 }
 
-pub async fn proxy_to_device_rest(
-    inbound: &mut TlsStream<tokio::net::TcpStream>,
-    short_id: &str,
-    state: &AppState,
-) -> ServerResult<()> {
-    let (buffer, header_end) = read_full_http_request(inbound).await?;
-    let header_bytes = &buffer[..header_end];
-    let leftover_bytes = &buffer[header_end..];
-
-    let request = String::from_utf8_lossy(header_bytes);
-
-    let token = extract_bearer_token(&request);
-    if token.is_none() {
-        info!("Rejecting connection to {}. Missing token!", short_id);
-        inbound
-            .get_mut()
-            .0
-            .write_all(b"HTTP/1.1 401 Unauthorized\r\n\r\n")
-            .await?;
-        return Ok(());
-    }
-    let claims = Claims::from_bearer_or_key(&token.unwrap(), &state.db, &state.config).await;
-    let device = match claims {
-        Ok(claims) => claims
-            .find_one_with_scope_and_role::<DeviceDoc>(
-                &state.db.devices(),
-                doc! { "short_id": short_id },
-                Role::Editor,
-            )
-            .await?
-            .ok_or_else(|| ServerError::not_found("Device not found"))?,
-        Err(_) => {
-            inbound
-                .get_mut()
-                .0
-                .write_all(b"HTTP/1.1 401 Unauthorized\r\n\r\n")
-                .await?;
-            return Ok(());
-        }
-    };
-
-    let device_id = device.id.clone().unwrap().to_string();
-
-    let Some(conn_arc) = state.relay.get_tunnel(&device_id).await else {
-        warn!("No active tunnel for {short_id}");
-        inbound
-            .get_mut()
-            .0
-            .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-            .await?;
-        return Ok(());
-    };
-
-    let mut control = conn_arc.lock().await;
-    let mut sub = match control.open_stream().await {
-        Ok(s) => s,
-        Err(_) => {
-            inbound
-                .get_mut()
-                .0
-                .write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
-                .await?;
-            return Ok(());
-        }
-    };
-    drop(control);
-
-    sub.write_all(header_bytes).await?;
-    if !leftover_bytes.is_empty() {
-        sub.write_all(leftover_bytes).await?;
-    }
-    sub.flush().await?;
-
-    tokio::io::copy_bidirectional(inbound, &mut sub).await?;
-    Ok(())
-}
-
-async fn read_full_http_request(
-    inbound: &mut (impl AsyncReadExt + Unpin),
-) -> io::Result<(Vec<u8>, usize)> {
-    let mut buf = Vec::with_capacity(4096);
-
-    let header_end = loop {
-        // read chunk
-        let mut tmp = [0u8; 1024];
-        let n = inbound.read(&mut tmp).await?;
-
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "client closed before sending headers",
-            ));
-        }
-
-        buf.extend_from_slice(&tmp[..n]);
-
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            break pos + 4;
-        }
-
-        if buf.len() > 32 * 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "headers too large",
-            ));
-        }
-    };
-
-    Ok((buf, header_end))
-}
-
-async fn proxy_to_rest(
-    inbound: &mut TlsStream<tokio::net::TcpStream>,
-    rest_port: u16,
-) -> io::Result<()> {
-    let mut outbound = tokio::net::TcpStream::connect(("127.0.0.1", rest_port)).await?;
-    let _ = proxy_bidirectional(inbound, &mut outbound).await;
-    Ok(())
-}
-
-pub async fn handle_control_tunnel(
+async fn handle_control_tunnel(
+    conn: quinn::Connection,
     relay: Arc<RelayState>,
-    tls: TlsStream<tokio::net::TcpStream>,
     secret: &str,
-) -> io::Result<()> {
-    use tokio::io::AsyncBufReadExt;
-    let mut reader = BufReader::new(tls);
+) -> ServerResult<()> {
+    // Accept first control handshake stream
+    let (mut send, mut recv) = conn.accept_bi().await?;
 
-    // Expect: "M87 device_id=<id> token=<base64>\n"
-    let mut line = String::new();
-    if reader.read_line(&mut line).await? == 0 {
+    let mut buf = vec![0; 1024];
+    let n = recv
+        .read(&mut buf)
+        .await?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "control: empty handshake"))?;
+    if n == 0 {
         warn!("control: empty handshake");
         return Ok(());
     }
+
+    let line = String::from_utf8_lossy(&buf[..n]);
     let device_id = extract_kv(&line, "device_id").unwrap_or_default();
     let token = extract_kv(&line, "token").unwrap_or_default();
-    if device_id.is_empty() || token.is_empty() {
-        warn!("control: missing device_id/token");
-        return Ok(());
-    }
 
-    match crate::auth::tunnel_token::verify_tunnel_token(&token, secret) {
-        Ok(id_ok) if id_ok == device_id => {}
-        Ok(id_ok) => {
-            warn!(
-                "control: token mismatch got {} but expected {}",
-                device_id, id_ok
-            );
-            return Ok(());
-        }
-        Err(err) => {
-            warn!("control: token invalid {}", err);
-            return Ok(());
-        }
-    }
+    verify_tunnel_token(&token, secret)?;
 
-    {
-        let mut tunnels = relay.tunnels.write().await;
-        tunnels.remove(&device_id);
-    }
+    relay.remove_tunnel(&device_id).await;
+    relay.register_tunnel(device_id.clone(), conn.clone()).await;
 
-    let base = reader.into_inner();
-    let mut cfg = YamuxConfig::default();
-    cfg.max_stream_window_size = 8 * 1024 * 1024; // 8 MB
-
-    let mut sess = Session::new_client(base, cfg);
-    let control = sess.control();
-    relay
-        .register_tunnel(device_id.clone(), control.clone())
-        .await;
-    info!(%device_id, "control tunnel active");
-
-    let relay_clone = relay.clone();
     tokio::spawn(async move {
-        // keep Control alive for the duration of this task
-        let _keep_alive = control;
-        while let Some(item) = sess.next().await {
-            match item {
-                Ok(_stream) => {
-                    // control sessions should not yield streams — usually ignore
-                }
-                Err(e) => {
-                    warn!("yamux session error for {}: {:?}", device_id, e);
-                    break;
-                }
+        let reason = conn.closed().await;
+
+        match reason {
+            // --- GRACEFUL SHUTDOWN (no reconnect expected) ---
+            ConnectionError::ApplicationClosed(_) => {
+                relay.remove_tunnel(&device_id).await;
+                info!(%device_id, "device gracefully closed");
+            }
+            ConnectionError::ConnectionClosed(_) => {
+                relay.remove_tunnel(&device_id).await;
+                warn!(%device_id, "device QUIC stack closed connection");
+            }
+
+            ConnectionError::LocallyClosed => {
+                relay.remove_tunnel(&device_id).await;
+                info!(%device_id, "connection closed locally");
+            }
+
+            ConnectionError::Reset => {
+                // peer reset = intentional/terminal
+                relay.remove_tunnel(&device_id).await;
+                warn!(%device_id, "connection reset by peer");
+            }
+
+            // --- UNINTENTIONAL LOSS (reconnect expected) ---
+            ConnectionError::TransportError(_) | ConnectionError::TimedOut => {
+                warn!(%device_id, "device lost connection; waiting for reconnect");
+                relay.mark_tunnel_lost(&device_id).await;
+
+                let relay2 = relay.clone();
+                let device_id2 = device_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+
+                    if relay2.is_still_lost(&device_id2).await {
+                        relay2.remove_tunnel(&device_id2).await;
+                        warn!(%device_id2, "device did not reconnect — marking offline");
+                    }
+                });
+            }
+
+            // --- EXTREMELY RARE / CONFIG ERRORS ---
+            ConnectionError::VersionMismatch | ConnectionError::CidsExhausted => {
+                relay.remove_tunnel(&device_id).await;
+                warn!(%device_id, ?reason, "fatal QUIC error");
             }
         }
-
-        info!("control session closed for {}", device_id);
-        relay_clone.remove_tunnel(&device_id).await;
     });
+
+    // optional ack
+    let _ = send.write_all(b"OK").await;
+
+    Ok(())
+}
+
+async fn handle_forward(
+    client_conn: quinn::Connection, // forward client (CLI/browser)
+    device_conn: quinn::Connection, // control-registered device conn
+) -> io::Result<()> {
+    // 1. Accept the client's first bidi stream
+    let (mut client_send, mut client_recv) = match client_conn.accept_bi().await {
+        Ok(s) => s,
+        Err(e) => {
+            // client closed before opening a stream
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("client_bi: {e:?}"),
+            ));
+        }
+    };
+
+    // 2. Open a bidi stream to the device
+    let (mut dev_send, mut dev_recv) = match device_conn.open_bi().await {
+        Ok(s) => s,
+        Err(e) => {
+            // device lost / restarting / tunnel down
+            let _ = client_send.write_all(b"NO_TUNNEL").await;
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("device_bi: {e:?}"),
+            ));
+        }
+    };
+
+    // 3. Copy both directions simultaneously
+    let uplink = tokio::io::copy(&mut client_recv, &mut dev_send); // client → device
+    let downlink = tokio::io::copy(&mut dev_recv, &mut client_send); // device → client
+
+    // 4. Whichever side closes first, we gracefully finish the opposite send stream
+    tokio::select! {
+        result = uplink => {
+            // Client → Device finished
+            let _ = dev_send.finish();
+            result?;
+        }
+        result = downlink => {
+            // Device → Client finished
+            let _ = client_send.finish();
+            result?;
+        }
+    }
+
     Ok(())
 }
 
@@ -281,4 +263,8 @@ fn extract_kv(line: &str, key: &str) -> Option<String> {
         part.strip_prefix(&(key.to_owned() + "="))
             .map(|s| s.to_string())
     })
+}
+
+fn map_quic_err(ctx: &'static str) -> impl Fn(quinn::ReadError) -> io::Error + '_ {
+    move |e| io::Error::new(io::ErrorKind::Other, format!("{ctx}: {e:?}"))
 }

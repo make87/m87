@@ -1,5 +1,10 @@
-use crate::{auth::AuthManager, config::Config, devices, util::raw_connection::open_raw_io};
-use anyhow::{anyhow, Context, Result};
+use crate::{
+    auth::AuthManager,
+    config::Config,
+    devices,
+    streams::{quic::open_quic_io, stream_type::StreamType},
+};
+use anyhow::{Context, Result, anyhow};
 use m87_shared::metrics::SystemMetrics;
 
 use ratatui::Terminal;
@@ -12,11 +17,13 @@ pub async fn run_metrics(device: &str) -> Result<()> {
     let dev = devices::get_device_by_name(device).await?;
     let token = AuthManager::get_cli_token().await?;
 
-    let io = open_raw_io(
+    let stream_type = StreamType::Metrics {
+        token: token.to_string(),
+    };
+    let (_, io) = open_quic_io(
         &host,
         &dev.short_id,
-        "/metrics",
-        &token,
+        stream_type,
         config.trust_invalid_server_cert,
     )
     .await
@@ -52,10 +59,7 @@ pub async fn ui_loop(
         backend::TermionBackend,
         layout::{Alignment, Constraint, Direction, Layout, Rect},
         style::{Color, Style},
-        widgets::{
-            Block, Borders, Gauge, Paragraph, Row, Sparkline,
-            Table,
-        },
+        widgets::{Block, Borders, Gauge, Paragraph, Row, Sparkline, Table},
     };
     use std::cmp::min;
     use std::collections::VecDeque;

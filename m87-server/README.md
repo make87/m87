@@ -29,16 +29,15 @@ Or download binaries from [releases](https://github.com/make87/make87/releases) 
 
 Environment variables (see `docker-compose.yml`):
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PUBLIC_ADDRESS` | `localhost` | Public hostname for this server |
-| `MONGO_URI` | `mongodb://mongo:27017` | MongoDB connection string |
-| `OAUTH_ISSUER` | `https://auth.make87.com/` | OAuth provider URL |
-| `OAUTH_AUDIENCE` | `https://auth.make87.com` | OAuth audience |
-| `FORWARD_SECRET` | — | Secret for signing tunnel tokens |
-| `UNIFIED_PORT` | `8084` | Agent/tunnel port (expose as 443) |
-| `REST_PORT` | `8085` | REST API port |
-| `ADMIN_EMAILS` | — | Comma-separated admin email addresses |
+| Variable         | Default                    | Description                           |
+| ---------------- | -------------------------- | ------------------------------------- |
+| `PUBLIC_ADDRESS` | `localhost`                | Public hostname for this server       |
+| `MONGO_URI`      | `mongodb://mongo:27017`    | MongoDB connection string             |
+| `OAUTH_ISSUER`   | `https://auth.make87.com/` | OAuth provider URL                    |
+| `OAUTH_AUDIENCE` | `https://auth.make87.com`  | OAuth audience                        |
+| `FORWARD_SECRET` | —                          | Secret for signing tunnel tokens      |
+| `UNIFIED_PORT`   | `8084`                     | Agent/tunnel port (expose as 443)     |
+| `ADMIN_EMAILS`   | —                          | Comma-separated admin email addresses |
 
 ## Ports
 

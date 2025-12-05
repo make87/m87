@@ -1,18 +1,18 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::{
     io::AsyncReadExt,
     io::AsyncWriteExt,
     select,
-    time::{timeout, Duration},
+    time::{Duration, timeout},
 };
 
 use std::path::Path;
 use std::{io::Read, io::Write, sync::Arc};
 
-use crate::rest::upgrade::BoxedIo;
+use crate::streams::quic::QuicIo;
 
-pub async fn handle_terminal_io(_: (), mut io: BoxedIo) {
+pub async fn handle_terminal_io(io: &mut QuicIo) {
     // Notify client that shell is initializing
     let _ = io.write_all(b"Initializing shell...\r\n").await;
 

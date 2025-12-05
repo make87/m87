@@ -1,10 +1,10 @@
-use tokio::io::{copy_bidirectional, AsyncWriteExt};
+use tokio::io::{AsyncWriteExt, copy_bidirectional};
 use tokio::net::UnixStream;
 use tracing::{error, info};
 
-use crate::rest::upgrade::BoxedIo;
+use crate::streams::quic::QuicIo;
 
-pub async fn handle_docker_io(_: (), mut io: BoxedIo) {
+pub async fn handle_docker_io(io: &mut QuicIo) {
     // Connect to the Docker Unix socket
     let mut docker = match UnixStream::connect("/var/run/docker.sock").await {
         Ok(sock) => sock,
@@ -19,7 +19,7 @@ pub async fn handle_docker_io(_: (), mut io: BoxedIo) {
 
     info!("Docker I/O proxy established");
 
-    match copy_bidirectional(&mut io, &mut docker).await {
+    match copy_bidirectional(io, &mut docker).await {
         Ok((a, b)) => {
             info!("copy_bidirectional finished: io→docker={a} bytes, docker→io={b} bytes");
         }

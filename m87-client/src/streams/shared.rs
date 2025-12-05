@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
@@ -80,7 +80,7 @@ pub async fn acquire_metrics_task(name: &str) -> (Arc<SharedTask>, SharedReceive
     tokio::spawn({
         let task = task.clone();
         async move {
-            use tokio::time::{interval, Duration};
+            use tokio::time::{Duration, interval};
             let mut ticker = interval(Duration::from_secs(1));
 
             loop {

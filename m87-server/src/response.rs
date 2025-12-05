@@ -5,6 +5,7 @@ use axum::{
 };
 use hex::FromHexError;
 use hmac::digest::MacError;
+use quinn::{ConnectionError, ReadError};
 use serde::Serialize;
 use std::{fmt::Display, num::ParseIntError, string::FromUtf8Error};
 use tracing::error;
@@ -261,6 +262,18 @@ impl From<FromUtf8Error> for ServerError {
 
 impl From<mongodb::bson::oid::Error> for ServerError {
     fn from(err: mongodb::bson::oid::Error) -> Self {
+        ServerError::InternalError(err.to_string())
+    }
+}
+
+impl From<ConnectionError> for ServerError {
+    fn from(err: ConnectionError) -> Self {
+        ServerError::InternalError(err.to_string())
+    }
+}
+
+impl From<ReadError> for ServerError {
+    fn from(err: ReadError) -> Self {
         ServerError::InternalError(err.to_string())
     }
 }

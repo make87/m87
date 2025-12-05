@@ -1,19 +1,20 @@
-use arc_swap::ArcSwap;
-use axum::{extract::State, Extension, Json};
+use axum::{Extension, Json, extract::State};
 use rustls::{
+    ServerConfig as RustlsServerConfig,
     crypto::ring::default_provider,
-    pki_types::{CertificateDer, PrivateKeyDer},
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
-use rustls::{pki_types::PrivatePkcs8KeyDer, ServerConfig};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::{
     io::Cursor,
     path::{Path, PathBuf},
-    sync::Arc,
 };
-
-use tokio::fs;
+use tokio::{fs, sync::watch};
 use tracing::{info, warn};
+
+use quinn::{ServerConfig as QuicServerConfig, TransportConfig};
+use quinn_proto::crypto::rustls::QuicServerConfig as QuinnQuicServerCrypto;
 
 use crate::{
     auth::claims::Claims,
@@ -21,93 +22,109 @@ use crate::{
     response::{ServerAppResult, ServerError, ServerResponse, ServerResult},
     util::app_state::AppState,
 };
-use rcgen::generate_simple_self_signed;
 
-pub async fn create_tls_config(cfg: &AppConfig) -> ServerResult<ServerConfig> {
-    // === Local / staging ===
+/// Load certificate + key from disk or generate self-signed if missing.
+pub async fn load_cert_and_key(
+    cfg: &AppConfig,
+) -> ServerResult<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    // Staging mode uses self-signed always
     if cfg.is_staging {
-        let ck = generate_simple_self_signed(vec![
-            "localhost".into(),
-            "127.0.0.1".into(),
-            cfg.public_address.clone(),
-        ])
-        .map_err(|e| ServerError::internal_error(&format!("selfsigned: {e}")))?;
-
-        let cert_der: CertificateDer<'static> = ck.cert.der().clone().into();
-        let key_bytes = ck.signing_key.serialize_der();
-        let key_der: PrivateKeyDer<'static> =
-            PrivateKeyDer::from(PrivatePkcs8KeyDer::from(key_bytes));
-
-        let provider = Arc::new(default_provider());
-        let config = ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der], key_der)
-            .map_err(|e| ServerError::internal_error(&format!("{e}")))?;
-        return Ok(config);
+        return create_selfsigned_pair(cfg);
     }
 
-    let certs_dir = PathBuf::from(&cfg.certificate_path);
-    let privkey = certs_dir.join("private.key");
-    let fullchain = certs_dir.join("fullchain.pem");
+    let dir = PathBuf::from(&cfg.certificate_path);
+    let key_path = dir.join("private.key");
+    let cert_path = dir.join("fullchain.pem");
 
-    // fallback if missing
-    if !Path::new(&fullchain).exists() || !Path::new(&privkey).exists() {
+    if !Path::new(&key_path).exists() || !Path::new(&cert_path).exists() {
         warn!("No TLS certs found, generating temporary self-signed certificate");
-        return create_selfsigned_config(cfg);
+        return create_selfsigned_pair(cfg);
     }
 
-    let cert_bytes = fs::read(&fullchain)
+    // Load certificate chain
+    let cert_bytes = fs::read(&cert_path)
         .await
         .map_err(|e| ServerError::internal_error(&format!("read cert: {e:?}")))?;
 
-    let mut cursor = Cursor::new(cert_bytes);
-    let certs = rustls_pemfile::certs(&mut cursor)
+    let mut cur = Cursor::new(cert_bytes);
+    let certs = rustls_pemfile::certs(&mut cur)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| ServerError::internal_error(&format!("parse certs: {e:?}")))?;
 
-    let key_bytes = fs::read(&privkey)
+    if certs.is_empty() {
+        return Err(ServerError::internal_error("no certs in fullchain.pem"));
+    }
+
+    // Load private key
+    let key_bytes = fs::read(&key_path)
         .await
         .map_err(|e| ServerError::internal_error(&format!("read key: {e:?}")))?;
 
-    let mut cursor = Cursor::new(key_bytes);
-    let key = rustls_pemfile::pkcs8_private_keys(&mut cursor)
+    let mut cur = Cursor::new(key_bytes);
+    let key = rustls_pemfile::pkcs8_private_keys(&mut cur)
         .next()
         .ok_or_else(|| ServerError::internal_error("missing private key"))?
         .map_err(|e| ServerError::internal_error(&format!("parse key: {e:?}")))?;
 
-    let key: PrivateKeyDer<'static> = key.into();
+    Ok((certs, key.into()))
+}
+
+/// Self-signed certificate pair
+pub fn create_selfsigned_pair(
+    cfg: &AppConfig,
+) -> ServerResult<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    let ck = rcgen::generate_simple_self_signed(vec![cfg.public_address.clone()])
+        .map_err(|e| ServerError::internal_error(&format!("rcgen: {e}")))?;
+
+    let cert = CertificateDer::from(ck.cert.der().to_vec());
+    let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(ck.signing_key.serialize_der()));
+
+    Ok((vec![cert], key))
+}
+
+/// REST TLS config → Axum will use this directly.
+pub async fn create_tls_config(cfg: &AppConfig) -> ServerResult<RustlsServerConfig> {
+    let (certs, key) = load_cert_and_key(cfg).await?;
 
     let provider = Arc::new(default_provider());
-    let config = ServerConfig::builder_with_provider(provider)
+    let tls = RustlsServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap()
         .with_no_client_auth()
-        .with_single_cert(certs, key.into())
-        .map_err(|e| ServerError::internal_error(&format!("{e}")))?;
+        .with_single_cert(certs, key)
+        .map_err(|e| ServerError::internal_error(&format!("TLS build: {e}")))?;
 
-    Ok(config)
+    Ok(tls)
 }
 
-pub fn create_selfsigned_config(cfg: &AppConfig) -> ServerResult<ServerConfig> {
-    use rcgen::generate_simple_self_signed;
-    let ck = generate_simple_self_signed(vec![cfg.public_address.clone()])
-        .map_err(|e| ServerError::internal_error(&format!("selfsigned: {e}")))?;
-    let cert_der = rustls::pki_types::CertificateDer::from(ck.cert.der().to_vec());
-    let key_bytes = ck.signing_key.serialize_der();
-    let key_der = rustls::pki_types::PrivateKeyDer::from(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(key_bytes),
-    );
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    Ok(ServerConfig::builder_with_provider(provider)
+/// QUIC TLS config → Quinn endpoint
+pub async fn create_quic_server_config(cfg: &AppConfig) -> ServerResult<QuicServerConfig> {
+    let (certs, key) = load_cert_and_key(cfg).await?;
+
+    let provider = Arc::new(default_provider());
+    let mut tls = RustlsServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap()
         .with_no_client_auth()
-        .with_single_cert(vec![cert_der], key_der)
-        .map_err(|e| ServerError::internal_error(&format!("{e}")))?)
+        .with_single_cert(certs, key)
+        .map_err(|e| ServerError::internal_error(&format!("TLS build: {e}")))?;
+
+    tls.alpn_protocols = vec![b"m87-quic".to_vec()];
+
+    let crypto = QuinnQuicServerCrypto::try_from(tls)
+        .map_err(|e| ServerError::internal_error(&format!("quic rustls: {e}")))?;
+
+    let mut cfg = QuicServerConfig::with_crypto(Arc::new(crypto));
+
+    let mut t = TransportConfig::default();
+    t.max_concurrent_bidi_streams(1024u32.into());
+    t.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
+
+    cfg.transport = Arc::new(t);
+    Ok(cfg)
 }
 
+/// Admin API → Updates certs on disk and signals reload
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateCertBody {
     pub pvtkey: String,
@@ -117,54 +134,38 @@ pub struct UpdateCertBody {
 pub async fn update_cert(
     claims: Claims,
     State(state): State<AppState>,
-    Extension(current): Extension<Arc<ArcSwap<ServerConfig>>>,
+    Extension(reload_tx): Extension<watch::Sender<()>>,
     Json(payload): Json<UpdateCertBody>,
 ) -> ServerAppResult<()> {
-    // optionally restrict to admin
     if !claims.is_admin {
         return Err(ServerError::unauthorized(""));
     }
 
+    // Validate inputs
     let mut cert_cursor = Cursor::new(payload.fullchain.clone());
     let certs = rustls_pemfile::certs(&mut cert_cursor)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ServerError::internal_error(&format!("parse certs: {e:?}")))?;
+        .map_err(|e| ServerError::internal_error(&format!("invalid certs: {e}")))?;
 
     if certs.is_empty() {
         return Err(ServerError::internal_error(
-            "no certificates found in fullchain.pem",
+            "no certificates in fullchain.pem",
         ));
     }
 
     let mut key_cursor = Cursor::new(payload.pvtkey.clone());
-    let key = rustls_pemfile::pkcs8_private_keys(&mut key_cursor)
+    rustls_pemfile::pkcs8_private_keys(&mut key_cursor)
         .next()
-        .ok_or_else(|| ServerError::internal_error("missing private key"))?
-        .map_err(|e| ServerError::internal_error(&format!("parse key: {e:?}")))?;
+        .ok_or_else(|| ServerError::internal_error("invalid private key"))?
+        .map_err(|e| ServerError::internal_error(&format!("parse key: {e}")))?;
 
-    let key: PrivateKeyDer<'static> = key.into();
+    // Save to disk
+    let dir = PathBuf::from(&state.config.certificate_path);
+    fs::write(dir.join("private.key"), payload.pvtkey).await?;
+    fs::write(dir.join("fullchain.pem"), payload.fullchain).await?;
 
-    let provider = Arc::new(default_provider());
-    let config = ServerConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| ServerError::internal_error(&format!("TLS config: {e}")))?;
-
-    current.store(Arc::new(config));
-
-    let cert_folder = PathBuf::from(&state.config.certificate_path);
-    let pvtkey_path = cert_folder.join("private.key");
-    let fullchain_path = cert_folder.join("fullchain.pem");
-
-    fs::write(&pvtkey_path, payload.pvtkey)
-        .await
-        .map_err(|e| ServerError::internal_error(&format!("write pvtkey: {e:?}")))?;
-
-    fs::write(&fullchain_path, payload.fullchain)
-        .await
-        .map_err(|e| ServerError::internal_error(&format!("write fullchain: {e:?}")))?;
+    // Notify QUIC + HTTPS loops
+    let _ = reload_tx.send(());
 
     Ok(ServerResponse::builder().ok().build())
 }

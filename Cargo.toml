@@ -51,9 +51,12 @@ chrono = "0.4.42"
 socket2 = "0.6.1"
 
 # TLS and networking
-tokio-yamux = "0.3.17"
 tokio-rustls = "0.26"
 rustls = { version = "0.23.33", default-features = false, features = ["ring", "std", "tls12", "log", "logging"] }
+
+# quic for tunneling
+quinn = "0.11"
+quinn-proto = "0.11.13"
 
 [profile.release]
 # Optimize for performance and minimal resource footprint

@@ -1,11 +1,11 @@
 use tokio::io::AsyncWriteExt;
 
-use crate::rest::{
-    shared::{acquire_metrics_task, SharedReceiver},
-    upgrade::BoxedIo,
+use crate::{
+    streams::quic::QuicIo,
+    streams::shared::{SharedReceiver, acquire_metrics_task},
 };
 
-pub async fn handle_system_metrics_io(_: (), mut io: BoxedIo) {
+pub async fn handle_system_metrics_io(io: &mut QuicIo) {
     // Start metrics subscription task
     let (_task, mut rx): (_, SharedReceiver) = acquire_metrics_task("system-metrics").await;
 

@@ -1,9 +1,11 @@
 use russh::server;
 
-use crate::rest::upgrade::BoxedIo;
-use crate::util::ssh::{make_server_config, M87SshHandler};
+use crate::{
+    streams::quic::QuicIo,
+    util::ssh::{M87SshHandler, make_server_config},
+};
 
-pub async fn handle_ssh_io(_: (), io: BoxedIo) {
+pub async fn handle_ssh_io(io: QuicIo) {
     let home_dir = dirs::home_dir().unwrap();
     let home_dir = home_dir.to_path_buf();
 

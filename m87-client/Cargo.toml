@@ -44,9 +44,12 @@ jsonwebtoken = { workspace = true }
 once_cell = { workspace = true }
 axum = { version = "0.8.6", features = ["ws", "macros"] }
 
+# http3 and quic
+quinn.workspace = true
+quinn-proto.workspace = true
+
 rustls = { workspace = true }
-tokio-rustls = { workspace = true }
-tokio-yamux = { workspace = true }
+# tokio-rustls = { workspace = true }
 
 # Client-specific dependencies
 clap = { version = "4.5", features = ["derive", "cargo"] }
@@ -85,5 +88,3 @@ libc = "=0.2.177"
 
 # Time parsing for relative timestamps
 chrono = "0.4"
-
-[dev-dependencies]

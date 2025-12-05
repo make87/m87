@@ -36,6 +36,7 @@ pub async fn get_system_info() -> Result<server::DeviceSystemInfo> {
     {
         sys_info.architecture = "arm64".to_string();
     }
+    // add
 
     sys_info.username = username();
 

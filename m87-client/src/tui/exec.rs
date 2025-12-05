@@ -2,14 +2,15 @@
 //!
 //! This provides clean command output without shell noise (MOTD, prompts, logout).
 
-use crate::util::raw_connection::open_raw_io;
+use crate::streams::quic::open_quic_io;
+use crate::streams::stream_type::StreamType;
 use crate::{auth::AuthManager, config::Config, devices, util::shutdown::SHUTDOWN};
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use termion::raw::IntoRawMode;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 #[derive(Serialize)]
 struct ExecRequest {
@@ -40,15 +41,17 @@ pub async fn run_exec(device: &str, command: Vec<String>, stdin: bool, tty: bool
 
     let token = AuthManager::get_cli_token().await?;
 
-    // Open raw TLS connection to /exec endpoint
-    let io = open_raw_io(
+    let stream_type = StreamType::Exec {
+        token: token.to_string(),
+    };
+    let (_, io) = open_quic_io(
         &base,
         &dev.short_id,
-        "/exec",
-        &token,
+        stream_type,
         config.trust_invalid_server_cert,
     )
-    .await?;
+    .await
+    .context("Failed to connect to RAW metrics stream")?;
 
     // Join command into single string (shell will interpret operators like && |)
     let cmd_str = command.join(" ");
@@ -365,7 +368,9 @@ where
 
             // Look for potential exit code JSON at the end
             if let Some(newline_pos) = pending.iter().rposition(|&b| b == b'\n')
-                && let Some(last) = String::from_utf8_lossy(&pending[..=newline_pos]).lines().last()
+                && let Some(last) = String::from_utf8_lossy(&pending[..=newline_pos])
+                    .lines()
+                    .last()
                 && let Some(code) = try_parse_exit_code(last)
             {
                 *exit_code_reader.lock().await = code;

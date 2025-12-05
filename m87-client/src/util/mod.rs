@@ -14,6 +14,5 @@ pub mod retry;
 pub mod system_info;
 
 pub mod fs;
-pub mod raw_connection;
 pub mod ssh;
 pub mod tls;

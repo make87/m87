@@ -1,8 +1,9 @@
-use crate::util::raw_connection::open_raw_io;
+use crate::streams::quic::open_quic_io;
+use crate::streams::stream_type::StreamType;
 use crate::{auth::AuthManager, config::Config, devices};
 use anyhow::Result;
 use termion::raw::IntoRawMode;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 pub async fn run_shell(device: &str) -> Result<()> {
@@ -17,17 +18,20 @@ pub async fn run_shell(device: &str) -> Result<()> {
     let token = AuthManager::get_cli_token().await?;
 
     // --- open raw upgraded TLS stream ---
-    let io = open_raw_io(
+    let stream_type = StreamType::Terminal {
+        token: token.to_string(),
+    };
+    let (_, io) = open_quic_io(
         &base,
         &dev.short_id,
-        "/terminal",
-        &token,
+        stream_type,
         config.trust_invalid_server_cert,
     )
     .await?;
 
     // --- split for bidirectional tasks ---
-    let (mut reader, mut writer) = io::split(io);
+    let mut reader = io.recv;
+    let mut writer = io.send;
 
     // Enter raw mode so Ctrl+C is sent as byte 0x03 instead of being handled locally
     let _raw_mode = std::io::stdout().into_raw_mode()?;
@@ -78,6 +82,10 @@ pub async fn run_shell(device: &str) -> Result<()> {
 
         loop {
             let n = reader.read(&mut buf).await?;
+            let n = match n {
+                Some(n) => n,
+                None => break,
+            };
             if n == 0 {
                 break; // remote closed
             }

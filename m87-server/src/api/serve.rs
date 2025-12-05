@@ -1,17 +1,13 @@
-use arc_swap::ArcSwap;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+
 use axum::{
-    http::{header, Method},
+    Extension, Router,
+    http::{Method, header},
     response::IntoResponse,
     routing::{get, post},
-    Extension, Json, Router,
 };
-use futures::StreamExt;
-use rustls::ServerConfig;
-use std::{sync::Arc, time::Duration};
-
-use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
-use tokio_stream::wrappers::TcpListenerStream;
+use axum_server::tls_rustls::RustlsConfig;
+use tokio::sync::watch;
 use tower_http::{
     compression::CompressionLayer,
     cors::{AllowOrigin, CorsLayer},
@@ -26,7 +22,7 @@ use crate::{
         auth,
         certificate::{create_tls_config, update_cert},
         device,
-        tunnel::handle_sni,
+        tunnel::run_quic_endpoint,
     },
     config::AppConfig,
     db::Mongo,
@@ -36,7 +32,7 @@ use crate::{
 };
 
 async fn get_status() -> impl IntoResponse {
-    "ok".to_string()
+    "ok"
 }
 
 pub async fn serve(
@@ -44,21 +40,20 @@ pub async fn serve(
     relay: Arc<RelayState>,
     cfg: Arc<AppConfig>,
 ) -> ServerResult<()> {
-    // Ensure rustls has a crypto provider before anything touches TLS
     rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
-        .expect("failed to install ring crypto provider");
+        .expect("failed to install ring");
+
+    std::fs::create_dir_all(&cfg.certificate_path)?;
+
+    let (reload_tx, reload_rx) = watch::channel(());
 
     let state = AppState {
         db: db.clone(),
         config: cfg.clone(),
         relay: relay.clone(),
     };
-    // create cfg.certificate_path if it does not exist
-    std::fs::create_dir_all(&cfg.certificate_path).expect("failed to create certificate directory");
-    // will load existing or create self signed certificate on firststartup. Valid certs have to be posted via update-cert route
-    let current = Arc::new(ArcSwap::from(Arc::new(create_tls_config(&cfg).await?)));
 
-    // ===== REST on loopback =====
+    // CORS for REST
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::any())
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
@@ -68,70 +63,67 @@ pub async fn serve(
             header::HeaderName::from_static("sec-websocket-protocol"),
         ]);
 
-    let admin_route = Router::new()
+    // Admin route: writes certs to disk + signals reload
+    let admin = Router::new()
         .route("/update-cert", post(update_cert))
-        .layer(Extension(current.clone()));
+        .layer(Extension(reload_tx.clone()));
 
     let app = Router::new()
         .nest("/auth", auth::create_route())
         .nest("/device", device::create_route())
-        .nest("/admin", admin_route)
+        .nest("/admin", admin)
         .route("/status", get(get_status))
-        .with_state(state.clone())
         .layer(cors)
         .layer(SetSensitiveHeadersLayer::new(std::iter::once(
             header::AUTHORIZATION,
         )))
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .layer(TraceLayer::new_for_http())
-        .layer(CompressionLayer::new());
+        .layer(CompressionLayer::new())
+        .with_state(state.clone());
 
-    let rest_listener = TcpListener::bind(("127.0.0.1", cfg.rest_port))
-        .await
-        .expect("bind REST");
-    info!("REST listening on 127.0.0.1:{}", cfg.rest_port);
+    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.unified_port));
+    info!("HTTPS/QUIC listening on {}", addr);
 
-    let rest_task = tokio::spawn(async move {
-        if let Err(e) = axum::serve(rest_listener, app).await {
-            warn!("Axum server failed: {e:?}");
-        }
-    });
+    // ===== HTTPS SERVER LOOP WITH HOT RELOAD =====
+    let https_task = tokio::spawn({
+        let cfg = cfg.clone();
+        let app = app.clone();
+        let mut reload_rx = reload_rx.clone();
 
-    // === TLS (ACME or self-signed) ===
-    // Don't spawn here — serve_tls_or_selfsigned already does internal spawns.
-    serve_tls_or_selfsigned(cfg.clone(), state.clone(), current.clone()).await?;
+        async move {
+            loop {
+                // Load TLS fresh from disk
+                let tls = create_tls_config(&cfg).await.expect("TLS load failed");
+                let tls_cfg = RustlsConfig::from_config(Arc::new(tls));
 
-    // === Wait for REST task forever ===
-    let _ = rest_task.await;
-    Ok(())
-}
+                let handle = axum_server::Handle::new();
+                let server = axum_server::bind_rustls(addr, tls_cfg)
+                    .handle(handle.clone())
+                    .serve(app.clone().into_make_service());
 
-pub async fn serve_tls_or_selfsigned(
-    cfg: Arc<AppConfig>,
-    state: AppState,
-    current: Arc<ArcSwap<ServerConfig>>,
-) -> ServerResult<()> {
-    let tcp = TcpListener::bind(("0.0.0.0", cfg.unified_port))
-        .await
-        .expect("bind TLS");
-    let mut incoming = TcpListenerStream::new(tcp);
-
-    // --- accept incoming connections ---
-    tokio::spawn(async move {
-        while let Some(Ok(stream)) = incoming.next().await {
-            let acceptor = TlsAcceptor::from(current.load_full());
-            let state = state.clone();
-            tokio::spawn(async move {
-                match acceptor.accept(stream).await {
-                    Ok(tls) => {
-                        let sni = tls.get_ref().1.server_name().unwrap_or("").to_string();
-                        let _ = handle_sni(&sni, tls, &state).await;
+                tokio::select! {
+                    _ = server => {
+                        warn!("HTTPS terminated unexpectedly");
+                        continue;
                     }
-                    Err(e) => warn!("TLS handshake failed: {e:?}"),
+                    _ = reload_rx.changed() => {
+                        warn!("TLS updated → restarting HTTPS");
+                        handle.shutdown();
+                    }
                 }
-            });
+            }
         }
     });
+
+    // ===== QUIC SERVER =====
+    let quic_task = tokio::spawn(run_quic_endpoint(
+        cfg.clone(),
+        relay.clone(),
+        reload_rx.clone(),
+    ));
+
+    let _ = tokio::join!(https_task, quic_task);
 
     Ok(())
 }

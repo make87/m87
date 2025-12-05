@@ -1,4 +1,4 @@
-use base64::{prelude::BASE64_STANDARD, Engine};
+use base64::{Engine, prelude::BASE64_STANDARD};
 use serde::Deserialize;
 
 use crate::response::ServerResult;
@@ -18,7 +18,6 @@ pub struct AppConfig {
     pub oauth: OAuthConfig,
     pub public_address: String,
     pub unified_port: u16,
-    pub rest_port: u16,
     pub forward_secret: String,
     pub admin_key: Option<String>,
     pub is_staging: bool,
@@ -49,10 +48,6 @@ impl AppConfig {
             .unwrap_or_else(|_| "8084".into())
             .parse()
             .unwrap();
-        let rest_port = std::env::var("REST_PORT")
-            .unwrap_or_else(|_| "8085".into())
-            .parse()
-            .unwrap();
 
         // no default
         let admin_emails = std::env::var("ADMIN_EMAILS")
@@ -80,7 +75,6 @@ impl AppConfig {
             oauth: OAuthConfig { issuer, audience },
             public_address,
             unified_port,
-            rest_port,
             forward_secret,
             is_staging,
             admin_emails,

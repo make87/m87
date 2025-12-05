@@ -46,7 +46,7 @@ m87 <device> tunnel <ports>    # port forwarding (see below)
 m87 <device> docker <args>     # docker passthrough
 m87 <device> logs [-f]         # container logs
 m87 <device> stats             # system metrics
-m87 <device> serial <path>     # serial console
+m87 <device> serial <name>     # serial mount forwarding
 ```
 
 ### File Transfer
@@ -92,11 +92,11 @@ sudo m87 agent stop
 Format: `[local:]remote[/protocol]`
 
 ```sh
-m87 dev tunnel 8080              # localhost:8080 → device:8080
-m87 dev tunnel 3000:8080         # localhost:3000 → device:8080
-m87 dev tunnel 192.168.1.5:80    # forward to host on device's LAN
-m87 dev tunnel 8080/udp          # UDP (default: tcp)
-m87 dev tunnel 8080 9090 3000    # multiple ports
+m87 <device> tunnel 8080              # localhost:8080 → device:8080
+m87 <device> tunnel 3000:8080         # localhost:3000 → device:8080
+m87 <device> tunnel 192.168.1.5:80    # forward to host on device's LAN
+m87 <device> tunnel 8080/udp          # UDP (default: tcp)
+m87 <device> tunnel 8080 9090 3000    # multiple ports
 ```
 
 See [examples/features/tunnels](./examples/features/tunnels/) for more.

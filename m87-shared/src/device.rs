@@ -20,12 +20,17 @@ pub struct PublicDevice {
     pub system_info: DeviceSystemInfo,
 }
 
+fn default_architecture() -> String {
+    "unknown".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct DeviceSystemInfo {
     pub hostname: String,
     pub username: String,
     pub public_ip_address: Option<String>,
     pub operating_system: String,
+    #[serde(default = "default_architecture")]
     pub architecture: String,
     #[serde(default)]
     pub cores: Option<u32>,

@@ -15,10 +15,6 @@ fn default_update_check_interval() -> u64 {
     3600 // 1h
 }
 
-fn default_server_port() -> u16 {
-    8337
-}
-
 fn default_make87_api_url() -> String {
     "https://api.make87.com".to_string()
 }
@@ -44,8 +40,7 @@ pub struct Config {
     pub auth_domain: String,
     pub auth_audience: String,
     pub auth_client_id: String,
-    #[serde(default = "default_server_port")]
-    pub server_port: u16,
+
     #[serde(default)]
     pub trust_invalid_server_cert: bool,
 }
@@ -64,7 +59,6 @@ impl Default for Config {
             auth_domain: "https://auth.make87.com/".to_string(),
             auth_audience: "https://auth.make87.com".to_string(),
             auth_client_id: "E2J7xfFLgexzvhHhz4YqaJBy8Ys82SmM".to_string(),
-            server_port: 8337,
             trust_invalid_server_cert: false,
         }
     }

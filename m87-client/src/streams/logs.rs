@@ -1,8 +1,8 @@
 use tokio::io::AsyncWriteExt;
 
-use crate::{rest::upgrade::BoxedIo, util::logging::get_log_rx};
+use crate::{streams::quic::QuicIo, util::logging::get_log_rx};
 
-pub async fn handle_logs_io(_: (), mut io: BoxedIo) {
+pub async fn handle_logs_io(io: &mut QuicIo) {
     let mut rx = match get_log_rx() {
         Some(r) => r,
         None => {

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use mongodb::bson::{doc, oid::ObjectId, DateTime, Document};
+use mongodb::bson::{DateTime, Document, doc, oid::ObjectId};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,7 +14,6 @@ use crate::{
     auth::{access_control::AccessControlled, claims::Claims},
     db::Mongo,
     response::{ServerError, ServerResult},
-    util::app_state::AppState,
 };
 
 fn default_stable_version() -> String {
@@ -171,106 +170,6 @@ impl DeviceDoc {
             ));
         }
         Ok(())
-    }
-
-    pub async fn request_public_url(
-        &self,
-        name: &str,
-        port: u16,
-        url_prefix: &str,
-        allowed_source_ips: Option<Vec<String>>,
-        state: &AppState,
-    ) -> ServerResult<String> {
-        let device_id = self.id.clone().unwrap().to_string();
-        let sni_host = match name.len() {
-            0 => format!("{}.{}", self.short_id, state.config.public_address),
-            _ => format!("{}.{}.{}", name, self.short_id, state.config.public_address),
-        };
-        let _ = state
-            .relay
-            .register_forward(sni_host.clone(), device_id, port, allowed_source_ips);
-        let url = format!("{}{}", url_prefix, sni_host,);
-        Ok(url)
-    }
-
-    pub async fn request_ssh_command(&self, state: &AppState) -> ServerResult<String> {
-        let url = self.request_public_url("ssh", 22, "", None, state).await?;
-        let url = format!("ssh -p 443 make87@{}", url);
-        Ok(url)
-    }
-
-    async fn get_device_client_rest_url(
-        &self,
-        allowed_source_ips: Option<Vec<String>>,
-        state: &AppState,
-    ) -> ServerResult<String> {
-        let port = self.config.server_port as u16;
-        let url = self
-            .request_public_url("", port, "https://", allowed_source_ips, state)
-            .await?;
-        Ok(url)
-    }
-
-    pub async fn get_logs_url(
-        &self,
-        allowed_source_ips: Option<Vec<String>>,
-        state: &AppState,
-    ) -> ServerResult<String> {
-        let url = self
-            .get_device_client_rest_url(allowed_source_ips, state)
-            .await?;
-        let url = format!("{}/logs", url);
-        Ok(url)
-    }
-
-    pub async fn get_terminal_url(
-        &self,
-        allowed_source_ips: Option<Vec<String>>,
-        state: &AppState,
-    ) -> ServerResult<String> {
-        let url = self
-            .get_device_client_rest_url(allowed_source_ips, state)
-            .await?;
-        let url = format!("{}/terminal", url);
-        Ok(url)
-    }
-
-    pub async fn get_container_terminal_url(
-        &self,
-        container_name: &str,
-        allowed_source_ips: Option<Vec<String>>,
-        state: &AppState,
-    ) -> ServerResult<String> {
-        let url = self
-            .get_device_client_rest_url(allowed_source_ips, state)
-            .await?;
-        let url = format!("{}/container/{}", url, container_name);
-        Ok(url)
-    }
-
-    pub async fn get_container_logs_url(
-        &self,
-        container_name: &str,
-        allowed_source_ips: Option<Vec<String>>,
-        state: &AppState,
-    ) -> ServerResult<String> {
-        let url = self
-            .get_device_client_rest_url(allowed_source_ips, state)
-            .await?;
-        let url = format!("{}/container-logs/{}", url, container_name);
-        Ok(url)
-    }
-
-    pub async fn get_metrics_url(
-        &self,
-        allowed_source_ips: Option<Vec<String>>,
-        state: &AppState,
-    ) -> ServerResult<String> {
-        let url = self
-            .get_device_client_rest_url(allowed_source_ips, state)
-            .await?;
-        let url = format!("{}/metrics", url);
-        Ok(url)
     }
 
     pub async fn handle_heartbeat(

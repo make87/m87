@@ -1,21 +1,13 @@
-use crate::rest::upgrade::BoxedIo;
-use axum::extract::{Path, Query};
 use tokio::{io, io::AsyncWriteExt};
 use tokio_serial::SerialPortBuilderExt;
 use tracing::{error, info};
 
-#[derive(Debug, serde::Deserialize)]
-pub struct SerialQuery {
-    pub baud: Option<u32>,
-}
+use crate::streams::quic::QuicIo;
 
-pub async fn handle_serial_io(
-    (Path(port), Query(SerialQuery { baud })): (Path<String>, Query<SerialQuery>),
-    mut io: BoxedIo,
-) {
+pub async fn handle_serial_io(name: String, baud: Option<u32>, io: &mut QuicIo) {
     let baud = baud.unwrap_or(115200);
 
-    let serial_path = format!("/dev/{}", port); // e.g. ttyUSB0
+    let serial_path = format!("/dev/{}", name); // e.g. ttyUSB0
 
     let builder = tokio_serial::new(serial_path.clone(), baud)
         .data_bits(tokio_serial::DataBits::Eight)
@@ -33,7 +25,7 @@ pub async fn handle_serial_io(
         }
     };
 
-    match io::copy_bidirectional(&mut io, &mut serial).await {
+    match io::copy_bidirectional(io, &mut serial).await {
         Ok((a, b)) => info!("serial closed cleanly (client→dev={a}, dev→client={b})"),
         Err(e) => error!("serial forwarding error: {e}"),
     }

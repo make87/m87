@@ -28,7 +28,6 @@ jsonwebtoken.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 socket2.workspace = true
-tokio-yamux.workspace = true
 
 # Server-specific dependencies
 mongodb = "3"
@@ -36,10 +35,15 @@ rcgen = "0.14.5"
 arc-swap = "=1.7.1"
 rustls-pemfile = "2.2.0"
 
+# http3 and quic
+quinn.workspace = true
+quinn-proto.workspace = true
+
 # Server-specific serialization
 bson = { version = "3", features = ["serde_with-3", "chrono-0_4"] }
 
 # Server-specific web framework
+axum-server =  { version = "0.7.3", features = ["tls-rustls"] }
 axum = { version = "0.8.6", features = ["ws", "macros"] }
 axum-extra = { version = "0.12.2", features = ["typed-header"] }
 tower-http = { version = "0.6.1", features = ["cors", "trace", "timeout", "sensitive-headers", "compression-full"] }

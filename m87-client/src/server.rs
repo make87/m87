@@ -2,29 +2,17 @@
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "agent")]
-use futures::StreamExt;
-#[cfg(feature = "agent")]
 use m87_shared::metrics::SystemMetrics;
 use reqwest::Client;
-#[cfg(feature = "agent")]
-use tokio::net::TcpStream;
-use tokio::{
-    io::{self},
-    net::TcpListener,
-};
-#[cfg(feature = "agent")]
-use tokio_yamux::{Config as YamuxConfig, Session};
+
 #[cfg(feature = "agent")]
 use tracing::warn;
 use tracing::{error, info};
 
 #[cfg(feature = "agent")]
-use crate::{
-    auth::AuthManager, config::Config, device::services::service_info::ServiceInfo,
-    util::tls::get_tls_connection,
-};
+use crate::{auth::AuthManager, config::Config, device::services::service_info::ServiceInfo};
 
-use crate::{retry_async, util::raw_connection::open_raw_io, util::shutdown::SHUTDOWN};
+use crate::retry_async;
 // Import shared types
 pub use m87_shared::auth::{
     AuthRequestAction, CheckAuthRequest, DeviceAuthRequest, DeviceAuthRequestBody,
@@ -50,9 +38,6 @@ pub async fn get_server_url_and_owner_reference(
 
     let client = reqwest::Client::new();
 
-    // ------------------------------------------------------------
-    // 1. POST /login → returns ID
-    // ------------------------------------------------------------
     let post_url = format!("{}/v1/device/login", make87_api_url);
 
     #[derive(serde::Serialize)]
@@ -77,10 +62,6 @@ pub async fn get_server_url_and_owner_reference(
         .json()
         .await?;
 
-    // ------------------------------------------------------------
-    // 2. Print browser login URL for the user
-    // ------------------------------------------------------------
-
     if owner_reference.is_none() {
         // we only need the user to interact if we are missing a assigned owner. If we know the owner server can be aut oassigned
         let browser_url = format!("{}/devices/login/{}", make87_app_url, id);
@@ -90,9 +71,6 @@ pub async fn get_server_url_and_owner_reference(
         eprintln!("Waiting for authentication...");
     }
 
-    // ------------------------------------------------------------
-    // 3. Poll GET /login/{id} until url != None
-    // ------------------------------------------------------------
     let get_url = format!("{}/v1/device/login/{}", make87_api_url, id);
 
     #[derive(serde::Deserialize)]
@@ -313,11 +291,16 @@ pub async fn request_control_tunnel_token(
 
 // Agent-specific: Maintain persistent control tunnel connection
 #[cfg(feature = "agent")]
-pub async fn connect_control_tunnel() -> anyhow::Result<()> {
+pub async fn connect_control_tunnel() -> Result<()> {
+    use quinn::Connection;
+
+    use crate::streams::quic::get_quic_connection;
+
     let config = Config::load().context("Failed to load configuration")?;
     let token = AuthManager::get_device_token()?;
-
     let device_id = config.device_id.clone();
+
+    // 1) Request tunnel token
     let control_tunnel_token = request_control_tunnel_token(
         &config.get_server_url(),
         &token,
@@ -326,47 +309,71 @@ pub async fn connect_control_tunnel() -> anyhow::Result<()> {
     )
     .await?;
 
-    // 1. TCP connect
+    // 2) Build hostname control.<domain>
     let control_host = format!("control.{}", config.get_server_hostname());
-    let local_rest_port = config.server_port;
-    let mut tls =
-        get_tls_connection(control_host.to_string(), config.trust_invalid_server_cert).await?;
+    info!("Connecting QUIC control tunnel to {}", control_host);
 
-    info!("connected to {}. Starting handshake", &control_host);
-    // 4. Send handshake line
-    use tokio::io::AsyncWriteExt;
+    // 3) Establish QUIC connection
+    let (_endpoint, quic_conn): (_, Connection) =
+        get_quic_connection(control_host.clone(), config.trust_invalid_server_cert)
+            .await
+            .context("QUIC connect failed")?;
 
-    let line = format!(
+    info!("QUIC connection established. Sending handshake.");
+
+    // ------------------------------------------------------------
+    // 4) Send handshake over a dedicated control stream (bidi)
+    // ------------------------------------------------------------
+    let mut send = quic_conn
+        .open_bi()
+        .await
+        .context("failed to open QUIC control handshake stream")?
+        .0;
+
+    let handshake = format!(
         "M87 device_id={} token={}\n",
         device_id, control_tunnel_token
     );
-    tls.write_all(line.as_bytes()).await?;
-    tls.flush().await?;
+    send.write_all(handshake.as_bytes())
+        .await
+        .context("failed to send QUIC handshake")?;
+    send.finish().ok();
 
-    // create client session
-    let mut cfg = YamuxConfig::default();
-    cfg.max_stream_window_size = 8 * 1024 * 1024; // 8 MB
-    let mut sess = Session::new_client(tls, cfg);
-    info!("control session created");
-    // continuously poll session to handle keep-alives, frame exchange
-    while let Some(Ok(mut yamux_stream)) = sess.next().await {
-        info!("new yamux stream");
-        tokio::spawn(async move {
-            let mut local = match TcpStream::connect(("127.0.0.1", local_rest_port)).await {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("failed to connect to local {}: {}", local_rest_port, e);
-                    return;
-                }
-            };
+    info!("Handshake sent. Control tunnel active.");
 
-            let _ = match io::copy_bidirectional(&mut yamux_stream, &mut local).await {
-                Ok(_) => info!("proxy closed cleanly"),
-                Err(e) => info!("proxy closed with error: {:?}", e),
-            };
-        });
+    loop {
+        use crate::streams::{self, quic::QuicIo};
+
+        tokio::select! {
+            incoming = quic_conn.accept_bi() => {
+                let Ok((quic_send, quic_recv)) = incoming else {
+                    warn!("Control QUIC stream closed — reconnect required");
+                    break;
+                };
+
+                let io = QuicIo {
+                    recv: quic_recv,
+                    send: quic_send,
+                };
+
+                info!("QUIC: new control stream accepted");
+
+                // Spawn proxy task
+                tokio::spawn(async move {
+                    if let Err(e) = streams::router::handle_incoming_stream(io).await {
+                        warn!("control proxy closed with error: {:?}", e);
+                    }
+                });
+            }
+
+            _ = quic_conn.closed() => {
+                warn!("QUIC control connection closed by server");
+                break;
+            }
+        }
     }
-    info!("control session exited");
+
+    info!("control tunnel terminated");
     Ok(())
 }
 
@@ -441,59 +448,4 @@ fn get_client(trust_invalid_server_cert: bool) -> Result<Client> {
         let client = Client::new();
         Ok(client)
     }
-}
-
-pub async fn tunnel_device_port(
-    host_name: &str,
-    token: &str,
-    device_short_id: &str,
-    remote_host: &str,
-    remote_port: u16,
-    local_port: u16,
-) -> Result<()> {
-    // Path is `/port/<remote_port>`
-    let path = format!("/port/{remote_port}?host={remote_host}");
-
-    let listener = TcpListener::bind(("127.0.0.1", local_port)).await?;
-    info!(
-        "Listening on 127.0.0.1:{local_port} and forwarding to {device_short_id} -> {remote_host}:{remote_port}"
-    );
-
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                let (mut local_stream, addr) = accept_result?;
-                info!("New local connection from {addr}");
-
-                // Clone the raw tunnel uniquely for every connection:
-                // We MUST NOT reuse the same raw IO for multiple forwards.
-                //
-                // Instead, reopen a raw IO for each TCP connection.
-                //
-                // This is identical to how SSH LocalForward works.
-                let mut remote_io = open_raw_io(
-                    host_name,
-                    device_short_id,
-                    &path,
-                    token,
-                    false,
-                ).await?;
-
-                tokio::spawn(async move {
-                    let res = io::copy_bidirectional(&mut local_stream, &mut remote_io).await;
-                    match res {
-                        Ok(_) => info!("Port-forward connection {addr} closed cleanly"),
-                        Err(e) => error!("Port-forward connection {addr} closed with error: {e:?}"),
-                    }
-                });
-            }
-
-            _ = SHUTDOWN.cancelled() => {
-                info!("Shutdown requested — closing port forward");
-                break;
-            }
-        }
-    }
-
-    Ok(())
 }
