@@ -8,6 +8,7 @@ services:
     restart: always
     init: true
     environment:
+      - RUST_LOG=${RUST_LOG:-debug}
       - MONGO_URI=mongodb://mongo:27017
       - MONGO_DB=m87-server
       - OAUTH_ISSUER=${OAUTH_ISSUER:-https://auth.make87.com/}
