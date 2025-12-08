@@ -43,7 +43,7 @@ web-transport-quinn = "0.10.1"
 bson = { version = "3", features = ["serde_with-3", "chrono-0_4"] }
 
 # Server-specific web framework
-axum-server =  { version = "0.7.3", features = ["tls-rustls"] }
+axum-server =  { version = "0.8.0", features = ["tls-rustls"] }
 axum = { version = "0.8.6", features = ["ws", "macros"] }
 axum-extra = { version = "0.12.2", features = ["typed-header"] }
 tower-http = { version = "0.6.1", features = ["cors", "trace", "timeout", "sensitive-headers", "compression-full"] }
