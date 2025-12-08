@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use quinn::{ClientConfig, Endpoint};
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
+use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use std::{pin::Pin, task::Poll};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -69,7 +70,9 @@ pub async fn get_quic_connection(
         Arc::new(QuicClientConfig::try_from(tls).context("failed converting rustls→quic config")?);
 
     let mut client_cfg = ClientConfig::new(crypto);
-    client_cfg.transport_config(Arc::new(quinn::TransportConfig::default()));
+    let mut transport = quinn::TransportConfig::default();
+    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    client_cfg.transport_config(Arc::new(transport));
 
     // 6. Create QUIC client endpoint (local ephemeral port)
     let mut endpoint =

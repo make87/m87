@@ -9,7 +9,7 @@ use mongodb::bson::doc;
 use quinn::{ConnectionError, Endpoint};
 use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::auth::claims::Claims;
 use crate::models::device::DeviceDoc;
@@ -59,11 +59,13 @@ pub async fn run_quic_endpoint(
                                             if let Ok(session) = req.ok().await {
                                                 let _ = handle_webtransport_forward(session, state_cl).await;
                                             }
+                                            conn.close(0u32.into(), b"");
                                             return;
                                         }
 
                                         // CLI / raw QUIC path
-                                        let _ = handle_quic_connection(conn, state_cl).await;
+                                        let _ = handle_quic_connection(conn.clone(), state_cl).await;
+                                        conn.close(0u32.into(), b"");
 
                                     }
                                     Err(e) => {
@@ -129,8 +131,10 @@ async fn handle_quic_connection(conn: quinn::Connection, state: AppState) -> Ser
     let claims = Claims::from_bearer_or_key(&token, &state.db, &state.config).await?;
 
     if sni == control_host {
-        debug!(%sni, "control tunnel connection");
-        let _ = handle_control_tunnel(conn, claims, state).await;
+        info!(%sni, "control tunnel connection");
+        if let Err(e) = handle_control_tunnel(conn, claims, state).await {
+            error!(%sni, %e, "error handling control tunnel");
+        }
         return Ok(());
     }
 

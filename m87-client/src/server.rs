@@ -295,7 +295,7 @@ pub async fn connect_control_tunnel() -> Result<()> {
 
     // send device id
     //
-    send.write_all(&(short_id.len() as u16).to_be_bytes())
+    send.write_all(&(short_id.len() as u32).to_be_bytes())
         .await?;
     send.write_all(short_id.as_bytes())
         .await
@@ -311,6 +311,8 @@ pub async fn connect_control_tunnel() -> Result<()> {
 
         tokio::select! {
             incoming = quic_conn.accept_bi() => {
+                info!("QUIC: new control stream accepted");
+
                 let Ok((quic_send, quic_recv)) = incoming else {
                     warn!("Control QUIC stream closed — reconnect required");
                     break;
