@@ -147,7 +147,11 @@ pub async fn create_quic_server_config(cfg: &AppConfig) -> ServerResult<QuicServ
         .with_single_cert(certs, key)
         .map_err(|e| ServerError::internal_error(&format!("TLS build: {e}")))?;
 
-    tls.alpn_protocols = vec![b"m87-quic".to_vec()];
+    tls.alpn_protocols = vec![
+        b"m87-quic".to_vec(), // CLI & m87 agent QUIC
+        b"h3".to_vec(),       // HTTP/3 for WebTransport
+        b"h3-29".to_vec(),    // optional, but Chrome still sends these
+    ];
 
     let crypto = QuinnQuicServerCrypto::try_from(tls)
         .map_err(|e| ServerError::internal_error(&format!("quic rustls: {e}")))?;
