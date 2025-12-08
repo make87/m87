@@ -1,15 +1,11 @@
 use axum::{Extension, Json, extract::State};
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer};
 use rustls::{
-    ServerConfig as RustlsServerConfig,
-    crypto::ring::default_provider,
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    ServerConfig as RustlsServerConfig, crypto::ring::default_provider, pki_types::CertificateDer,
 };
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::{
-    io::Cursor,
-    path::{Path, PathBuf},
-};
 use tokio::{fs, sync::watch};
 use tracing::warn;
 
@@ -23,11 +19,105 @@ use crate::{
     util::app_state::AppState,
 };
 
+fn split_pem_blocks(input: &[u8]) -> ServerResult<Vec<(String, Vec<u8>)>> {
+    let text = std::str::from_utf8(input)
+        .map_err(|_| ServerError::internal_error("invalid UTF-8 in PEM"))?;
+
+    let mut blocks = Vec::new();
+    let mut pos = 0;
+
+    loop {
+        // Find the next BEGIN
+        let begin = match text[pos..].find("-----BEGIN ") {
+            Some(i) => pos + i,
+            None => break,
+        };
+
+        // Find the end of the BEGIN line
+        let begin_end = text[begin..]
+            .find("-----")
+            .and_then(|i| text[begin + i + 5..].find("-----"))
+            .map(|i| begin + i + 10);
+        let begin_line_end = match begin_end {
+            Some(i) => i,
+            None => break,
+        };
+
+        // Extract the label
+        let begin_line = &text[begin..begin_line_end];
+        let label = begin_line
+            .trim()
+            .trim_start_matches("-----BEGIN ")
+            .trim_end_matches("-----")
+            .to_string();
+
+        // Find END marker for same label
+        let end_marker = format!("-----END {}-----", label);
+        let end_pos = match text[begin_line_end..].find(&end_marker) {
+            Some(i) => begin_line_end + i,
+            None => {
+                return Err(ServerError::internal_error(
+                    "found BEGIN but no matching END",
+                ));
+            }
+        };
+
+        let body_start = begin_line_end;
+        let body_end = end_pos;
+
+        let body_text = &text[body_start..body_end];
+
+        // Decode using RFC7468 strict decoder
+        let (_, der) = pem_rfc7468::decode_vec(body_text.as_bytes())
+            .map_err(|e| ServerError::internal_error(&format!("pem decode: {e}")))?;
+
+        blocks.push((label, der));
+
+        pos = end_pos + end_marker.len();
+    }
+
+    Ok(blocks)
+}
+
+fn parse_cert_chain(bytes: &[u8]) -> ServerResult<Vec<CertificateDer<'static>>> {
+    let blocks = split_pem_blocks(bytes)?;
+
+    let certs = blocks
+        .into_iter()
+        .filter(|(label, _)| label == "CERTIFICATE")
+        .map(|(_, der)| CertificateDer::from(der))
+        .collect::<Vec<_>>();
+
+    if certs.is_empty() {
+        return Err(ServerError::internal_error("no certificates found"));
+    }
+
+    Ok(certs)
+}
+
+fn parse_private_key(bytes: &[u8]) -> ServerResult<PrivateKeyDer<'static>> {
+    let blocks = split_pem_blocks(bytes)?;
+
+    for (label, der) in blocks {
+        match label.as_str() {
+            "PRIVATE KEY" => {
+                return Ok(PrivateKeyDer::from(PrivatePkcs8KeyDer::from(der)));
+            }
+            "RSA PRIVATE KEY" => {
+                return Ok(PrivateKeyDer::from(PrivatePkcs1KeyDer::from(der)));
+            }
+            _ => continue,
+        }
+    }
+
+    Err(ServerError::internal_error("no valid private key found"))
+}
+
 /// Load certificate + key from disk or generate self-signed if missing.
 pub async fn load_cert_and_key(
     cfg: &AppConfig,
 ) -> ServerResult<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-    // Staging mode uses self-signed always
+    // Staging mode → always self-signed
     if cfg.is_staging {
         return create_selfsigned_pair(cfg);
     }
@@ -36,7 +126,7 @@ pub async fn load_cert_and_key(
     let key_path = dir.join("private.key");
     let cert_path = dir.join("fullchain.pem");
 
-    if !Path::new(&key_path).exists() || !Path::new(&cert_path).exists() {
+    if !key_path.exists() || !cert_path.exists() {
         warn!("No TLS certs found, generating temporary self-signed certificate");
         return create_selfsigned_pair(cfg);
     }
@@ -46,11 +136,7 @@ pub async fn load_cert_and_key(
         .await
         .map_err(|e| ServerError::internal_error(&format!("read cert: {e:?}")))?;
 
-    let mut cur = Cursor::new(cert_bytes);
-    let certs = rustls_pemfile::certs(&mut cur)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ServerError::internal_error(&format!("parse certs: {e:?}")))?;
-
+    let certs = parse_cert_chain(&cert_bytes)?;
     if certs.is_empty() {
         return Err(ServerError::internal_error("no certs in fullchain.pem"));
     }
@@ -60,13 +146,9 @@ pub async fn load_cert_and_key(
         .await
         .map_err(|e| ServerError::internal_error(&format!("read key: {e:?}")))?;
 
-    let mut cur = Cursor::new(key_bytes);
-    let key = rustls_pemfile::pkcs8_private_keys(&mut cur)
-        .next()
-        .ok_or_else(|| ServerError::internal_error("missing private key"))?
-        .map_err(|e| ServerError::internal_error(&format!("parse key: {e:?}")))?;
+    let key = parse_private_key(&key_bytes)?;
 
-    Ok((certs, key.into()))
+    Ok((certs, key))
 }
 
 /// Self-signed certificate pair
@@ -141,10 +223,8 @@ pub async fn update_cert(
         return Err(ServerError::unauthorized(""));
     }
 
-    // Validate inputs
-    let mut cert_cursor = Cursor::new(payload.fullchain.clone());
-    let certs = rustls_pemfile::certs(&mut cert_cursor)
-        .collect::<Result<Vec<_>, _>>()
+    // Validate certificate chain
+    let certs = parse_cert_chain(payload.fullchain.as_bytes())
         .map_err(|e| ServerError::internal_error(&format!("invalid certs: {e}")))?;
 
     if certs.is_empty() {
@@ -153,16 +233,14 @@ pub async fn update_cert(
         ));
     }
 
-    let mut key_cursor = Cursor::new(payload.pvtkey.clone());
-    rustls_pemfile::pkcs8_private_keys(&mut key_cursor)
-        .next()
-        .ok_or_else(|| ServerError::internal_error("invalid private key"))?
-        .map_err(|e| ServerError::internal_error(&format!("parse key: {e}")))?;
+    // Validate private key
+    parse_private_key(payload.pvtkey.as_bytes())
+        .map_err(|e| ServerError::internal_error(&format!("invalid private key: {e}")))?;
 
     // Save to disk
     let dir = PathBuf::from(&state.config.certificate_path);
-    fs::write(dir.join("private.key"), payload.pvtkey).await?;
-    fs::write(dir.join("fullchain.pem"), payload.fullchain).await?;
+    fs::write(dir.join("private.key"), payload.pvtkey.as_bytes()).await?;
+    fs::write(dir.join("fullchain.pem"), payload.fullchain.as_bytes()).await?;
 
     // Notify QUIC + HTTPS loops
     let _ = reload_tx.send(());

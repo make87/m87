@@ -31,8 +31,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Web server and HTTP
 reqwest = { version = "0.12.5", default-features = false, features = ["json", "rustls-tls"] }
 
-# WebSocket
-
 
 # Concurrency and utilities
 dashmap = "6.1.0"

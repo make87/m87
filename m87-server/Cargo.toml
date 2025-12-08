@@ -33,8 +33,7 @@ socket2.workspace = true
 mongodb = "3"
 rcgen = "0.14.5"
 arc-swap = "=1.7.1"
-rustls-pemfile = "2.2.0"
-
+pem-rfc7468 = { version = "1.0.0", features = ["alloc"] }
 # http3 and quic
 quinn.workspace = true
 quinn-proto.workspace = true
