@@ -15,6 +15,41 @@ use crate::models::device::DeviceDoc;
 use crate::response::ServerError;
 use crate::response::ServerResult;
 use crate::util::app_state::AppState;
+use std::task::{Context, Poll};
+
+/// Combined stream that wraps separate read/write halves into a single AsyncRead + AsyncWrite
+struct CombinedStream<R, W> {
+    recv: R,
+    send: W,
+}
+
+impl<R: AsyncRead + Unpin, W: Unpin> AsyncRead for CombinedStream<R, W> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().recv).poll_read(cx, buf)
+    }
+}
+
+impl<R: Unpin, W: AsyncWrite + Unpin> AsyncWrite for CombinedStream<R, W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().send).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().send).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().send).poll_shutdown(cx)
+    }
+}
 
 pub async fn run_quic_endpoint(
     state: AppState,
@@ -383,7 +418,7 @@ async fn handle_forward(
 
     loop {
         // 1. Accept the next client bidi stream
-        let (mut client_send, mut client_recv) = match client_conn.accept_bi().await {
+        let (mut client_send, client_recv) = match client_conn.accept_bi().await {
             Ok(s) => {
                 debug!("handle_forward: accepted client bidi stream");
                 s
@@ -404,7 +439,7 @@ async fn handle_forward(
         tokio::spawn(async move {
             debug!("handle_forward: opening stream to device");
 
-            let (mut dev_send, mut dev_recv) = match dev_conn.open_bi().await {
+            let (dev_send, dev_recv) = match dev_conn.open_bi().await {
                 Ok(s) => {
                     debug!("handle_forward: opened device bidi stream");
                     s
@@ -418,28 +453,33 @@ async fn handle_forward(
 
             debug!("handle_forward: starting bidirectional copy");
 
-            // Use join! to run both directions concurrently without cancelling
-            // the other when one completes. This is critical for proper TCP tunneling.
-            let uplink = async {
-                let result = tokio::io::copy(&mut client_recv, &mut dev_send).await;
-                let _ = dev_send.finish(); // Signal EOF to device
-                result
+            // Wrap streams in a struct that implements AsyncRead + AsyncWrite
+            let mut client_io = CombinedStream {
+                recv: client_recv,
+                send: client_send,
             };
-            let downlink = async {
-                let result = tokio::io::copy(&mut dev_recv, &mut client_send).await;
-                let _ = client_send.shutdown().await; // Signal EOF to client
-                result
+            let mut dev_io = CombinedStream {
+                recv: dev_recv,
+                send: dev_send,
             };
 
-            let (up_result, down_result) = tokio::join!(uplink, downlink);
-
-            match up_result {
-                Ok(bytes) => debug!(bytes, "handle_forward: uplink finished"),
-                Err(e) => warn!("handle_forward: uplink error: {e:?}"),
-            }
-            match down_result {
-                Ok(bytes) => debug!(bytes, "handle_forward: downlink finished"),
-                Err(e) => warn!("handle_forward: downlink error: {e:?}"),
+            // Use copy_bidirectional which properly handles both directions
+            match tokio::io::copy_bidirectional(&mut client_io, &mut dev_io).await {
+                Ok((up, down)) => {
+                    debug!(up, down, "handle_forward: bidirectional copy complete");
+                }
+                Err(e) => {
+                    // Connection errors are expected when streams close
+                    let msg = e.to_string();
+                    if msg.contains("ConnectionLost")
+                        || msg.contains("reset")
+                        || msg.contains("closed")
+                    {
+                        debug!("handle_forward: connection closed: {e}");
+                    } else {
+                        warn!("handle_forward: copy error: {e:?}");
+                    }
+                }
             }
 
             debug!("handle_forward: stream bridge complete");
