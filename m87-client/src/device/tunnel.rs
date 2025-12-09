@@ -202,8 +202,11 @@ async fn tunnel_device_port_tcp(
                     }
                 });
             }
-            _ = conn.closed() => {
-                info!("Connection closed");
+            reason = conn.closed() => {
+                warn!("Connection closed: {:?}", reason);
+                if let Some(close_reason) = conn.close_reason() {
+                    warn!("Close reason: {:?}", close_reason);
+                }
                 break;
             }
 
