@@ -27,13 +27,13 @@ pub struct TunnelSpec {
     pub protocol: Protocols,
 }
 
-// Examples accepted:
-// "8080"
-// "8080:1337"
-// "192.168.1.2:8080:1337"
-// "8080/tcp"
-// "8080:1337/udp"
-// "192.168.1.2:8080:1337/udp"
+// Examples accepted (SSH -L style: local_port:remote_host:remote_port):
+// "8080"                         -> forward local:8080 to remote 127.0.0.1:8080
+// "8080:1337"                    -> forward local:8080 to remote 127.0.0.1:1337
+// "1554:192.168.0.101:554"       -> forward local:1554 to remote 192.168.0.101:554
+// "8080/tcp"                     -> TCP only
+// "8080:1337/udp"                -> UDP only
+// "1554:192.168.0.101:554/tcp"   -> TCP to specific host
 impl TunnelSpec {
     fn from_list(tunnel_specs: Vec<String>) -> Result<Vec<Self>> {
         let mut specs = Vec::new();
@@ -56,19 +56,19 @@ impl TunnelSpec {
                 }
             }
 
-            // parse host:port:port tuple
-            let nums: Vec<&str> = ports.split(':').collect();
-            let (remote_host, remote_port, local_port) = match nums.as_slice() {
-                // "8080"
-                [rp] => (None, rp.parse()?, rp.parse()?),
+            // parse SSH -L style: local_port:remote_host:remote_port
+            let parts: Vec<&str> = ports.split(':').collect();
+            let (local_port, remote_host, remote_port) = match parts.as_slice() {
+                // "8080" -> local:8080 to remote 127.0.0.1:8080
+                [port] => (port.parse()?, None, port.parse()?),
 
-                // "8080:1337"
-                [rp, lp] => (None, rp.parse()?, lp.parse()?),
+                // "8080:1337" -> local:8080 to remote 127.0.0.1:1337
+                [lp, rp] => (lp.parse()?, None, rp.parse()?),
 
-                // "192.168.2.2:8080:1337"
-                [host, rp, lp] => (Some(host.to_string()), rp.parse()?, lp.parse()?),
+                // "1554:192.168.0.101:554" -> local:1554 to remote 192.168.0.101:554
+                [lp, host, rp] => (lp.parse()?, Some(host.to_string()), rp.parse()?),
 
-                _ => return Err(anyhow!("invalid tunnel spec '{}'", token)),
+                _ => return Err(anyhow!("invalid tunnel spec '{}'. Expected format: local_port[:remote_host:remote_port]", token)),
             };
 
             // expand protocols
