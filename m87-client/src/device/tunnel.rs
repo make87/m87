@@ -20,11 +20,21 @@ use tracing::warn;
 use tracing::{error, info};
 
 #[derive(Debug, Clone)]
-pub struct TunnelSpec {
-    pub remote_host: Option<String>,
-    pub remote_port: u16,
-    pub local_port: u16,
-    pub protocol: Protocols,
+pub enum TunnelTarget {
+    Tcp {
+        remote_host: String,
+        remote_port: u16,
+        local_port: u16,
+    },
+    Udp {
+        remote_host: String,
+        remote_port: u16,
+        local_port: u16,
+    },
+    Unix {
+        local_path: String,
+        remote_path: String,
+    },
 }
 
 // Examples accepted:
@@ -34,11 +44,32 @@ pub struct TunnelSpec {
 // "8080/tcp"
 // "8080:1337/udp"
 // "192.168.1.2:8080:1337/udp"
-impl TunnelSpec {
+impl TunnelTarget {
     fn from_list(tunnel_specs: Vec<String>) -> Result<Vec<Self>> {
         let mut specs = Vec::new();
 
         for token in tunnel_specs {
+            if token.starts_with('/') {
+                // "/local.sock"
+                // "/local.sock:/remote.sock"
+                let mut parts = token.split('/');
+                // split_once is better
+                let (local, remote) = if let Some((l, r)) = token.split_once(':') {
+                    (l.to_string(), r.to_string())
+                } else {
+                    let p = token.to_string();
+                    (p.clone(), p)
+                };
+
+                specs.push(TunnelSpec {
+                    remote_host: Some(remote),
+                    remote_port: 0,
+                    local_port: 0,
+                    protocol: Protocols::Unix,
+                });
+                continue;
+            }
+
             // split protocol tail
             let mut parts = token.split('/');
             let ports = parts.next().unwrap();

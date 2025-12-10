@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub enum Protocols {
     Tcp,
     Udp,
+    Unix,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
