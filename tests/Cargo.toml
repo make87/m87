@@ -3,11 +3,15 @@ name = "tests"
 version = "0.0.0-dev0"
 edition = "2021"
 
+[features]
+default = []
+e2e = []
+
 [dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time"] }
-testcontainers = "0.25.2"
-m87-client = { path = "../m87-client" }
-m87-server = { path = "../m87-server" }
-reqwest = "0.11"
-assert_cmd = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "sync"] }
+testcontainers = "0.26.0"
+reqwest = { version = "0.12.25", default-features = false, features = ["rustls-tls"] }
 uuid = { version = "1", features = ["v4"] }
+regex = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
