@@ -2,6 +2,15 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      build_profile:
+        description: 'Build profile'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - dev
 
 permissions:
   contents: write
@@ -38,7 +47,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
   build:
-    name: Build Binaries - ${{ needs.read-version.outputs.version }}
+    name: Build Binaries (${{ inputs.build_profile }}) - ${{ needs.read-version.outputs.version }}
     needs: read-version
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -76,7 +85,11 @@ jobs:
 
       - name: Build ${{ matrix.package }} for ${{ matrix.arch }}
         run: |
-          cargo build --release --package ${{ matrix.package }}
+          if [ "${{ inputs.build_profile }}" = "release" ]; then
+            cargo build --release --package ${{ matrix.package }}
+          else
+            cargo build --package ${{ matrix.package }}
+          fi
 
       - name: Determine binary name
         id: binary-info
@@ -93,14 +106,22 @@ jobs:
           BINARY_NAME="${{ steps.binary-info.outputs.binary_name }}"
           TARGET="${{ matrix.target }}"
 
+          # Determine target directory based on build profile
+          if [ "${{ inputs.build_profile }}" = "release" ]; then
+            TARGET_DIR="target/release"
+          else
+            TARGET_DIR="target/debug"
+          fi
+
           # Copy binary to a standardized location
           mkdir -p dist
-          cp target/release/$BINARY_NAME dist/${BINARY_NAME}-${TARGET}
+          cp ${TARGET_DIR}/$BINARY_NAME dist/${BINARY_NAME}-${TARGET}
 
           # Make it executable
           chmod +x dist/${BINARY_NAME}-${TARGET}
 
-          # Show info (optimized with LTO, stripped, with safety checks)
+          # Show info
+          echo "Build profile: ${{ inputs.build_profile }}"
           echo "Binary: ${BINARY_NAME}-${TARGET}"
           ls -lh dist/${BINARY_NAME}-${TARGET}
           file dist/${BINARY_NAME}-${TARGET}
@@ -165,7 +186,7 @@ jobs:
           if-no-files-found: error
 
   docker-build:
-    name: Build Docker Image - ${{ matrix.arch }}
+    name: Build Docker Image (${{ inputs.build_profile }}) - ${{ matrix.arch }}
     needs: [read-version]
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -206,6 +227,8 @@ jobs:
           tags: ghcr.io/make87/m87-server:${{ needs.read-version.outputs.version }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=https://github.com/make87/make87
+          build-args: |
+            BUILD_PROFILE=${{ inputs.build_profile == 'dev' && 'debug' || 'release' }}
           cache-from: type=registry,ref=ghcr.io/make87/m87-server:buildcache-${{ matrix.arch }}
           cache-to: type=registry,ref=ghcr.io/make87/m87-server:buildcache-${{ matrix.arch }},mode=max
 

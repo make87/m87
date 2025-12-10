@@ -159,7 +159,8 @@ async fn start_docker_proxy(device_name: &str, socket_path: &Path) -> Result<()>
         let device = device_name.to_string();
         tokio::spawn(async move {
             if let Err(e) = handle_docker_connection(stream, &device).await {
-                eprintln!("[ERROR] Docker proxy connection error: {:?}", e);
+                // Print without stack trace - use {} not {:?}
+                eprintln!("[ERROR] Docker proxy connection error: {}", e);
             }
         });
     }
@@ -171,6 +172,7 @@ async fn handle_docker_connection(mut local: UnixStream, device_name: &str) -> R
     use crate::auth::AuthManager;
     use crate::config::Config;
     use crate::devices;
+    use std::io::ErrorKind;
 
     // Get device info
     let dev = devices::list_devices()
@@ -200,9 +202,32 @@ async fn handle_docker_connection(mut local: UnixStream, device_name: &str) -> R
     .context("Failed to connect to Docker stream")?;
 
     // Bidirectional copy: local socket <-> QUIC stream
-    copy_bidirectional(&mut local, &mut io).await?;
-
-    Ok(())
+    match copy_bidirectional(&mut local, &mut io).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // These errors are expected during normal connection lifecycle:
+            let is_expected = matches!(
+                e.kind(),
+                // BrokenPipe: We wrote to a closed socket
+                // Example: Client got its response and closed, but we had more data buffered
+                ErrorKind::BrokenPipe
+                // ConnectionReset: Remote sent TCP RST to forcibly close
+                // Example: Server timeout, docker daemon restart, or NAT dropped the connection
+                    | ErrorKind::ConnectionReset
+                // ConnectionAborted: Connection failed during setup or was locally terminated
+                // Example: TCP handshake timeout, or system resource limits hit
+                    | ErrorKind::ConnectionAborted
+                // UnexpectedEof: Read got 0 bytes when expecting more
+                // Example: Remote closed their write half; common in HTTP when response ends
+                    | ErrorKind::UnexpectedEof
+            );
+            if is_expected {
+                Ok(()) // Treat as normal close
+            } else {
+                Err(e.into())
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -210,6 +235,7 @@ async fn handle_docker_connection(mut local: NamedPipeServer, device_name: &str)
     use crate::auth::AuthManager;
     use crate::config::Config;
     use crate::devices;
+    use std::io::ErrorKind;
 
     // Get device info
     let dev = devices::list_devices()
@@ -235,7 +261,30 @@ async fn handle_docker_connection(mut local: NamedPipeServer, device_name: &str)
     .context("Failed to connect to Docker stream")?;
 
     // Bidirectional copy: local pipe <-> QUIC stream
-    copy_bidirectional(&mut local, &mut io).await?;
-
-    Ok(())
+    match copy_bidirectional(&mut local, &mut io).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // These errors are expected during normal connection lifecycle:
+            let is_expected = matches!(
+                e.kind(),
+                // BrokenPipe: We wrote to a closed pipe
+                // Example: Client got its response and closed, but we had more data buffered
+                ErrorKind::BrokenPipe
+                // ConnectionReset: Remote sent TCP RST to forcibly close
+                // Example: Server timeout, docker daemon restart, or NAT dropped the connection
+                    | ErrorKind::ConnectionReset
+                // ConnectionAborted: Connection failed during setup or was locally terminated
+                // Example: TCP handshake timeout, or system resource limits hit
+                    | ErrorKind::ConnectionAborted
+                // UnexpectedEof: Read got 0 bytes when expecting more
+                // Example: Remote closed their write half; common in HTTP when response ends
+                    | ErrorKind::UnexpectedEof
+            );
+            if is_expected {
+                Ok(()) // Treat as normal close
+            } else {
+                Err(e.into())
+            }
+        }
+    }
 }

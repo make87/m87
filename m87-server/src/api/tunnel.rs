@@ -2,8 +2,6 @@
 
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::time::Duration;
-
 use m87_shared::roles::Role;
 use mongodb::bson::doc;
 use quinn::crypto::rustls::HandshakeData;
@@ -420,24 +418,28 @@ async fn handle_forward(
 
             debug!("handle_forward: starting bidirectional copy");
 
-            let uplink = tokio::io::copy(&mut client_recv, &mut dev_send); // client → device
-            let downlink = tokio::io::copy(&mut dev_recv, &mut client_send); // device → client
+            // Use join! to run both directions concurrently without cancelling
+            // the other when one completes. This is critical for proper TCP tunneling.
+            let uplink = async {
+                let result = tokio::io::copy(&mut client_recv, &mut dev_send).await;
+                let _ = dev_send.finish(); // Signal EOF to device
+                result
+            };
+            let downlink = async {
+                let result = tokio::io::copy(&mut dev_recv, &mut client_send).await;
+                let _ = client_send.shutdown().await; // Signal EOF to client
+                result
+            };
 
-            tokio::select! {
-                result = uplink => {
-                    let _ = dev_send.finish();
-                    match &result {
-                        Ok(bytes) => debug!(bytes, "handle_forward: uplink finished"),
-                        Err(e) => warn!("handle_forward: uplink error: {e:?}"),
-                    }
-                }
-                result = downlink => {
-                    let _ = client_send.shutdown();
-                    match &result {
-                        Ok(bytes) => debug!(bytes, "handle_forward: downlink finished"),
-                        Err(e) => warn!("handle_forward: downlink error: {e:?}"),
-                    }
-                }
+            let (up_result, down_result) = tokio::join!(uplink, downlink);
+
+            match up_result {
+                Ok(bytes) => debug!(bytes, "handle_forward: uplink finished"),
+                Err(e) => warn!("handle_forward: uplink error: {e:?}"),
+            }
+            match down_result {
+                Ok(bytes) => debug!(bytes, "handle_forward: downlink finished"),
+                Err(e) => warn!("handle_forward: downlink error: {e:?}"),
             }
 
             debug!("handle_forward: stream bridge complete");
