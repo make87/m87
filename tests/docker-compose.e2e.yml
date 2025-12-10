@@ -1,0 +1,101 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: e2e-mongo
+    networks:
+      - e2e-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  m87-server:
+    build:
+      context: ..
+      dockerfile: m87-server/Dockerfile
+      args:
+        BUILD_PROFILE: release
+    container_name: e2e-server
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - RUST_LOG=info,m87_server=debug
+      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_DB=e2e-tests
+      - PUBLIC_ADDRESS=m87-server
+      - UNIFIED_PORT=8084
+      - STAGING=1
+      - ADMIN_KEY=e2e-admin-key
+      - CERTIFICATE_PATH=/data/m87/certs/
+    networks:
+      - e2e-network
+    ports:
+      - "8084:8084"
+      - "8084:8084/udp"
+    volumes:
+      - e2e-certs:/data/m87/certs
+    # No health check - distroless image has no shell/curl
+    # Test script will wait for server to be ready
+
+  m87-agent:
+    build:
+      context: ..
+      dockerfile: m87-client/Dockerfile
+      args:
+        BUILD_PROFILE: release
+    container_name: e2e-agent
+    depends_on:
+      - m87-server
+    environment:
+      - RUST_LOG=info,m87_client=debug
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - agent-config:/root/.config/m87
+    networks:
+      - e2e-network
+    # Agent will be started manually via test script after config is set up
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["sleep infinity"]
+
+  m87-cli:
+    build:
+      context: ..
+      dockerfile: m87-client/Dockerfile
+      args:
+        BUILD_PROFILE: release
+    container_name: e2e-cli
+    depends_on:
+      - m87-server
+    environment:
+      - RUST_LOG=info,m87_client=debug
+      - M87_API_KEY=e2e-admin-key
+    volumes:
+      - cli-config:/root/.config/m87
+    networks:
+      - e2e-network
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["sleep infinity"]
+
+  echo-server:
+    image: alpine:latest
+    container_name: e2e-echo
+    networks:
+      - e2e-network
+    command: >
+      sh -c "apk add --no-cache socat netcat-openbsd && socat TCP-LISTEN:9999,fork,reuseaddr EXEC:cat"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9999"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+networks:
+  e2e-network:
+    driver: bridge
+
+volumes:
+  e2e-certs:
+  agent-config:
+  cli-config:

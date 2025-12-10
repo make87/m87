@@ -106,7 +106,10 @@ impl Claims {
         T: AccessControlled + Unpin + Send + Sync + serde::de::DeserializeOwned,
     {
         let mut combined = filter.clone();
-        combined.extend(T::access_filter(&self.get_scopes()));
+        // Admins bypass access control filtering
+        if !self.is_admin {
+            combined.extend(T::access_filter(&self.get_scopes()));
+        }
         let doc = coll
             .find_one(combined)
             .await
@@ -118,7 +121,12 @@ impl Claims {
     where
         T: AccessControlled + Unpin + Send + Sync + serde::de::DeserializeOwned,
     {
-        let filter = T::access_filter(&self.get_scopes());
+        // Admins bypass access control filtering
+        let filter = if self.is_admin {
+            Document::new()
+        } else {
+            T::access_filter(&self.get_scopes())
+        };
         let count = coll
             .count_documents(filter)
             .await
@@ -134,7 +142,12 @@ impl Claims {
     where
         T: AccessControlled + Unpin + Send + Sync + serde::de::DeserializeOwned,
     {
-        let filter = T::access_filter(&self.get_scopes());
+        // Admins bypass access control filtering
+        let filter = if self.is_admin {
+            Document::new()
+        } else {
+            T::access_filter(&self.get_scopes())
+        };
 
         let options = FindOptions::builder()
             .skip(Some(pagination.offset))
@@ -167,7 +180,10 @@ impl Claims {
         T: AccessControlled + Unpin + Send + Sync + serde::de::DeserializeOwned,
     {
         let mut filter = id_filter.clone();
-        filter.extend(T::access_filter(&self.get_scopes()));
+        // Admins bypass access control filtering
+        if !self.is_admin {
+            filter.extend(T::access_filter(&self.get_scopes()));
+        }
         let res = coll
             .update_one(filter, update)
             .await
@@ -194,7 +210,10 @@ impl Claims {
         T: AccessControlled + Unpin + Send + Sync + serde::de::DeserializeOwned,
     {
         let mut filter = id_filter.clone();
-        filter.extend(T::access_filter(&self.get_scopes()));
+        // Admins bypass access control filtering
+        if !self.is_admin {
+            filter.extend(T::access_filter(&self.get_scopes()));
+        }
         let res = coll
             .delete_one(filter)
             .await
