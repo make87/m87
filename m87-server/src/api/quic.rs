@@ -3,7 +3,6 @@ use futures::future::{AbortHandle, Abortable};
 use governor::{Quota, RateLimiter};
 use m87_shared::roles::Role;
 use mongodb::bson::doc;
-use quinn::crypto::rustls::HandshakeData;
 use quinn::{ConnectionError, Endpoint};
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
@@ -14,6 +13,7 @@ use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
+use crate::api::client_connection::ClientConn;
 use crate::auth::claims::Claims;
 use crate::models::device::DeviceDoc;
 use crate::response::ServerError;
@@ -57,25 +57,6 @@ pub async fn run_quic_endpoint(
                             tokio::spawn(async move {
                                 match incoming_conn.await {
                                     Ok(conn) => {
-                                        let alpn = conn.handshake_data()
-                                            .and_then(|d| {
-                                                d.downcast_ref::<HandshakeData>()
-                                                    .and_then(|h| h.protocol.clone())
-                                            })
-                                            .unwrap_or_else(|| Vec::new());
-                                        if alpn == b"h3" {
-                                            // WebTransport candidate
-                                            if let Ok(req) = web_transport_quinn::Request::accept(conn.clone()).await {
-                                                if let Ok(session) = req.ok().await {
-                                                    let _ = handle_webtransport_forward(session, state_cl).await;
-                                                    return;
-                                                }
-                                            }
-                                            // If WT parsing fails → close quickly, do NOT fall back
-                                            conn.close(0u32.into(), b"invalid-wt");
-                                            return;
-                                        }
-
                                         // Raw QUIC path (CLI, tunnels, forwards)
                                         let _ = handle_quic_connection(conn.clone(), state_cl).await;
                                         conn.close(0u32.into(), b"");
@@ -270,136 +251,6 @@ async fn handle_control_tunnel(
     Ok(())
 }
 
-pub async fn handle_webtransport_forward(
-    session: web_transport_quinn::Session,
-    state: AppState,
-) -> ServerResult<()> {
-    // Extract device_id from URL: device_id.serverurl
-    let url = session.url();
-    let device_id = url
-        .host()
-        .unwrap()
-        .to_string()
-        .split('.')
-        .next()
-        .unwrap()
-        .to_string();
-
-    let (mut send, mut recv) = session
-        .accept_bi()
-        .await
-        .map_err(|e| ServerError::bad_request(&format!("WT auth stream failed: {:?}", e)))?;
-
-    let mut len_buf = [0u8; 2];
-    recv.read_exact(&mut len_buf)
-        .await
-        .map_err(|_| ServerError::missing_token("missing token prefix"))?;
-    let len = u16::from_be_bytes(len_buf) as usize;
-
-    let mut token_buf = vec![0u8; len];
-    recv.read_exact(&mut token_buf)
-        .await
-        .map_err(|_| ServerError::missing_token("token read failed"))?;
-
-    let token = String::from_utf8(token_buf)
-        .map_err(|_| ServerError::bad_request("token not valid UTF-8"))?;
-    let claims = Claims::from_bearer_or_key(&token, &state.db, &state.config).await?;
-
-    claims
-        .find_one_with_scope_and_role::<DeviceDoc>(
-            &state.db.devices(),
-            doc! { "short_id": &device_id },
-            Role::Editor,
-        )
-        .await?
-        .ok_or_else(|| ServerError::not_found("device not found"))?;
-
-    if !state.relay.has_tunnel(&device_id).await {
-        return Err(ServerError::not_found("device tunnel not connected"));
-    };
-    let fut_session = session.clone();
-    tokio::spawn(async move {
-        if let Err(e) = handle_forward_supervised(
-            ClientConn::Web(fut_session),
-            device_id.clone(),
-            state.clone(),
-        )
-        .await
-        {
-            warn!(%device_id, "WT forward error: {:?}", e);
-        }
-    });
-
-    let _ = send.write_all(b"OK").await;
-
-    Ok(())
-}
-
-#[derive(Clone)]
-pub enum ClientConn {
-    Raw(quinn::Connection),
-    Web(web_transport_quinn::Session),
-}
-
-impl ClientConn {
-    pub async fn accept_bi(
-        &self,
-    ) -> ServerResult<(
-        Pin<Box<dyn AsyncWrite + Send>>,
-        Pin<Box<dyn AsyncRead + Send>>,
-    )> {
-        match self {
-            ClientConn::Raw(conn) => {
-                let (send, recv) = conn.accept_bi().await?;
-                Ok((Box::pin(send), Box::pin(recv)))
-            }
-            ClientConn::Web(session) => {
-                let (send, recv) = session
-                    .accept_bi()
-                    .await
-                    .map_err(|e| ServerError::internal_error(&format!("{:?}", e)))?;
-                Ok((Box::pin(send), Box::pin(recv)))
-            }
-        }
-    }
-
-    pub fn send_datagram(&self, data: Bytes) -> io::Result<()> {
-        match self {
-            ClientConn::Raw(conn) => conn
-                .send_datagram(data.into())
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
-            ClientConn::Web(session) => session
-                .send_datagram(data.into())
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
-        }
-    }
-
-    pub async fn read_datagram(&self) -> io::Result<Bytes> {
-        match self {
-            ClientConn::Raw(conn) => conn
-                .read_datagram()
-                .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
-            ClientConn::Web(session) => session
-                .read_datagram()
-                .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
-        }
-    }
-
-    pub async fn closed(&self) {
-        match self {
-            ClientConn::Raw(conn) => {
-                let _ = conn.closed().await;
-            }
-            ClientConn::Web(session) => {
-                // adjust if the actual API name differs
-                let _ = session.closed().await;
-            }
-        }
-    }
-}
-
 enum ForwardEnd {
     ClientClosed,
     DeviceClosed,
@@ -422,7 +273,7 @@ async fn wait_for_device_conn(
     }
 }
 
-async fn handle_forward_supervised(
+pub async fn handle_forward_supervised(
     client_conn: ClientConn,
     device_id: String,
     state: AppState,

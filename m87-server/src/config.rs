@@ -10,6 +10,10 @@ pub struct OAuthConfig {
     pub audience: String,
 }
 
+fn default_webtransport_port() -> u16 {
+    8085
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub mongo_uri: String,
@@ -17,6 +21,8 @@ pub struct AppConfig {
     pub oauth: OAuthConfig,
     pub public_address: String,
     pub unified_port: u16,
+    #[serde(default = "default_webtransport_port")]
+    pub webtransport_port: u16,
     pub admin_key: Option<String>,
     pub is_staging: bool,
     pub admin_emails: Vec<String>,
@@ -63,6 +69,11 @@ impl AppConfig {
         let certificate_path = std::env::var("CERTIFICATE_PATH")
             .unwrap_or_else(|_| "/tmp/data/m87/certs/".to_string());
 
+        let webtransport_port = std::env::var("WEBTRANSPORT_PORT")
+            .unwrap_or_else(|_| "8085".into())
+            .parse()
+            .unwrap();
+
         let admin_key = std::env::var("ADMIN_KEY").ok();
 
         Ok(Self {
@@ -71,6 +82,7 @@ impl AppConfig {
             oauth: OAuthConfig { issuer, audience },
             public_address,
             unified_port,
+            webtransport_port,
             is_staging,
             admin_emails,
             users_need_approval,

@@ -38,7 +38,10 @@ pem = "3.0.6"
 # http3 and quic
 quinn.workspace = true
 quinn-proto.workspace = true
-web-transport-quinn = "0.10.1"
+h3 = { version = "0.0.8" }
+h3-quinn = { version = "0.0.10", features = [ "datagram"] }
+h3-webtransport = "0.1.2"
+h3-datagram = "0.0.2"
 # for rate limiting
 governor = "0.10.2"
 

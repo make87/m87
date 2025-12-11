@@ -23,7 +23,8 @@ use crate::{
         auth,
         certificate::{create_tls_config, update_cert},
         device,
-        tunnel::run_quic_endpoint,
+        quic::run_quic_endpoint,
+        web_transport::run_webtransport,
     },
     config::AppConfig,
     db::Mongo,
@@ -122,8 +123,8 @@ pub async fn serve(
 
     // ===== QUIC SERVER =====
     let quic_task = tokio::spawn(run_quic_endpoint(state.clone(), reload_rx.clone()));
-
-    let _ = tokio::join!(https_task, quic_task);
+    let wt_task = tokio::spawn(run_webtransport(state.clone(), reload_rx.clone()));
+    let _ = tokio::join!(https_task, quic_task, wt_task);
 
     Ok(())
 }
