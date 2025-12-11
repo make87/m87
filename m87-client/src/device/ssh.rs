@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use tokio::{io, net::TcpListener};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::{
     auth::AuthManager,
@@ -42,14 +42,17 @@ pub async fn tunnel_device_ssh(device_name: &str, local_port: u16) -> Result<()>
         tokio::select! {
             Ok((mut local_stream, addr)) = listener.accept() => {
                 info!("Local SSH connection from {addr}");
+                debug!("Opening QUIC stream for SSH...");
                 let mut remote_io = open_quic_stream(&conn, StreamType::Ssh {
                     token: token.to_string(),
                 }).await?;
+                debug!("QUIC stream opened, starting bidirectional copy...");
 
                 tokio::spawn(async move {
+                    debug!("SSH tunnel copy task started for {addr}");
                     let res = io::copy_bidirectional(&mut local_stream, &mut remote_io).await;
                     match res {
-                        Ok(_) => info!("SSH tunnel {addr} closed"),
+                        Ok((to_remote, to_local)) => info!("SSH tunnel {addr} closed (sent {to_remote}, recv {to_local})"),
                         Err(e) => error!("SSH tunnel {addr} error: {e:?}"),
                     }
                 });
