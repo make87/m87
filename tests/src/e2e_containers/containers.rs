@@ -312,4 +312,16 @@ impl E2EInfra {
         let stdout = result.stdout_to_vec().await?;
         Ok(String::from_utf8_lossy(&stdout).to_string())
     }
+
+    /// Get server stdout logs
+    pub async fn get_server_logs(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let stdout = self.server.stdout_to_vec().await?;
+        let stderr = self.server.stderr_to_vec().await?;
+        let combined = format!(
+            "=== SERVER STDOUT ===\n{}\n=== SERVER STDERR ===\n{}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        Ok(combined)
+    }
 }

@@ -235,6 +235,15 @@ impl Claims {
     where
         T: AccessControlled + serde::de::DeserializeOwned + Unpin + Send + Sync,
     {
+        // Admins bypass access control filtering
+        if self.is_admin {
+            let doc = coll
+                .find_one(base_filter)
+                .await
+                .map_err(|_| ServerError::internal_error("DB query failed"))?;
+            return Ok(doc);
+        }
+
         // Get all scopes for which user has >= required_role
         let allowed_scopes: Vec<String> = self
             .roles

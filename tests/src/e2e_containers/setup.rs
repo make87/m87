@@ -13,18 +13,8 @@ pub const CLIENT_IMAGE_TAG: &str = "e2e";
 pub const SERVER_IMAGE: &str = "m87-server:e2e";
 pub const CLIENT_IMAGE: &str = "m87-client:e2e";
 
-/// Check if a Docker image exists locally
-fn image_exists(image: &str) -> bool {
-    Command::new("docker")
-        .args(["image", "inspect", image])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 /// Build Docker images for E2E tests (runs once per test run)
+/// Always rebuilds to pick up code changes - Docker layer caching makes this fast when unchanged
 pub fn ensure_images_built() -> Result<(), String> {
     let mut build_error: Option<String> = None;
 
@@ -34,75 +24,65 @@ pub fn ensure_images_built() -> Result<(), String> {
             .map(|p| p.parent().map(|p| p.to_path_buf()).unwrap_or(p))
             .unwrap_or_else(|_| std::path::PathBuf::from(".."));
 
-        // Check and build server image
-        if image_exists(SERVER_IMAGE) {
-            tracing::info!("Server image {} already exists, skipping build", SERVER_IMAGE);
-        } else {
-            tracing::info!("Building {} (this may take several minutes)...", SERVER_IMAGE);
-            let status = Command::new("docker")
-                .args([
-                    "build",
-                    "-t",
-                    SERVER_IMAGE,
-                    "-f",
-                    "m87-server/Dockerfile",
-                    "--build-arg",
-                    "BUILD_PROFILE=release",
-                    "--progress=plain",
-                    ".",
-                ])
-                .current_dir(&workspace_root)
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status();
+        // Build server image
+        tracing::info!("Building {} (Docker cache will speed up if unchanged)...", SERVER_IMAGE);
+        let status = Command::new("docker")
+            .args([
+                "build",
+                "-t",
+                SERVER_IMAGE,
+                "-f",
+                "m87-server/Dockerfile",
+                "--build-arg",
+                "BUILD_PROFILE=release",
+                ".",
+            ])
+            .current_dir(&workspace_root)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status();
 
-            match status {
-                Ok(s) if !s.success() => {
-                    build_error = Some(format!("Failed to build server image (exit code: {:?})", s.code()));
-                    return;
-                }
-                Err(e) => {
-                    build_error = Some(format!("Failed to run docker build for server: {}", e));
-                    return;
-                }
-                _ => {
-                    tracing::info!("Server image built successfully");
-                }
+        match status {
+            Ok(s) if !s.success() => {
+                build_error = Some(format!("Failed to build server image (exit code: {:?})", s.code()));
+                return;
+            }
+            Err(e) => {
+                build_error = Some(format!("Failed to run docker build for server: {}", e));
+                return;
+            }
+            _ => {
+                tracing::info!("Server image built successfully");
             }
         }
 
-        // Check and build client image
-        if image_exists(CLIENT_IMAGE) {
-            tracing::info!("Client image {} already exists, skipping build", CLIENT_IMAGE);
-        } else {
-            tracing::info!("Building {} (this may take several minutes)...", CLIENT_IMAGE);
-            let status = Command::new("docker")
-                .args([
-                    "build",
-                    "-t",
-                    CLIENT_IMAGE,
-                    "-f",
-                    "m87-client/Dockerfile",
-                    "--build-arg",
-                    "BUILD_PROFILE=release",
-                    "--progress=plain",
-                    ".",
-                ])
-                .current_dir(&workspace_root)
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status();
+        // Build client image
+        tracing::info!("Building {} (Docker cache will speed up if unchanged)...", CLIENT_IMAGE);
+        let status = Command::new("docker")
+            .args([
+                "build",
+                "-t",
+                CLIENT_IMAGE,
+                "-f",
+                "m87-client/Dockerfile",
+                "--build-arg",
+                "BUILD_PROFILE=release",
+                ".",
+            ])
+            .current_dir(&workspace_root)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status();
 
-            match status {
-                Ok(s) if !s.success() => {
-                    build_error = Some(format!("Failed to build client image (exit code: {:?})", s.code()));
-                }
-                Err(e) => {
-                    build_error = Some(format!("Failed to run docker build for client: {}", e));
-                }
-                _ => {
-                    tracing::info!("Client image built successfully");
-                }
+        match status {
+            Ok(s) if !s.success() => {
+                build_error = Some(format!("Failed to build client image (exit code: {:?})", s.code()));
+            }
+            Err(e) => {
+                build_error = Some(format!("Failed to run docker build for client: {}", e));
+            }
+            _ => {
+                tracing::info!("Client image built successfully");
             }
         }
     });
