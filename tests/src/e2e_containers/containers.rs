@@ -7,7 +7,11 @@ use testcontainers::{
 use tokio::time::sleep;
 use uuid::Uuid;
 
-use super::setup::{CLIENT_IMAGE_NAME, CLIENT_IMAGE_TAG, NETWORK_NAME, SERVER_IMAGE_NAME, SERVER_IMAGE_TAG};
+use super::helpers::E2EError;
+use super::setup::{
+    ensure_images_built, ensure_network_created, CLIENT_IMAGE_NAME, CLIENT_IMAGE_TAG, NETWORK_NAME,
+    SERVER_IMAGE_NAME, SERVER_IMAGE_TAG,
+};
 
 const ADMIN_KEY: &str = "e2e-admin-key";
 
@@ -22,6 +26,23 @@ pub struct E2EInfra {
 }
 
 impl E2EInfra {
+    /// Initialize test infrastructure with tracing, images, and network
+    ///
+    /// This is the preferred entry point for tests. It sets up tracing,
+    /// ensures Docker images are built, creates the network, and starts containers.
+    pub async fn init() -> Result<Self, E2EError> {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("info")
+            .try_init();
+
+        ensure_images_built().map_err(|e| E2EError::Setup(e.to_string()))?;
+        ensure_network_created().map_err(|e| E2EError::Setup(e.to_string()))?;
+
+        Self::start()
+            .await
+            .map_err(|e| E2EError::Setup(e.to_string()))
+    }
+
     /// Start all E2E infrastructure containers
     pub async fn start() -> Result<Self, Box<dyn std::error::Error>> {
         // Generate unique run ID for this test
