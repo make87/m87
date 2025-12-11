@@ -281,31 +281,31 @@ impl server::Handler for M87SshHandler {
         let handle = self.handle.clone().unwrap();
 
         tokio::spawn(async move {
-            let mut buf = [0u8; 8192];
-
             loop {
-                let n = task::spawn_blocking({
+                let read_result = task::spawn_blocking({
                     let pty = pty.clone();
                     move || {
                         use std::io::Read;
+                        let mut buf = [0u8; 8192];
                         let mut guard = pty.blocking_lock();
-                        guard.reader.read(&mut buf)
+                        match guard.reader.read(&mut buf) {
+                            Ok(0) => None,
+                            Ok(n) => Some(buf[..n].to_vec()),
+                            Err(_) => None,
+                        }
                     }
                 })
                 .await
-                .unwrap_or(Ok(0))
-                .unwrap_or(0);
+                .ok()
+                .flatten();
 
-                if n == 0 {
-                    break;
-                }
-
-                if handle
-                    .data(channel, buf[..n].to_vec().into())
-                    .await
-                    .is_err()
-                {
-                    break;
+                match read_result {
+                    Some(data) => {
+                        if handle.data(channel, data.into()).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
                 }
             }
 
