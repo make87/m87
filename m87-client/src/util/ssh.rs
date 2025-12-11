@@ -1,11 +1,13 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, io::Write, path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use base64::Engine;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use russh::keys::ssh_key::rand_core::OsRng;
 use russh::keys::PublicKey;
+use sha1::{Digest, Sha1};
 use tokio::{io, net::TcpStream, process::Command, sync::Mutex, task};
-use tracing::error;
+use tracing::{error, info, warn};
 
 use russh::server::{self, Auth, Config as ServerConfig, Handle, Msg, Session};
 use russh::{Channel, ChannelId};
@@ -105,8 +107,84 @@ impl M87SshHandler {
     }
 }
 
-/// Build a minimal SSH server config (host key handled outside).
-pub fn make_server_config() -> Arc<ServerConfig> {
+/// Extract a stable manager identifier from the JWT token.
+/// Returns a 16-character URL-safe base64 hash of the `sub` claim (or the whole token as fallback).
+fn manager_id_from_token(token: &str) -> String {
+    // Decode JWT payload (middle segment) without verification
+    if let Some(payload) = token.split('.').nth(1) {
+        if let Ok(decoded) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) {
+            if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&decoded) {
+                if let Some(sub) = claims.get("sub").and_then(|v| v.as_str()) {
+                    let mut hasher = Sha1::new();
+                    hasher.update(sub.as_bytes());
+                    let hash = hasher.finalize();
+                    // Use URL-safe base64 and take first 12 chars for a filesystem-safe identifier
+                    return base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(&hash[..9])[..12]
+                        .to_string();
+                }
+            }
+    }
+    }
+    // Fallback: hash the whole token
+    let mut hasher = Sha1::new();
+    hasher.update(token.as_bytes());
+    let hash = hasher.finalize();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(&hash[..9])[..12]
+        .to_string()
+}
+
+/// Get or create the SSH keys directory.
+fn ssh_keys_dir() -> Result<PathBuf> {
+    let dir = dirs::config_dir()
+        .ok_or_else(|| anyhow!("No config directory found"))?
+        .join("m87")
+        .join("ssh_keys");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Load an existing SSH host key or generate a new one for a specific manager.
+fn load_or_generate_host_key(manager_id: &str) -> Result<russh::keys::PrivateKey> {
+    let key_path = ssh_keys_dir()?.join(format!("host_{}.pem", manager_id));
+
+    if key_path.exists() {
+        let pem = std::fs::read_to_string(&key_path)?;
+        let key = russh::keys::PrivateKey::from_openssh(&pem)
+            .map_err(|e| anyhow!("Failed to parse host key: {}", e))?;
+        info!("Loaded existing SSH host key for manager {}", manager_id);
+        Ok(key)
+    } else {
+        let key = russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519)
+            .map_err(|e| anyhow!("Failed to generate key: {}", e))?;
+
+        // Serialize to OpenSSH format
+        let pem = key
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .map_err(|e| anyhow!("Failed to serialize key: {}", e))?;
+
+        // Save with restricted permissions (0o600 on Unix)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .mode(0o600)
+                .open(&key_path)?
+                .write_all(pem.as_bytes())?;
+        }
+        #[cfg(not(unix))]
+        std::fs::write(&key_path, &pem)?;
+
+        info!("Generated new SSH host key for manager {}", manager_id);
+        Ok(key)
+    }
+}
+
+/// Build a minimal SSH server config with persistent host key per manager.
+pub fn make_server_config(token: &str) -> Arc<ServerConfig> {
     let mut config = ServerConfig::default();
     config.server_id = russh::SshId::Standard("SSH-2.0-m87-ssh".to_string());
     config.inactivity_timeout = Some(Duration::from_secs(600));
@@ -115,8 +193,12 @@ pub fn make_server_config() -> Arc<ServerConfig> {
     config.channel_buffer_size = 4 * 1024 * 1024; // OK > 1MB
     config.maximum_packet_size = 65535; // MUST stay <= 65535
 
-    let host_key = russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519)
-        .expect("failed to generate SSH host key");
+    let manager_id = manager_id_from_token(token);
+    let host_key = load_or_generate_host_key(&manager_id).unwrap_or_else(|e| {
+        warn!("Failed to load/save host key: {}, using ephemeral key", e);
+        russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519)
+            .expect("failed to generate SSH host key")
+    });
     config.keys.push(host_key);
     Arc::new(config)
 }

@@ -63,10 +63,10 @@ pub async fn handle_incoming_stream(
             debug!("router: dispatching to docker handler");
             handle_docker_io(&mut io).await;
         }
-        StreamType::Ssh { .. } => {
+        StreamType::Ssh { token } => {
             debug!("router: dispatching to ssh handler");
             tokio::spawn(async move {
-                handle_ssh_io(io).await;
+                handle_ssh_io(io, token).await;
             });
             return Ok(());
         }

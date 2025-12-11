@@ -5,11 +5,11 @@ use crate::{
     util::ssh::{M87SshHandler, make_server_config},
 };
 
-pub async fn handle_ssh_io(io: QuicIo) {
+pub async fn handle_ssh_io(io: QuicIo, token: String) {
     let home_dir = dirs::home_dir().unwrap();
     let home_dir = home_dir.to_path_buf();
 
-    let config = make_server_config();
+    let config = make_server_config(&token);
     let handler = M87SshHandler::new(home_dir);
 
     match server::run_stream(config, io, handler).await {
