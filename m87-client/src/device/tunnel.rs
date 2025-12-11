@@ -99,11 +99,17 @@ async fn tunnel_device_port_tcp(
     tunnel_spec: &TcpTarget,
     trust_invalid_server_cert: bool,
 ) -> Result<()> {
+    debug!(
+        "Binding TCP listener on 127.0.0.1:{}",
+        tunnel_spec.local_port
+    );
     let listener = TcpListener::bind(("127.0.0.1", tunnel_spec.local_port)).await?;
     let remote_host = tunnel_spec.remote_host.clone();
 
+    debug!("Connecting to QUIC server...");
     let (_endpoint, conn) =
         connect_quic_only(host_name, token, device_short_id, trust_invalid_server_cert).await?;
+    debug!("QUIC connection established, entering accept loop");
 
     info!(
         "TCP forward: 127.0.0.1:{} → {}/{}:{}",

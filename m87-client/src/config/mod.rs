@@ -30,6 +30,7 @@ pub struct Config {
     pub make87_api_url: String,
     #[serde(default = "default_make87_app_url")]
     pub make87_app_url: String,
+    #[serde(default = "get_default_device_id")]
     pub device_id: String,
     pub log_level: String,
     #[serde(default = "default_heartbeat_interval")]
