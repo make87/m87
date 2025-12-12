@@ -12,8 +12,8 @@ m87 exec allows you to execute commands on remote devices, with optional stdin f
 # Run a simple command
 m87 <device> exec -- ls -la
 
-# Run with stdin forwarding (for prompts)
-m87 <device> exec -i -- sudo apt upgrade
+# Run with TTY for sudo (requires password prompt)
+m87 <device> exec -it -- sudo apt upgrade
 
 # Run with TTY for interactive apps
 m87 <device> exec -it -- vim config.yaml
@@ -24,9 +24,9 @@ m87 <device> exec -it -- vim config.yaml
 | Flags | Mode | Use Case |
 |-------|------|----------|
 | (none) | Output only | Simple commands, scripts |
-| `-i` | Stdin forwarding | Respond to prompts (Y/n) |
+| `-i` | Stdin forwarding | Simple prompts (Y/n), piped input |
 | `-t` | TTY read-only | Colored output, watch mode |
-| `-it` | Full TTY | TUI apps (vim, htop, less) |
+| `-it` | Full TTY | sudo, TUI apps (vim, htop, less) |
 
 ## Examples
 
@@ -35,8 +35,8 @@ m87 <device> exec -it -- vim config.yaml
 # Check disk usage
 m87 rpi exec -- df -h
 
-# Update packages (needs stdin for confirmation)
-m87 rpi exec -i -- 'sudo apt update && sudo apt upgrade'
+# Update packages (needs TTY for sudo password)
+m87 rpi exec -it -- 'sudo apt update && sudo apt upgrade'
 
 # View system logs
 m87 rpi exec -- journalctl -n 100
@@ -91,6 +91,8 @@ m87 rpi exec -- 'docker kill $(docker ps -q)'  # Correct: expands on remote
 
 - `-i, --stdin` - Keep stdin open for responding to prompts
 - `-t, --tty` - Allocate pseudo-TTY for TUI applications
+
+**Note:** Commands that require a terminal for password input (like `sudo`, `passwd`) need `-it`, not just `-i`. The `-i` flag only forwards stdin as piped input, while `-t` allocates a proper pseudo-TTY that these programs require.
 
 ## Ctrl+C Behavior
 
