@@ -1,4 +1,9 @@
 //! Filesystem E2E tests (cp and sync commands)
+//!
+//! Path conventions (scp-style):
+//! - `device:file.txt` → relative path, resolves to ~/file.txt (home directory)
+//! - `device:~/file.txt` → explicit home directory
+//! - `device:/absolute/path` → absolute path on the remote filesystem
 
 use super::containers::E2EInfra;
 use super::fixtures::{AgentRunner, DeviceRegistration};
@@ -10,7 +15,7 @@ use super::helpers::{exec_shell, read_log, E2EError, SniSetup};
 /// 2. Setup SNI for CLI tunnel
 /// 3. Start agent with control tunnel
 /// 4. Create test file on CLI
-/// 5. Run cp command to copy to agent
+/// 5. Run cp command to copy to agent (using scp-style relative path)
 /// 6. Verify file exists on agent with correct content
 #[tokio::test]
 async fn test_cp_local_to_remote() -> Result<(), E2EError> {
@@ -50,13 +55,13 @@ async fn test_cp_local_to_remote() -> Result<(), E2EError> {
     tracing::info!("Source file content: {}", source_content);
 
     // Step 5: Run cp command to copy file to agent
-    // Note: The SFTP server uses home_dir as root, so paths are relative to /root
-    // Requesting ":/test-dest.txt" will write to "/root/test-dest.txt" on agent
+    // Using scp-style relative path: "device:test-dest.txt" resolves to ~/test-dest.txt
+    // In Docker container running as root, ~ = /root
     tracing::info!("Copying file from CLI to agent...");
     let cp_output = exec_shell(
         &infra.cli,
         &format!(
-            "RUST_LOG=debug m87 cp /tmp/test-source.txt {}:/test-dest.txt 2>&1; echo \"Exit code: $?\"",
+            "RUST_LOG=debug m87 cp /tmp/test-source.txt {}:test-dest.txt 2>&1; echo \"Exit code: $?\"",
             device.name
         ),
     )
@@ -71,7 +76,7 @@ async fn test_cp_local_to_remote() -> Result<(), E2EError> {
     tracing::info!("Agent run log:\n{}", agent_log);
 
     // Step 6: Verify file exists on agent with correct content
-    // The SFTP root is home_dir (/root in container), so file is at /root/test-dest.txt
+    // Relative path "test-dest.txt" resolves to ~/test-dest.txt = /root/test-dest.txt
     tracing::info!("Verifying file on agent...");
 
     // First check if file exists at expected location
@@ -97,7 +102,7 @@ async fn test_cp_local_to_remote() -> Result<(), E2EError> {
 /// 2. Setup SNI for CLI tunnel
 /// 3. Start agent with control tunnel
 /// 4. Create test file on agent
-/// 5. Run cp command to copy to CLI
+/// 5. Run cp command to copy to CLI (using scp-style relative path)
 /// 6. Verify file exists on CLI with correct content
 #[tokio::test]
 async fn test_cp_remote_to_local() -> Result<(), E2EError> {
@@ -124,8 +129,8 @@ async fn test_cp_remote_to_local() -> Result<(), E2EError> {
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // Step 4: Create source file on agent container
-    // Note: SFTP root is /root, so we need to create file at /root/agent-source.txt
-    // for it to be accessible via SFTP as ":/agent-source.txt"
+    // File at /root/agent-source.txt is accessible via relative path "agent-source.txt"
+    // (scp-style: relative paths resolve to home directory)
     tracing::info!("Creating test file on agent...");
     exec_shell(
         &infra.agent,
@@ -138,12 +143,12 @@ async fn test_cp_remote_to_local() -> Result<(), E2EError> {
     tracing::info!("Source file content: {}", source_content);
 
     // Step 5: Run cp command to copy file to CLI
-    // Note: The SFTP path ":/agent-source.txt" maps to /root/agent-source.txt on agent
+    // Using scp-style relative path: "device:agent-source.txt" resolves to ~/agent-source.txt
     tracing::info!("Copying file from agent to CLI...");
     let cp_output = exec_shell(
         &infra.cli,
         &format!(
-            "m87 cp {}:/agent-source.txt /tmp/local-copy.txt 2>&1",
+            "m87 cp {}:agent-source.txt /tmp/local-copy.txt 2>&1",
             device.name
         ),
     )
@@ -171,9 +176,8 @@ async fn test_cp_remote_to_local() -> Result<(), E2EError> {
 /// 2. Setup SNI for CLI tunnel
 /// 3. Start agent with control tunnel
 /// 4. Create test directory with multiple files on CLI
-/// 5. Create destination directory on agent
-/// 6. Run sync command
-/// 7. Verify all files exist on agent with correct content
+/// 5. Run sync command (destination auto-created)
+/// 6. Verify all files exist on agent with correct content
 #[tokio::test]
 async fn test_sync_directory() -> Result<(), E2EError> {
     let infra = E2EInfra::init().await?;
@@ -213,27 +217,22 @@ async fn test_sync_directory() -> Result<(), E2EError> {
     let source_files = exec_shell(&infra.cli, "find /tmp/sync-source -type f | sort").await?;
     tracing::info!("Source files: {}", source_files);
 
-    // Step 5: Create destination directory on agent
-    // Note: SFTP root is /root, so we create /root/sync-dest
-    // and use ":/sync-dest/" in the sync command
-    tracing::info!("Creating destination directory on agent...");
-    exec_shell(&infra.agent, "mkdir -p /root/sync-dest").await?;
-
-    // Step 6: Run sync command
-    // Note: ":/sync-dest/" maps to /root/sync-dest/ on agent
+    // Step 5: Run sync command
+    // Using scp-style relative path: "device:sync-dest/" resolves to ~/sync-dest/
+    // The destination directory will be auto-created if it doesn't exist (rsync-style)
     tracing::info!("Syncing directory from CLI to agent...");
     let sync_output = exec_shell(
         &infra.cli,
         &format!(
-            "m87 sync /tmp/sync-source/ {}:/sync-dest/ 2>&1",
+            "m87 sync /tmp/sync-source/ {}:sync-dest/ 2>&1",
             device.name
         ),
     )
     .await?;
     tracing::info!("sync output: {}", sync_output);
 
-    // Step 7: Verify all files exist on agent with correct content
-    // Files are written to /root/sync-dest/ on agent
+    // Step 6: Verify all files exist on agent with correct content
+    // Relative path "sync-dest/" resolves to ~/sync-dest/ = /root/sync-dest/
     tracing::info!("Verifying files on agent...");
 
     // Check file1.txt
@@ -309,7 +308,7 @@ async fn test_sync_with_delete() -> Result<(), E2EError> {
     .await?;
 
     // Step 5: Create destination directory on agent with an extra file
-    // Note: SFTP root is /root, so we create /root/sync-delete-dest
+    // Relative path "sync-delete-dest" = ~/sync-delete-dest = /root/sync-delete-dest
     tracing::info!("Creating destination directory on agent with extra file...");
     exec_shell(
         &infra.agent,
@@ -330,12 +329,12 @@ async fn test_sync_with_delete() -> Result<(), E2EError> {
     );
 
     // Step 6: Run sync with --delete flag
-    // Note: ":/sync-delete-dest/" maps to /root/sync-delete-dest/ on agent
+    // Using scp-style relative path: "device:sync-delete-dest/" resolves to ~/sync-delete-dest/
     tracing::info!("Syncing with --delete flag...");
     let sync_output = exec_shell(
         &infra.cli,
         &format!(
-            "m87 sync --delete /tmp/sync-delete-source/ {}:/sync-delete-dest/ 2>&1",
+            "m87 sync --delete /tmp/sync-delete-source/ {}:sync-delete-dest/ 2>&1",
             device.name
         ),
     )
@@ -363,5 +362,148 @@ async fn test_sync_with_delete() -> Result<(), E2EError> {
     );
 
     tracing::info!("sync --delete test passed!");
+    Ok(())
+}
+
+/// Test sync --dry-run flag (shows what would happen without making changes)
+#[tokio::test]
+async fn test_sync_dry_run() -> Result<(), E2EError> {
+    let infra = E2EInfra::init().await?;
+
+    // Register device
+    tracing::info!("Registering device...");
+    let device = DeviceRegistration::new(&infra).register_full().await?;
+
+    // Setup SNI
+    let sni = SniSetup::from_cli(&infra.cli).await?;
+    sni.setup_both(&infra.agent, &infra.cli, &device.short_id)
+        .await?;
+
+    // Start agent
+    let agent = AgentRunner::new(&infra);
+    agent.start_with_tunnel().await?;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Create source directory
+    exec_shell(
+        &infra.cli,
+        "mkdir -p /tmp/dry-run-source && \
+         echo 'Test content' > /tmp/dry-run-source/test.txt",
+    )
+    .await?;
+
+    // Run sync with --dry-run (destination doesn't exist)
+    tracing::info!("Running sync with --dry-run...");
+    let sync_output = exec_shell(
+        &infra.cli,
+        &format!(
+            "m87 sync --dry-run /tmp/dry-run-source/ {}:dry-run-dest/ 2>&1",
+            device.name
+        ),
+    )
+    .await?;
+    tracing::info!("sync --dry-run output: {}", sync_output);
+
+    // Verify output mentions dry-run
+    assert!(
+        sync_output.contains("[dry-run]") || sync_output.contains("would upload"),
+        "Expected dry-run output, got: {}",
+        sync_output
+    );
+
+    // Verify destination was NOT created
+    let dest_exists = exec_shell(
+        &infra.agent,
+        "test -d /root/dry-run-dest && echo 'exists' || echo 'not found'",
+    )
+    .await?;
+    assert!(
+        dest_exists.contains("not found"),
+        "Destination should not exist after dry-run, got: {}",
+        dest_exists
+    );
+
+    tracing::info!("sync --dry-run test passed!");
+    Ok(())
+}
+
+/// Test sync --exclude flag (skip matching files)
+#[tokio::test]
+async fn test_sync_exclude() -> Result<(), E2EError> {
+    let infra = E2EInfra::init().await?;
+
+    // Register device
+    tracing::info!("Registering device...");
+    let device = DeviceRegistration::new(&infra).register_full().await?;
+
+    // Setup SNI
+    let sni = SniSetup::from_cli(&infra.cli).await?;
+    sni.setup_both(&infra.agent, &infra.cli, &device.short_id)
+        .await?;
+
+    // Start agent
+    let agent = AgentRunner::new(&infra);
+    agent.start_with_tunnel().await?;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Create source directory with various files
+    exec_shell(
+        &infra.cli,
+        "mkdir -p /tmp/exclude-source/.git && \
+         echo 'Keep this' > /tmp/exclude-source/keep.txt && \
+         echo 'Git file' > /tmp/exclude-source/.git/config && \
+         echo 'Log file' > /tmp/exclude-source/debug.log",
+    )
+    .await?;
+
+    // Run sync with --exclude for .git and *.log
+    tracing::info!("Running sync with --exclude...");
+    let sync_output = exec_shell(
+        &infra.cli,
+        &format!(
+            "m87 sync --exclude .git --exclude '*.log' /tmp/exclude-source/ {}:exclude-dest/ 2>&1",
+            device.name
+        ),
+    )
+    .await?;
+    tracing::info!("sync --exclude output: {}", sync_output);
+
+    // Verify keep.txt exists
+    let keep_exists = exec_shell(
+        &infra.agent,
+        "test -f /root/exclude-dest/keep.txt && echo 'exists' || echo 'not found'",
+    )
+    .await?;
+    assert!(
+        keep_exists.contains("exists"),
+        "keep.txt should exist, got: {}",
+        keep_exists
+    );
+
+    // Verify .git directory was NOT synced
+    let git_exists = exec_shell(
+        &infra.agent,
+        "test -d /root/exclude-dest/.git && echo 'exists' || echo 'not found'",
+    )
+    .await?;
+    assert!(
+        git_exists.contains("not found"),
+        ".git should be excluded, got: {}",
+        git_exists
+    );
+
+    // Verify *.log files were NOT synced
+    let log_exists = exec_shell(
+        &infra.agent,
+        "test -f /root/exclude-dest/debug.log && echo 'exists' || echo 'not found'",
+    )
+    .await?;
+    assert!(
+        log_exists.contains("not found"),
+        "*.log should be excluded, got: {}",
+        log_exists
+    );
+
+    tracing::info!("sync --exclude test passed!");
     Ok(())
 }

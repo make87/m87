@@ -100,13 +100,21 @@ enum Commands {
         /// Destination path (<path> for local, <device>:<path> for remote)
         dest: String,
 
-        /// Delete files from destination that are not present in source default false
+        /// Delete files from destination that are not present in source
         #[arg(long, default_value_t = false)]
         delete: bool,
 
         /// Watch for changes and sync automatically
         #[arg(long, default_value_t = false)]
         watch: bool,
+
+        /// Show what would be done without making changes
+        #[arg(long, short = 'n', default_value_t = false)]
+        dry_run: bool,
+
+        /// Exclude files matching pattern (can be used multiple times)
+        #[arg(long, short = 'e', action = clap::ArgAction::Append)]
+        exclude: Vec<String>,
     },
 
     Ls {
@@ -410,11 +418,16 @@ pub async fn cli() -> anyhow::Result<()> {
             dest,
             delete,
             watch,
+            dry_run,
+            exclude,
         } => {
             if watch {
-                device::fs::watch_sync(&source, &dest, delete).await?;
+                if dry_run {
+                    anyhow::bail!("--dry-run cannot be used with --watch");
+                }
+                device::fs::watch_sync(&source, &dest, delete, &exclude).await?;
             } else {
-                device::fs::sync(&source, &dest, delete).await?;
+                device::fs::sync(&source, &dest, delete, dry_run, &exclude).await?;
             }
         }
         Commands::Ls { path } => {

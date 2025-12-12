@@ -268,7 +268,48 @@ fn fingerprint(size: u64, mtime: Option<SystemTime>) -> String {
     format!("{size}:{secs}")
 }
 
-async fn read_local_tree(root: &Path) -> Result<FileTree> {
+/// Check if a relative path matches any exclusion pattern.
+/// Patterns support simple glob matching:
+/// - `*.log` matches files ending in .log
+/// - `.git` matches exact name
+/// - `node_modules` matches exact name
+fn matches_exclude(rel_path: &str, excludes: &[String]) -> bool {
+    if excludes.is_empty() {
+        return false;
+    }
+
+    // Get the filename and path components
+    let path = Path::new(rel_path);
+    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    for pattern in excludes {
+        // Check if any path component matches the pattern exactly
+        for component in path.components() {
+            if let std::path::Component::Normal(name) = component {
+                if let Some(name_str) = name.to_str() {
+                    if name_str == pattern {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Simple glob matching for patterns with *
+        if pattern.contains('*') {
+            let parts: Vec<&str> = pattern.split('*').collect();
+            if parts.len() == 2 {
+                let (prefix, suffix) = (parts[0], parts[1]);
+                if filename.starts_with(prefix) && filename.ends_with(suffix) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+async fn read_local_tree(root: &Path, excludes: &[String]) -> Result<FileTree> {
     let root = root.to_path_buf();
     let mut files = HashMap::new();
     let mut stack = vec![root.clone()];
@@ -284,6 +325,11 @@ async fn read_local_tree(root: &Path) -> Result<FileTree> {
                 .to_string_lossy()
                 .to_string();
 
+            // Skip excluded paths
+            if matches_exclude(&rel, excludes) {
+                continue;
+            }
+
             let meta = entry.metadata().await?;
             if meta.is_dir() {
                 stack.push(path);
@@ -297,7 +343,7 @@ async fn read_local_tree(root: &Path) -> Result<FileTree> {
     Ok(FileTree { root, files })
 }
 
-async fn read_remote_tree(sftp: &SftpSession, root: &str) -> Result<FileTree> {
+async fn read_remote_tree(sftp: &SftpSession, root: &str, excludes: &[String]) -> Result<FileTree> {
     let mut files = HashMap::new();
     let root_path = PathBuf::from(root);
 
@@ -305,6 +351,11 @@ async fn read_remote_tree(sftp: &SftpSession, root: &str) -> Result<FileTree> {
     let mut stack = vec![(root.to_string(), "".to_string())];
 
     while let Some((base, rel)) = stack.pop() {
+        // Skip excluded paths
+        if !rel.is_empty() && matches_exclude(&rel, excludes) {
+            continue;
+        }
+
         // Construct full path
         let path = if rel.is_empty() {
             base.clone()
@@ -338,6 +389,11 @@ async fn read_remote_tree(sftp: &SftpSession, root: &str) -> Result<FileTree> {
                 format!("{rel}/{name}")
             };
 
+            // Skip excluded paths
+            if matches_exclude(&child_rel, excludes) {
+                continue;
+            }
+
             let meta = entry.metadata();
 
             if meta.is_dir() {
@@ -355,7 +411,13 @@ async fn read_remote_tree(sftp: &SftpSession, root: &str) -> Result<FileTree> {
     })
 }
 
-pub async fn sync(src: &str, dst: &str, delete: bool) -> Result<()> {
+pub async fn sync(
+    src: &str,
+    dst: &str,
+    delete: bool,
+    dry_run: bool,
+    excludes: &[String],
+) -> Result<()> {
     let src_path = LocalOrRemotePath::parse(src);
     let dst_path = LocalOrRemotePath::parse(dst);
 
@@ -363,22 +425,46 @@ pub async fn sync(src: &str, dst: &str, delete: bool) -> Result<()> {
     let mut sftp_dst = maybe_open_sftp(&dst_path).await?;
 
     let src_tree = match &src_path {
-        LocalOrRemotePath::Local(p) => read_local_tree(p).await?,
+        LocalOrRemotePath::Local(p) => read_local_tree(p, excludes).await?,
         LocalOrRemotePath::Remote { path, .. } => {
             let sftp = sftp_src
                 .as_ref()
                 .context("SFTP src required for remote sync")?;
-            read_remote_tree(sftp, path).await?
+            read_remote_tree(sftp, path, excludes).await?
         }
     };
 
     let dst_tree = match &dst_path {
-        LocalOrRemotePath::Local(p) => read_local_tree(p).await?,
+        LocalOrRemotePath::Local(p) => {
+            if !p.exists() {
+                if !dry_run {
+                    tokio::fs::create_dir_all(p).await?;
+                }
+                FileTree {
+                    root: p.clone(),
+                    files: HashMap::new(),
+                }
+            } else {
+                read_local_tree(p, excludes).await?
+            }
+        }
         LocalOrRemotePath::Remote { path, .. } => {
             let sftp = sftp_dst
                 .as_ref()
                 .context("SFTP dst required for remote sync")?;
-            read_remote_tree(sftp, path).await?
+            match read_remote_tree(sftp, path, excludes).await {
+                Ok(tree) => tree,
+                Err(_) => {
+                    // Destination doesn't exist - create it and treat as empty
+                    if !dry_run {
+                        sftp.create_dir(path.clone()).await.ok();
+                    }
+                    FileTree {
+                        root: PathBuf::from(path),
+                        files: HashMap::new(),
+                    }
+                }
+            }
         }
     };
 
@@ -392,15 +478,18 @@ pub async fn sync(src: &str, dst: &str, delete: bool) -> Result<()> {
                 let src_full = src_tree.root.join(rel);
                 let dst_full = dst_tree.root.join(rel);
 
-                info!("uploading {}", rel);
-
-                copy_file(
-                    &LocalOrRemotePath::from_path(&src_path, &src_full),
-                    &LocalOrRemotePath::from_path(&dst_path, &dst_full),
-                    &mut sftp_src,
-                    &mut sftp_dst,
-                )
-                .await?;
+                if dry_run {
+                    info!("[dry-run] would upload {}", rel);
+                } else {
+                    info!("uploading {}", rel);
+                    copy_file(
+                        &LocalOrRemotePath::from_path(&src_path, &src_full),
+                        &LocalOrRemotePath::from_path(&dst_path, &dst_full),
+                        &mut sftp_src,
+                        &mut sftp_dst,
+                    )
+                    .await?;
+                }
             }
         }
     }
@@ -413,13 +502,16 @@ pub async fn sync(src: &str, dst: &str, delete: bool) -> Result<()> {
             if !src_keys.contains(rel) {
                 let dst_full = dst_tree.root.join(rel);
 
-                info!("deleting {}", rel);
-
-                delete_file(
-                    &LocalOrRemotePath::from_path(&dst_path, &dst_full),
-                    &mut sftp_dst,
-                )
-                .await?;
+                if dry_run {
+                    info!("[dry-run] would delete {}", rel);
+                } else {
+                    info!("deleting {}", rel);
+                    delete_file(
+                        &LocalOrRemotePath::from_path(&dst_path, &dst_full),
+                        &mut sftp_dst,
+                    )
+                    .await?;
+                }
             }
         }
     }
@@ -427,18 +519,18 @@ pub async fn sync(src: &str, dst: &str, delete: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn watch_sync(src: &str, dst: &str, delete: bool) -> Result<()> {
+pub async fn watch_sync(src: &str, dst: &str, delete: bool, excludes: &[String]) -> Result<()> {
     info!("Starting periodic watch-sync…");
 
-    // Initial run
-    sync(src, dst, delete).await?;
+    // Initial run (never dry-run for watch mode)
+    sync(src, dst, delete, false, excludes).await?;
 
     let interval = Duration::from_secs(2);
 
     loop {
         tokio::select! {
             _ = sleep(interval) => {
-                if let Err(e) = sync(src, dst, delete).await {
+                if let Err(e) = sync(src, dst, delete, false, excludes).await {
                     error!("sync failed: {e:#}");
                 }
             }

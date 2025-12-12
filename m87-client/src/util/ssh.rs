@@ -348,7 +348,7 @@ fn load_or_generate_host_key() -> Result<russh::keys::PrivateKey> {
 pub fn make_server_config() -> Arc<ServerConfig> {
     let mut config = ServerConfig::default();
     config.server_id = russh::SshId::Standard("SSH-2.0-m87-ssh".to_string());
-    config.inactivity_timeout = Some(Duration::from_hours(2));
+    config.inactivity_timeout = Some(Duration::from_secs(2 * 60 * 60)); // 2 hours
     config.auth_rejection_time = Duration::from_millis(0);
     config.window_size = 4 * 1024 * 1024; // OK > 1MB
     config.channel_buffer_size = 4 * 1024 * 1024; // OK > 1MB
