@@ -17,6 +17,7 @@ services:
       - UNIFIED_PORT=${UNIFIED_PORT:-8084}
       - STAGING=${STAGING:-1}
       - ADMIN_KEY=${ADMIN_KEY:-}
+      - CERTIFICATE_PATH=${CERTIFICATE_PATH:-/data/m87/certs/}
     depends_on:
       - mongo
     networks:
@@ -24,7 +25,7 @@ services:
     ports:
       - "443:8084"
       - "443:8084/udp"
-      - "8080:8085"
+      - "8080:8085/udp"
     volumes:
       - backend-data:/data/m87/certs
 

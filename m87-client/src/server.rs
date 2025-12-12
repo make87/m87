@@ -265,6 +265,7 @@ pub async fn connect_control_tunnel() -> Result<()> {
     use bytes::{BufMut, Bytes, BytesMut};
     use m87_shared::device::short_device_id;
     use quinn::Connection;
+    use tokio::sync::watch;
     use tracing::{debug, warn};
 
     let config = Config::load().context("Failed to load configuration")?;
@@ -279,67 +280,92 @@ pub async fn connect_control_tunnel() -> Result<()> {
             .await
             .context("QUIC connect failed")?;
 
-    // === CENTRAL STATE ===
+    //  SHUTDOWN SIGNAL
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    //  CENTRAL STATE
     let udp_channels = UdpChannelManager::new();
 
-    // === DATAGRAM OUTPUT PIPE (workers → QUIC) ===
+    //  DATAGRAM OUTPUT PIPE (workers → QUIC)
     let (datagram_tx, mut datagram_rx) = tokio::sync::mpsc::channel::<(u32, Bytes)>(2048);
 
     // This task frames datagrams and sends via QUIC
     {
         let conn = quic_conn.clone();
+        let mut shutdown = shutdown_rx.clone();
+        let shutdown_tx = shutdown_tx.clone();
         tokio::spawn(async move {
-            while let Some((id, payload)) = datagram_rx.recv().await {
-                let mut buf = BytesMut::with_capacity(4 + payload.len());
-                buf.put_u32(id);
-                buf.extend_from_slice(&payload);
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => break,
 
-                if let Err(e) = conn.send_datagram(buf.freeze()) {
-                    warn!("send_datagram failed: {:?}", e);
-                    break;
+                    Some((id, payload)) = datagram_rx.recv() => {
+                        let mut buf = BytesMut::with_capacity(4 + payload.len());
+                        buf.put_u32(id);
+                        buf.extend_from_slice(&payload);
+
+                        if conn.send_datagram(buf.freeze()).is_err() {
+                            warn!("send_datagram failed — shutting down");
+                            let _ = shutdown_tx.send(true);
+                            break;
+                        }
+                    }
+
+                    else => break,
                 }
             }
         });
     }
 
-    // === DATAGRAM INPUT PIPE (QUIC → workers) ===
+    //  DATAGRAM INPUT PIPE (QUIC → workers)
     {
         let udp_channels_clone = udp_channels.clone();
-        let conn_clone = quic_conn.clone();
+        let conn = quic_conn.clone();
+        let mut shutdown = shutdown_rx.clone();
+        let shutdown_tx = shutdown_tx.clone();
 
         tokio::spawn(async move {
             loop {
-                let d = match conn_clone.read_datagram().await {
-                    Ok(d) => d,
-                    Err(_) => break, // QUIC closed
-                };
+                tokio::select! {
+                    _ = shutdown.changed() => break,
 
-                if d.len() < 4 {
-                    continue;
-                }
+                    res = conn.read_datagram() => {
+                        let d = match res {
+                            Ok(d) => d,
+                            Err(_) => {
+                                let _ = shutdown_tx.send(true);
+                                break;
+                            }
+                        };
 
-                let id = u32::from_be_bytes([d[0], d[1], d[2], d[3]]);
-                let payload = Bytes::copy_from_slice(&d[4..]);
+                        if d.len() < 4 {
+                            continue;
+                        }
 
-                if let Some(ch) = udp_channels_clone.get(id).await {
-                    if ch.sender.send(payload).await.is_err() {
-                        // worker is gone; drop silently
+                        let id = u32::from_be_bytes([d[0], d[1], d[2], d[3]]);
+                        let payload = Bytes::copy_from_slice(&d[4..]);
+
+                        if let Some(ch) = udp_channels_clone.get(id).await {
+                            let _ = ch.sender.try_send(payload);
+                        }
                     }
                 }
             }
 
-            // QUIC closed => cleanup all channels
             udp_channels_clone.remove_all().await;
         });
     }
 
-    // === CONTROL STREAM ACCEPT LOOP ===
+    let mut shutdown = shutdown_rx.clone();
+    //  CONTROL STREAM ACCEPT LOOP
     loop {
         use crate::streams::{self, quic::QuicIo};
-        use std::time::Duration;
 
         tokio::select! {
 
+            _ = shutdown.changed() => {
+                warn!("control tunnel shutting down");
+                break;
+            }
             incoming = quic_conn.accept_bi() => {
                 match incoming {
                     Ok((send, recv)) => {
@@ -362,6 +388,7 @@ pub async fn connect_control_tunnel() -> Result<()> {
 
                     Err(e) => {
                         warn!("Control accept failed: {:?}", e);
+                        let _ = shutdown_tx.send(true);
                         break;
                     }
                 }
@@ -374,17 +401,19 @@ pub async fn connect_control_tunnel() -> Result<()> {
                 break;
             }
 
-            _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                // Keepalive probe: if this errors out, conn is dead
-                if let Err(e) = quic_conn.open_uni().await {
-                    warn!("keepalive probe failed, tunnel dead: {:?}", e);
-                    udp_channels.remove_all().await;
-                    break;
-                }
-            }
+            // _ = tokio::time::sleep(Duration::from_secs(30)) => {
+            //     // Keepalive probe: if this errors out, conn is dead
+            //     if let Err(e) = quic_conn.open_uni().await {
+            //         warn!("keepalive probe failed, tunnel dead: {:?}", e);
+            //         udp_channels.remove_all().await;
+            //         break;
+            //     }
+            // }
         }
     }
 
+    let _ = shutdown_tx.send(true);
+    udp_channels.remove_all().await;
     debug!("control tunnel terminated");
     Ok(())
 }
