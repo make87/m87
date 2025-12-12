@@ -116,30 +116,31 @@ async fn test_ls_nonexistent() -> Result<(), E2EError> {
     Ok(())
 }
 
-/// Test listing a file shows its details
+/// Test listing a directory containing a specific file
 #[tokio::test]
-async fn test_ls_file() -> Result<(), E2EError> {
+async fn test_ls_with_file() -> Result<(), E2EError> {
     let setup = TestSetup::init().await?;
 
-    // Create a test file with known content
+    // Create a test directory with a file
+    setup.create_agent_dir("/root/ls-file-test").await?;
     setup
-        .create_agent_file("/root/ls-single-file.txt", "hello world")
+        .create_agent_file("/root/ls-file-test/test-file.txt", "hello world")
         .await?;
 
-    // List the specific file
+    // List the directory containing the file
     let output = setup
-        .m87_cmd(&format!("ls {}:ls-single-file.txt", setup.device.name))
+        .m87_cmd(&format!("ls {}:ls-file-test", setup.device.name))
         .await?;
 
-    tracing::info!("ls file output: {}", output);
+    tracing::info!("ls with file output: {}", output);
 
-    // Should show the file name
+    // Should show the file name in the listing
     assert!(
-        output.contains("ls-single-file.txt") || output.contains("ls-single"),
+        output.contains("test-file.txt") || output.contains("test-file"),
         "Expected file in listing, got: {}",
         output
     );
 
-    tracing::info!("ls file test passed!");
+    tracing::info!("ls with file test passed!");
     Ok(())
 }

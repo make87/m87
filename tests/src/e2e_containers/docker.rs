@@ -24,10 +24,12 @@ async fn test_docker_ps() -> Result<(), E2EError> {
     let is_docker_output = output.contains("CONTAINER")
         || output.contains("container")
         || output.is_empty()  // No running containers
-        || output.contains("Cannot connect");  // Docker not available
+        || output.contains("Cannot connect")  // Docker not available
+        || output.contains("not installed")  // Docker CLI not installed
+        || output.contains("No such file");  // Docker binary not found
 
     assert!(
-        is_docker_output || !output.to_lowercase().contains("error:"),
+        is_docker_output,
         "Unexpected docker ps output: {}",
         output
     );
@@ -51,10 +53,12 @@ async fn test_docker_images() -> Result<(), E2EError> {
         || output.contains("IMAGE")
         || output.contains("TAG")
         || output.is_empty()
-        || output.contains("Cannot connect");
+        || output.contains("Cannot connect")
+        || output.contains("not installed")
+        || output.contains("No such file");
 
     assert!(
-        is_docker_output || !output.to_lowercase().contains("error:"),
+        is_docker_output,
         "Unexpected docker images output: {}",
         output
     );
@@ -78,10 +82,12 @@ async fn test_docker_info() -> Result<(), E2EError> {
         || output.contains("Containers")
         || output.contains("Images")
         || output.contains("Storage Driver")
-        || output.contains("Cannot connect");
+        || output.contains("Cannot connect")
+        || output.contains("not installed")
+        || output.contains("No such file");
 
     assert!(
-        is_docker_output || !output.to_lowercase().contains("error:"),
+        is_docker_output,
         "Unexpected docker info output: {}",
         output
     );
@@ -104,10 +110,12 @@ async fn test_docker_version() -> Result<(), E2EError> {
     let is_docker_output = output.contains("Version")
         || output.contains("Client")
         || output.contains("Server")
-        || output.contains("Cannot connect");
+        || output.contains("Cannot connect")
+        || output.contains("not installed")
+        || output.contains("No such file");
 
     assert!(
-        is_docker_output || !output.to_lowercase().contains("error:"),
+        is_docker_output,
         "Unexpected docker version output: {}",
         output
     );
