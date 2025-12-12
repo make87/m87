@@ -4,6 +4,8 @@
 
 mod agent;
 mod device;
+mod setup;
 
 pub use agent::*;
 pub use device::*;
+pub use setup::*;

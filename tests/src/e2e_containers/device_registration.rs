@@ -63,3 +63,64 @@ async fn test_devices_list() -> Result<(), E2EError> {
 
     Ok(())
 }
+
+/// Test that `m87 devices reject` works for pending devices
+#[tokio::test]
+async fn test_devices_reject() -> Result<(), E2EError> {
+    use super::helpers::extract_auth_requests;
+
+    let infra = E2EInfra::init().await?;
+
+    // Step 1: Start agent login to create a pending auth request
+    infra
+        .start_agent_login()
+        .await
+        .map_err(|e| E2EError::Exec(e.to_string()))?;
+    tracing::info!("Agent login started");
+
+    // Step 2: Wait for auth request to appear
+    let auth_id = super::helpers::wait_for_result(
+        super::helpers::WaitConfig::with_description("auth request for reject test"),
+        || async {
+            let output = infra
+                .cli_exec(&["devices", "list"])
+                .await
+                .map_err(|e| E2EError::Exec(e.to_string()))?;
+            Ok(extract_auth_requests(&output).first().cloned())
+        },
+    )
+    .await?;
+    tracing::info!("Auth request received: {}", auth_id);
+
+    // Step 3: Reject the auth request
+    let reject_output = infra
+        .cli_exec(&["devices", "reject", &auth_id])
+        .await
+        .map_err(|e| E2EError::Exec(e.to_string()))?;
+    tracing::info!("Reject output: {}", reject_output);
+
+    // Should indicate success
+    assert!(
+        reject_output.to_lowercase().contains("rejected")
+            || reject_output.to_lowercase().contains("success"),
+        "Expected rejection confirmation, got: {}",
+        reject_output
+    );
+
+    // Step 4: Verify device is no longer pending
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let list_output = infra
+        .cli_exec(&["devices", "list"])
+        .await
+        .map_err(|e| E2EError::Exec(e.to_string()))?;
+
+    // The auth request ID should no longer appear
+    assert!(
+        !list_output.contains(&auth_id),
+        "Rejected device should not appear in list: {}",
+        list_output
+    );
+
+    tracing::info!("devices reject test passed!");
+    Ok(())
+}
