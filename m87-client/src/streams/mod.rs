@@ -1,4 +1,4 @@
-mod auth;
+// mod auth;
 mod docker;
 mod exec;
 mod logs;

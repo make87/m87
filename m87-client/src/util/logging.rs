@@ -6,6 +6,7 @@ use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{prelude::*, EnvFilter};
+use tracing_subscriber::fmt as tracing_fmt;
 
 static LOG_TX: OnceLock<broadcast::Sender<String>> = OnceLock::new();
 
@@ -69,21 +70,23 @@ where
     }
 }
 
-pub fn init_tracing_with_log_layer(log_level: &str) -> broadcast::Sender<String> {
+
+pub fn init_tracing_with_log_layer(default_level: &str) -> broadcast::Sender<String> {
     let (tx, _rx) = broadcast::channel(1000);
     LOG_TX.set(tx.clone()).ok();
 
-    let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(default_level))
+        .unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_fmt::layer())
         .with(LogBroadcastLayer::new(tx.clone()))
         .init();
 
     tx
 }
-
 static INIT: Once = Once::new();
 
 pub fn init_logging(log_level: &str) {

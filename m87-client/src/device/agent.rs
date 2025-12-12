@@ -18,6 +18,7 @@ use crate::{
 
 use crate::server::send_heartbeat;
 use crate::util::logging::init_logging;
+use crate::util::shutdown::SHUTDOWN;
 use crate::util::system_info::get_system_info;
 
 const SERVICE_NAME: &str = "m87-agent";
@@ -291,6 +292,7 @@ pub async fn run() -> Result<()> {
         _ = login_and_run() => {},
         _ = &mut shutdown => {
             info!("Received shutdown signal, stopping device");
+            SHUTDOWN.cancel();
         }
     }
 
@@ -323,13 +325,27 @@ async fn login_and_run() -> Result<()> {
 
     tokio::task::spawn(async {
         loop {
+            if SHUTDOWN.is_cancelled() {
+                break;
+            }
             info!("Starting control tunnel...");
-            if let Err(e) = server::connect_control_tunnel().await {
-                error!("Control tunnel crashed with error: {e}. Reconnecting in 5 seconds...");
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            } else {
-                warn!("Control tunnel exited normally. Reconnecting...");
-                tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::select! {
+                result = server::connect_control_tunnel() => {
+                    match result {
+                        Err(e) => {
+                            error!("Control tunnel crashed with error: {e}. Reconnecting in 5 seconds...");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                        Ok(_) => {
+                            warn!("Control tunnel exited normally. Reconnecting...");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+                _ = SHUTDOWN.cancelled() => {
+                    info!("Control tunnel shutting down");
+                    break;
+                }
             }
         }
     });
@@ -344,12 +360,21 @@ async fn login_and_run() -> Result<()> {
 
 async fn device_loop() -> Result<()> {
     loop {
+        if SHUTDOWN.is_cancelled() {
+            break;
+        }
         if let Err(e) = sync_with_backend().await {
             error!("Sync failed: {:?}", e);
         }
         let config = Config::load().context("Failed to load configuration")?;
-        sleep(Duration::from_secs(config.heartbeat_interval_secs)).await; // 5 minutes
+        tokio::select! {
+            _ = sleep(Duration::from_secs(config.heartbeat_interval_secs)) => {}
+            _ = SHUTDOWN.cancelled() => {
+                break;
+            }
+        }
     }
+    Ok(())
 }
 
 async fn sync_with_backend() -> Result<()> {

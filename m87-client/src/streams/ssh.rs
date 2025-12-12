@@ -14,10 +14,12 @@ pub async fn handle_ssh_io(io: QuicIo) {
 
     match server::run_stream(config, io, handler).await {
         Ok(running) => {
+            tracing::info!("SSH handshake complete, session running");
             // Second stage: lifetime of the connection
             if let Err(e) = running.await {
                 tracing::error!("SSH connection closed: {:?}", e);
             }
+            tracing::debug!("SSH session ended normally");
         }
         Err(e) => {
             tracing::error!("SSH handshake aborted: {:?}", e);

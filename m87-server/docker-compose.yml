@@ -24,6 +24,7 @@ services:
     ports:
       - "443:8084"
       - "443:8084/udp"
+      - "8080:8085"
     volumes:
       - backend-data:/data/m87/certs
 

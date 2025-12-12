@@ -4,8 +4,8 @@ use std::{
     collections::HashMap,
     path::{Component, Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -17,8 +17,7 @@ use tokio::{
 };
 
 use russh_sftp::protocol::{
-    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode,
-    Version,
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
 };
 
 /// Global handle counter – we give each open file a unique string handle.
@@ -58,9 +57,6 @@ impl M87SftpHandler {
         NEXT_HANDLE.fetch_add(1, Ordering::Relaxed).to_string()
     }
 
-    /// Simple path sanitiser: strips leading `/`, normalises `.` / `..`,
-    /// and joins under `self.root`. Prevents escaping via `..` but does
-    /// not defend against symlink tricks (good enough for now).
     fn resolve_path(&self, path: &str) -> Result<PathBuf, StatusCode> {
         let mut clean = PathBuf::new();
         for comp in Path::new(path).components() {
@@ -78,10 +74,15 @@ impl M87SftpHandler {
         }
 
         let full = self.root.join(clean);
-        if !full.starts_with(&self.root) {
+
+        // Canonicalize to defeat symlink escapes
+        let canon = std::fs::canonicalize(&full).map_err(|_| StatusCode::NoSuchFile)?;
+
+        if !canon.starts_with(&self.root) {
             return Err(StatusCode::PermissionDenied);
         }
-        Ok(full)
+
+        Ok(canon)
     }
 
     fn make_status_ok(&self, id: u32) -> Status {
@@ -137,10 +138,6 @@ impl russh_sftp::server::Handler for M87SftpHandler {
         Ok(Version::new())
     }
 
-    // -------------------------------------------------------------------------
-    // Open / close / read / write (core for IDE + sync)
-    // -------------------------------------------------------------------------
-
     async fn open(
         &mut self,
         id: u32,
@@ -149,49 +146,39 @@ impl russh_sftp::server::Handler for M87SftpHandler {
         _attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
         let path = self.resolve_path(&filename)?;
-        println!("PWD = {}", std::env::current_dir().unwrap().display());
-        println!(
-            "Is /home/phillip/test2 visible? {}",
-            Path::new("/home/phillip/test2").exists()
-        );
 
         let mut open_options = fs::OpenOptions::new();
 
-        // Translate OpenFlags (v3 is a bit weird; this is “good enough”).
         if flags.contains(OpenFlags::READ) {
             open_options.read(true);
         }
         if flags.contains(OpenFlags::WRITE) {
             open_options.write(true);
         }
+        if flags.contains(OpenFlags::APPEND) {
+            open_options.append(true);
+        }
         if flags.contains(OpenFlags::CREATE) {
             open_options.create(true);
+        }
+        if flags.contains(OpenFlags::EXCLUDE) {
+            open_options.create_new(true);
         }
         if flags.contains(OpenFlags::TRUNCATE) {
             open_options.truncate(true);
         }
 
-        let file = match open_options.open(&path).await {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::error!(?e, ?path, "SFTP open failed");
-                return Err(StatusCode::Failure);
-            }
-        };
+        let file = open_options
+            .open(&path)
+            .await
+            .map_err(|_| StatusCode::Failure)?;
 
-        let handle_id = Self::next_handle();
-        let handle_str = handle_id.clone();
+        let handle_str = Self::next_handle();
 
-        {
-            let mut map = self.open_files.lock().await;
-            map.insert(
-                handle_str.clone(),
-                OpenFile {
-                    path: path.clone(),
-                    file,
-                },
-            );
-        }
+        self.open_files
+            .lock()
+            .await
+            .insert(handle_str.clone(), OpenFile { path, file });
 
         Ok(Handle {
             id,
@@ -224,24 +211,24 @@ impl russh_sftp::server::Handler for M87SftpHandler {
         len: u32,
     ) -> Result<Data, Self::Error> {
         let mut map = self.open_files.lock().await;
-        let of = match map.get_mut(&handle) {
-            Some(of) => of,
-            None => return Err(StatusCode::NoSuchFile),
-        };
+        let of = map.get_mut(&handle).ok_or(StatusCode::NoSuchFile)?;
 
-        if let Err(e) = of.file.seek(std::io::SeekFrom::Start(offset)).await {
-            tracing::error!(?e, "SFTP read: seek failed");
-            return Err(StatusCode::Failure);
+        let meta = of.file.metadata().await.map_err(|_| StatusCode::Failure)?;
+        if offset >= meta.len() {
+            return Err(StatusCode::Eof);
         }
 
+        of.file
+            .seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|_| StatusCode::Failure)?;
+
         let mut buf = vec![0u8; len as usize];
-        let n = match of.file.read(&mut buf).await {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::error!(?e, "SFTP read failed");
-                return Err(StatusCode::Failure);
-            }
-        };
+        let n = of
+            .file
+            .read(&mut buf)
+            .await
+            .map_err(|_| StatusCode::Failure)?;
 
         buf.truncate(n);
 
@@ -280,44 +267,39 @@ impl russh_sftp::server::Handler for M87SftpHandler {
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
         let full = self.resolve_path(&path)?;
-        // let meta = match fs::metadata(&full).await {
-        //     Ok(m) => m,
-        //     Err(_) => return Err(StatusCode::NoSuchFile),
-        // };
 
-        // NOTE: this is blocking metadata; we convert to std::fs::Metadata.
-        let meta_std = match std::fs::metadata(&full) {
-            Ok(m) => m,
-            Err(_) => return Err(StatusCode::Failure),
-        };
+        let meta = tokio::task::spawn_blocking(move || std::fs::metadata(&full))
+            .await
+            .map_err(|_| StatusCode::Failure)?
+            .map_err(|_| StatusCode::NoSuchFile)?;
 
-        Ok(self.attrs_from_metadata(id, &meta_std))
+        Ok(self.attrs_from_metadata(id, &meta))
     }
 
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
         let full = self.resolve_path(&path)?;
-        let meta_std = match std::fs::symlink_metadata(&full) {
-            Ok(m) => m,
-            Err(_) => return Err(StatusCode::NoSuchFile),
-        };
 
-        Ok(self.attrs_from_metadata(id, &meta_std))
+        let meta = tokio::task::spawn_blocking(move || std::fs::symlink_metadata(&full))
+            .await
+            .map_err(|_| StatusCode::Failure)?
+            .map_err(|_| StatusCode::NoSuchFile)?;
+
+        Ok(self.attrs_from_metadata(id, &meta))
     }
 
     async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
         let map = self.open_files.lock().await;
-        let of = match map.get(&handle) {
-            Some(of) => of,
-            None => return Err(StatusCode::NoSuchFile),
-        };
+        let of = map.get(&handle).ok_or(StatusCode::NoSuchFile)?;
 
-        // fstat is defined on the handle itself; we use its metadata.
-        let meta_std = match std::fs::metadata(&of.path) {
-            Ok(m) => m,
-            Err(_) => return Err(StatusCode::Failure),
-        };
+        let path = of.path.clone();
+        drop(map);
 
-        Ok(self.attrs_from_metadata(id, &meta_std))
+        let meta = tokio::task::spawn_blocking(move || std::fs::metadata(&path))
+            .await
+            .map_err(|_| StatusCode::Failure)?
+            .map_err(|_| StatusCode::Failure)?;
+
+        Ok(self.attrs_from_metadata(id, &meta))
     }
 
     async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
@@ -343,51 +325,42 @@ impl russh_sftp::server::Handler for M87SftpHandler {
         })
     }
 
-    // -------------------------------------------------------------------------
-    // Directory ops: opendir / readdir / mkdir / rmdir
-    // -------------------------------------------------------------------------
-
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
         let full = self.resolve_path(&path)?;
-        let mut rd = match fs::read_dir(&full).await {
-            Ok(rd) => rd,
-            Err(_) => return Err(StatusCode::NoSuchFile),
-        };
+        let mut rd = fs::read_dir(&full)
+            .await
+            .map_err(|_| StatusCode::NoSuchFile)?;
 
-        // Preload entries into a temporary in-memory dir listing.
         let mut files = Vec::new();
-        while let Ok(Some(entry)) = rd.next_entry().await {
-            let file_name = entry.file_name().to_string_lossy().into_owned();
-            let meta_std = match entry.metadata().await {
-                Ok(_) => {
-                    // Convert to std::fs::Metadata; tokio uses the same underlying
-                    // representation so we cheat a bit by re-stat’ing.
-                    match std::fs::metadata(entry.path()) {
-                        Ok(m) => m,
-                        Err(_) => continue,
-                    }
-                }
-                Err(_) => continue,
-            };
+        files.push(File::new(".", FileAttributes::default()));
+        files.push(File::new("..", FileAttributes::default()));
 
-            let fa = FileAttributes::from(&meta_std);
-            files.push(File::new(file_name, fa));
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+
+            let meta = tokio::task::spawn_blocking({
+                let p = entry.path();
+                move || std::fs::metadata(p)
+            })
+            .await
+            .ok()
+            .and_then(Result::ok);
+
+            if let Some(meta) = meta {
+                files.push(File::new(name, FileAttributes::from(&meta)));
+            }
         }
 
-        // We encode the directory listing into a synthetic “handle” entry.
-        // Simple (non-streaming) approach: client calls READDIR once and gets all.
-        let handle_id = Self::next_handle();
-        let handle_str = handle_id.clone();
+        let handle_str = Self::next_handle();
 
         self.dir_handles.lock().await.insert(
             handle_str.clone(),
             DirListing {
                 idx: 0,
-                entries: files, // the vector you built above
+                entries: files,
             },
         );
 
-        // We actually return the file list in first READDIR call, see below.
         Ok(Handle {
             id,
             handle: handle_str,

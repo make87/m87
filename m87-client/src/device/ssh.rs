@@ -1,66 +1,161 @@
 use anyhow::{Context, Result};
-use tokio::{io, net::TcpListener};
-use tracing::{error, info};
+use std::{env, fs, path::PathBuf};
+use tokio::{
+    io::{self, AsyncWriteExt},
+    signal, try_join,
+};
 
 use crate::{
     auth::AuthManager,
     config::Config,
     devices,
-    streams::{
-        quic::{connect_quic_only, open_quic_stream},
-        stream_type::StreamType,
-    },
-    util::shutdown::SHUTDOWN,
+    streams::{quic::open_quic_io, stream_type::StreamType},
 };
 
-pub async fn tunnel_device_ssh(device_name: &str, local_port: u16) -> Result<()> {
+// IMPORTANT:
+// This function is an SSH ProxyCommand transport.
+// It must NEVER spawn `ssh` or assume a TTY.
+pub async fn connect_device_ssh(device_name: &str) -> Result<()> {
     let config = Config::load()?;
-
     let dev = devices::get_device_by_name(device_name).await?;
 
     let token = AuthManager::get_cli_token().await?;
-    let device_short_id = dev.short_id;
     let hostname = config.get_server_hostname();
 
-    info!(
-        "Connecting SSH tunnel to device {device_short_id}, \
-         available locally on 127.0.0.1:{local_port}"
-    );
-
-    let listener = TcpListener::bind(("127.0.0.1", local_port)).await?;
-
-    let (_, conn) = connect_quic_only(
+    let (conn, mut quic) = open_quic_io(
         &hostname,
         &token,
-        &device_short_id,
+        &dev.short_id,
+        StreamType::Ssh {
+            token: token.to_string(),
+        },
         config.trust_invalid_server_cert,
     )
     .await
     .context("Failed to connect to device")?;
 
-    loop {
-        tokio::select! {
-            Ok((mut local_stream, addr)) = listener.accept() => {
-                info!("Local SSH connection from {addr}");
-                let mut remote_io = open_quic_stream(&conn, StreamType::Ssh {
-                    token: token.to_string(),
-                }).await?;
+    let mut stdin = io::stdin();
+    let mut stdout = io::stdout();
 
-                tokio::spawn(async move {
-                    let res = io::copy_bidirectional(&mut local_stream, &mut remote_io).await;
-                    match res {
-                        Ok(_) => info!("SSH tunnel {addr} closed"),
-                        Err(e) => error!("SSH tunnel {addr} error: {e:?}"),
-                    }
-                });
-            }
+    // stdin → QUIC
+    let to_remote = async {
+        io::copy(&mut stdin, &mut quic.send).await?;
+        let _ = quic.send.finish();
+        Result::<()>::Ok(())
+    };
 
-            _ = SHUTDOWN.cancelled() => {
-                info!("Shutdown requested — closing SSH tunnel");
-                break;
-            }
+    // QUIC → stdout
+    let to_local = async {
+        io::copy(&mut quic.recv, &mut stdout).await?;
+        let _ = stdout.shutdown().await;
+        Result::<()>::Ok(())
+    };
+
+    tokio::select! {
+        res = async {
+            try_join!(to_remote, to_local)
+        } => {
+            res?;
+        }
+        _ = signal::ctrl_c() => {
+            // local shutdown / Ctrl-C / service exit
+        }
+
+        _ = conn.closed() => {
+            // remote device disconnected
         }
     }
 
+    // best-effort cleanup
+    let _ = quic.send.finish();
+    Ok(())
+}
+
+pub fn exec_ssh(device: &str, args: &[String]) -> Result<()> {
+    let status = std::process::Command::new("ssh")
+        .arg(format!("{device}@make87"))
+        .args(args)
+        .status()
+        .context("failed to launch ssh")?;
+
+    if !status.success() {
+        anyhow::bail!("ssh exited with {}", status);
+    }
+    Ok(())
+}
+
+const M87_SSH_BLOCK: &str = r#"
+Host make87
+  ProxyCommand m87 ssh %r --transport
+"#;
+
+fn ssh_config_path() -> Result<PathBuf> {
+    let home = env::var("HOME")
+        .or_else(|_| env::var("USERPROFILE"))
+        .context("Cannot determine home directory")?;
+
+    Ok(PathBuf::from(home).join(".ssh").join("config"))
+}
+
+fn ensure_ssh_dir(path: &PathBuf) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).context("Failed to create ~/.ssh")?;
+    }
+    Ok(())
+}
+
+pub fn ssh_enable() -> Result<()> {
+    let path = ssh_config_path()?;
+    ensure_ssh_dir(&path)?;
+
+    let mut contents = fs::read_to_string(&path).unwrap_or_default();
+
+    if contents.contains("Host m87-*") {
+        return Ok(()); // already enabled
+    }
+
+    if !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+
+    contents.push_str(M87_SSH_BLOCK);
+    fs::write(&path, contents).context("Failed to write SSH config")?;
+
+    Ok(())
+}
+
+pub fn ssh_disable() -> Result<()> {
+    let path = ssh_config_path()?;
+
+    let contents = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()), // nothing to do
+    };
+
+    let mut lines = contents.lines().peekable();
+    let mut out = String::new();
+    let mut skip = false;
+
+    while let Some(line) = lines.next() {
+        if line.trim() == "Host m87-*" {
+            skip = true;
+            continue;
+        }
+
+        if skip {
+            if !line.starts_with(' ') && !line.starts_with('\t') {
+                skip = false;
+            } else {
+                continue;
+            }
+        }
+
+        if !skip {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    fs::write(&path, out).context("Failed to update SSH config")?;
     Ok(())
 }

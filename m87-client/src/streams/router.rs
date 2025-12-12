@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use tracing::{debug, warn};
 
-use crate::streams::auth::validate_token;
+// use crate::streams::auth::validate_token;
 use crate::streams::quic::QuicIo;
 use crate::streams::serial::handle_serial_io;
 use crate::streams::stream_type::StreamType;

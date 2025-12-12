@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::bail;
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -114,6 +115,17 @@ enum Commands {
 
     #[command(external_subcommand)]
     Device(Vec<String>),
+
+    #[command(subcommand)]
+    Ssh(SshCommands),
+}
+
+#[derive(Subcommand)]
+enum SshCommands {
+    Enable,
+    Disable,
+    #[command(external_subcommand)]
+    Connect(Vec<String>),
 }
 
 #[derive(Parser, Debug)]
@@ -165,11 +177,6 @@ pub enum DeviceCommand {
         path: String,
         /// Optional baud rate (defaults to 115200)
         baud: Option<u32>,
-    },
-    /// Tunnels the device ssh to a local port
-    Ssh {
-        /// Local port to tunnel to
-        local_port: u16,
     },
 }
 
@@ -267,6 +274,49 @@ pub async fn cli() -> anyhow::Result<()> {
             auth::logout_device().await?;
             println!("Logged out successfully");
         }
+
+        Commands::Ssh(cmd) => match cmd {
+            SshCommands::Enable => {
+                println!("Enabling SSH...");
+                device::ssh::ssh_enable()?;
+                println!(
+                    "SSH enabled successfully. You can now connect to device via ssh m87-<device_name>"
+                );
+            }
+            SshCommands::Disable => {
+                println!("Disabling SSH...");
+                device::ssh::ssh_disable()?;
+                println!("SSH disabled successfully");
+            }
+            SshCommands::Connect(args) => {
+                if args.is_empty() {
+                    anyhow::bail!("missing ssh target");
+                }
+
+                let mut transport = false;
+                let mut rest = Vec::new();
+
+                for arg in args {
+                    if arg == "--transport" {
+                        transport = true;
+                    } else {
+                        rest.push(arg);
+                    }
+                }
+
+                let device = rest.first().context("missing ssh target")?.as_str();
+
+                let forwarded_args = &rest[1..];
+
+                if transport {
+                    // INTERNAL PATH — raw transport
+                    device::ssh::connect_device_ssh(device).await?;
+                } else {
+                    // USER PATH — behaves exactly like ssh
+                    device::ssh::exec_ssh(device, forwarded_args)?;
+                }
+            }
+        },
 
         #[cfg(feature = "agent")]
         Commands::Agent(cmd) => match cmd {
@@ -428,11 +478,6 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
         DeviceCommand::Serial { path, baud } => {
             let baud = baud.unwrap_or(115200);
             serial::open_serial(&device, &path, baud).await?;
-            Ok(())
-        }
-
-        DeviceCommand::Ssh { local_port } => {
-            device::ssh::tunnel_device_ssh(&device, local_port).await?;
             Ok(())
         }
     }

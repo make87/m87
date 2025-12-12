@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use futures::future::{AbortHandle, Abortable};
 use governor::{Quota, RateLimiter};
 use m87_shared::roles::Role;
@@ -6,11 +5,11 @@ use mongodb::bson::doc;
 use quinn::{ConnectionError, Endpoint};
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::watch;
+use tokio::io::{self, AsyncWriteExt};
+use tokio::sync::{Semaphore, watch};
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 use crate::api::client_connection::ClientConn;
@@ -19,6 +18,10 @@ use crate::models::device::DeviceDoc;
 use crate::response::ServerError;
 use crate::response::ServerResult;
 use crate::util::app_state::AppState;
+
+const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_TOKEN_LEN: usize = 4096;
+const MAX_CONCURRENT_HANDSHAKES: usize = 64;
 
 pub async fn run_quic_endpoint(
     state: AppState,
@@ -36,7 +39,7 @@ pub async fn run_quic_endpoint(
             .map_err(|e| ServerError::internal_error(&format!("bind QUIC: {e:?}")))?;
 
         info!("QUIC listening on udp://{}", addr);
-
+        let handshake_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES));
         // Accept loop for this endpoint
         loop {
             tokio::select! {
@@ -52,11 +55,18 @@ pub async fn run_quic_endpoint(
                     match incoming {
                         Some(incoming_conn) => {
                             let state_cl = state.clone();
+                            let sem = handshake_sem.clone();
                             info!("Received incoming QUIC connection");
 
                             tokio::spawn(async move {
+                                let permit = match sem.acquire().await {
+                                    Ok(p) => p,
+                                    Err(_) => return,
+                                };
                                 match incoming_conn.await {
                                     Ok(conn) => {
+
+                                        drop(permit);
                                         // Raw QUIC path (CLI, tunnels, forwards)
                                         let _ = handle_quic_connection(conn.clone(), state_cl).await;
                                         conn.close(0u32.into(), b"");
@@ -84,22 +94,32 @@ pub async fn run_quic_endpoint(
 }
 
 pub async fn extract_token(conn: &quinn::Connection) -> Option<String> {
-    // Wait for Stream 0 (first client-initiated bi-stream)
-    let (mut send, mut recv) = conn.accept_bi().await.ok()?;
+    let mut recv = timeout(AUTH_TIMEOUT, conn.accept_uni()).await.ok()?.ok()?;
 
     // Read token length (u16 BE)
     let mut len_buf = [0u8; 2];
-    recv.read_exact(&mut len_buf).await.ok()?;
+    let res = timeout(AUTH_TIMEOUT, recv.read_exact(&mut len_buf))
+        .await
+        .ok()?;
+    if let Err(e) = res {
+        error!("Failed to read token length: {}", e);
+        return None;
+    }
     let len = u16::from_be_bytes(len_buf) as usize;
+
+    if len == 0 || len > MAX_TOKEN_LEN {
+        return None;
+    }
 
     // Read token
     let mut buf = vec![0u8; len];
-    recv.read_exact(&mut buf).await.ok()?;
-
-    // Send ACK to client so it knows server received everything
-    let ack = [1u8];
-    send.write_all(&ack).await.ok()?;
-    send.finish().ok()?; // Finish server send side
+    let res = timeout(AUTH_TIMEOUT, recv.read_exact(&mut buf))
+        .await
+        .ok()?;
+    if let Err(e) = res {
+        error!("Failed to read token: {}", e);
+        return None;
+    }
 
     // Convert to UTF-8 string
     String::from_utf8(buf).ok()
@@ -313,7 +333,6 @@ async fn handle_forward_once(
     device_id: &str,
 ) -> ForwardEnd {
     let active_streams = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_STREAMS));
-
     spawn_udp_bridge(
         client_conn.clone(),
         device_conn.clone(),
@@ -417,36 +436,40 @@ fn spawn_udp_bridge(client: ClientConn, device: quinn::Connection, device_id: St
         let device = device.clone();
         let dev_id = device_id.clone();
 
-        // REAL, ACTIVE RATE LIMITER
-        let udp_limiter = Arc::new(RateLimiter::direct(
-            Quota::per_second(NonZeroU32::new(50_000).unwrap()), // 50k packets/s
-        ));
+        let udp_limiter = Arc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(50_000).unwrap(),
+        )));
 
         tokio::spawn(async move {
             loop {
-                let d = match client.read_datagram().await {
-                    Ok(d) => d,
-                    Err(e) => {
-                        debug!(%dev_id, "udp client->device read_end: {e:?}");
-                        break;
+                tokio::select! {
+                    _ = client.closed() => break,
+                    _ = device.closed() => break,
+
+                    res = client.read_datagram() => {
+                        let d = match res {
+                            Ok(d) => d,
+                            Err(e) => {
+                                debug!(%dev_id, "udp client->device read_end: {e:?}");
+                                break;
+                            }
+                        };
+
+                        if d.len() > MAX_UDP_PAYLOAD {
+                            warn!(%dev_id, len = d.len(), "udp datagram too large, dropping");
+                            continue;
+                        }
+
+                        if udp_limiter.check().is_err() {
+                            warn!(%dev_id, "udp client->device rate limit exceeded, dropping");
+                            continue;
+                        }
+
+                        if let Err(e) = device.send_datagram(d) {
+                            warn!(%dev_id, "udp client->device send error: {e:?}");
+                            tokio::time::sleep(UDP_SEND_BACKOFF).await;
+                        }
                     }
-                };
-
-                if d.len() > MAX_UDP_PAYLOAD {
-                    warn!(%dev_id, len = d.len(), "udp datagram too large, dropping");
-                    continue;
-                }
-
-                // ACTUAL RATE LIMITING
-                if udp_limiter.check().is_err() {
-                    // drop packet; do not queue → prevents memory blowup
-                    warn!(%dev_id, "udp client->device rate limit exceeded, dropping");
-                    continue;
-                }
-
-                if let Err(e) = device.send_datagram(d) {
-                    warn!(%dev_id, "udp client->device send error: {e:?}");
-                    tokio::time::sleep(UDP_SEND_BACKOFF).await;
                 }
             }
         });
@@ -464,27 +487,34 @@ fn spawn_udp_bridge(client: ClientConn, device: quinn::Connection, device_id: St
 
         tokio::spawn(async move {
             loop {
-                let d = match device.read_datagram().await {
-                    Ok(d) => d,
-                    Err(e) => {
-                        debug!(%dev_id, "udp device->client read_end: {e:?}");
-                        break;
+                tokio::select! {
+                    _ = client.closed() => break,
+                    _ = device.closed() => break,
+
+                    res = device.read_datagram() => {
+                        let d = match res {
+                            Ok(d) => d,
+                            Err(e) => {
+                                debug!(%dev_id, "udp device->client read_end: {e:?}");
+                                break;
+                            }
+                        };
+
+                        if d.len() > MAX_UDP_PAYLOAD {
+                            warn!(%dev_id, len = d.len(), "udp datagram too large, dropping");
+                            continue;
+                        }
+
+                        if udp_limiter.check().is_err() {
+                            warn!(%dev_id, "udp device->client rate limit exceeded, dropping");
+                            continue;
+                        }
+
+                        if let Err(e) = client.send_datagram(d) {
+                            warn!(%dev_id, "udp device->client send error: {e:?}");
+                            tokio::time::sleep(UDP_SEND_BACKOFF).await;
+                        }
                     }
-                };
-
-                if d.len() > MAX_UDP_PAYLOAD {
-                    warn!(%dev_id, len = d.len(), "udp datagram too large, dropping");
-                    continue;
-                }
-
-                if udp_limiter.check().is_err() {
-                    warn!(%dev_id, "udp device->client rate limit exceeded, dropping");
-                    continue;
-                }
-
-                if let Err(e) = client.send_datagram(d) {
-                    warn!(%dev_id, "udp device->client send error: {e:?}");
-                    tokio::time::sleep(UDP_SEND_BACKOFF).await;
                 }
             }
         });

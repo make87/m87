@@ -1,11 +1,11 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, io::Write, path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::Result;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use russh::keys::ssh_key::rand_core::OsRng;
+use anyhow::{Result, anyhow};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use russh::keys::PublicKey;
-use tokio::{io, net::TcpStream, process::Command, sync::Mutex, task};
-use tracing::error;
+use russh::keys::ssh_key::rand_core::OsRng;
+use tokio::{io, net::TcpStream, sync::Mutex, task};
+use tracing::{error, info, warn};
 
 use russh::server::{self, Auth, Config as ServerConfig, Handle, Msg, Session};
 use russh::{Channel, ChannelId};
@@ -13,15 +13,20 @@ use russh::{Channel, ChannelId};
 use crate::util::fs::run_sftp_server;
 
 /// One PTY-backed shell session per SSH channel.
+/// Reader and writer are separated to avoid lock contention.
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
-    reader: Box<dyn std::io::Read + Send>,
-    writer: Box<dyn std::io::Write + Send>,
     #[allow(dead_code)]
     child: Box<dyn Child + Send>,
     rows: u32,
     cols: u32,
 }
+
+/// Separate reader for PTY output (moved to its own Arc<Mutex<>>)
+type PtyReader = Arc<std::sync::Mutex<Box<dyn std::io::Read + Send>>>;
+
+/// Separate writer for PTY input (moved to its own Arc<Mutex<>>)
+type PtyWriter = Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>;
 
 impl PtySession {
     fn resize(&mut self, rows: u32, cols: u32) {
@@ -42,16 +47,20 @@ impl PtySession {
 pub struct M87SshHandler {
     /// Root directory for SFTP and exec/shell (e.g. `/` or some chroot-ish base).
     root_dir: PathBuf,
-    /// Session channels we’ve opened; used to hand off SFTP, etc.
+    /// Session channels we've opened; used to hand off SFTP, etc.
     session_channels: HashMap<ChannelId, Channel<Msg>>,
     /// Global async handle used to send data/events to channels.
     handle: Option<Handle>,
-    /// PTY sessions keyed by SSH channel id.
+    /// PTY sessions keyed by SSH channel id (for resize).
     ptys: HashMap<ChannelId, Arc<Mutex<PtySession>>>,
+    /// PTY writers keyed by SSH channel id (separate lock from reader).
+    pty_writers: HashMap<ChannelId, PtyWriter>,
     /// Cached PTY size requested before shell starts.
     pty_sizes: HashMap<ChannelId, (u32, u32)>,
     /// Default login shell for PTY sessions.
     default_shell: String,
+    /// Environment variables requested by the client (per channel)
+    env_vars: HashMap<ChannelId, HashMap<String, String>>,
 }
 
 impl M87SshHandler {
@@ -61,15 +70,16 @@ impl M87SshHandler {
             session_channels: HashMap::new(),
             handle: None,
             ptys: HashMap::new(),
+            pty_writers: HashMap::new(),
             pty_sizes: HashMap::new(),
-            default_shell: "/bin/bash".to_string(),
+            default_shell: default_shell(),
+            env_vars: HashMap::new(),
         }
     }
 
-    fn spawn_pty_shell_for_channel(
-        &mut self,
-        channel: ChannelId,
-    ) -> Result<Arc<Mutex<PtySession>>> {
+    /// Spawns a PTY shell and returns the reader (for output).
+    /// The writer is stored internally for use by the data handler.
+    fn spawn_pty_shell_for_channel(&mut self, channel: ChannelId) -> Result<PtyReader> {
         let (cols, rows) = self.pty_sizes.get(&channel).copied().unwrap_or((80, 24));
 
         let pty_system = native_pty_system();
@@ -80,7 +90,17 @@ impl M87SshHandler {
             pixel_height: 0,
         })?;
 
+        // Build shell command
         let mut cmd = CommandBuilder::new(&self.default_shell);
+
+        // Apply env vars requested via SSH
+        if let Some(envs) = self.env_vars.get(&channel) {
+            for (k, v) in envs {
+                cmd.env(k, v);
+            }
+        }
+
+        // Fallback TERM if none provided
         cmd.env("TERM", "xterm-256color");
 
         let child = pair.slave.spawn_command(cmd)?;
@@ -89,34 +109,256 @@ impl M87SshHandler {
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
-        let master = pair.master;
         let pty_session = PtySession {
-            master,
-            reader,
-            writer,
+            master: pair.master,
             child,
             rows,
             cols,
         };
 
-        let arc = Arc::new(Mutex::new(pty_session));
-        self.ptys.insert(channel, arc.clone());
-        Ok(arc)
+        let session_arc = Arc::new(Mutex::new(pty_session));
+        self.ptys.insert(channel, session_arc);
+
+        let writer_arc: PtyWriter = Arc::new(std::sync::Mutex::new(writer));
+        self.pty_writers.insert(channel, writer_arc);
+
+        Ok(Arc::new(std::sync::Mutex::new(reader)))
+    }
+
+    fn exec_with_pty(&mut self, channel: ChannelId, cmd: &str) -> Result<()> {
+        let (cols, rows) = self.pty_sizes.get(&channel).copied().unwrap_or((80, 24));
+
+        let pty_system = native_pty_system();
+        let pair = pty_system.openpty(PtySize {
+            rows: rows as u16,
+            cols: cols as u16,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+
+        let mut command = CommandBuilder::new(&self.default_shell);
+        command.arg("-c");
+        command.arg(cmd);
+
+        // apply env vars
+        if let Some(envs) = self.env_vars.get(&channel) {
+            for (k, v) in envs {
+                command.env(k, v);
+            }
+        }
+
+        let child = pair.slave.spawn_command(command)?;
+        drop(pair.slave);
+
+        let reader = pair.master.try_clone_reader()?;
+        let writer = pair.master.take_writer()?;
+
+        let pty_session = PtySession {
+            master: pair.master,
+            child,
+            rows,
+            cols,
+        };
+
+        let pty_arc = Arc::new(Mutex::new(pty_session));
+        self.ptys.insert(channel, pty_arc.clone());
+        self.pty_writers
+            .insert(channel, Arc::new(std::sync::Mutex::new(writer)));
+
+        let handle = self.handle.clone().unwrap();
+
+        // stdout → SSH
+        tokio::spawn({
+            let reader = Arc::new(std::sync::Mutex::new(reader));
+            let handle = handle.clone();
+            async move {
+                loop {
+                    let data = tokio::task::spawn_blocking({
+                        let reader = reader.clone();
+                        move || {
+                            use std::io::Read;
+                            let mut buf = [0u8; 8192];
+                            let mut guard = reader.lock().unwrap();
+                            guard
+                                .read(&mut buf)
+                                .ok()
+                                .filter(|&n| n > 0)
+                                .map(|n| buf[..n].to_vec())
+                        }
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+
+                    match data {
+                        Some(bytes) => {
+                            if handle.data(channel, bytes.into()).await.is_err() {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                                continue;
+                            }
+                        }
+                        None => {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn exec_without_pty(&mut self, channel: ChannelId, cmd: &str) -> Result<()> {
+        use std::process::Stdio;
+
+        let handle = self.handle.clone().unwrap();
+        let cwd = self.root_dir.clone();
+
+        let Some(ch) = self.session_channels.remove(&channel) else {
+            return Ok(());
+        };
+
+        let mut child = match tokio::process::Command::new(&self.default_shell)
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!("failed to spawn command: {e}\n");
+                let _ = handle.data(channel, msg.into()).await;
+                let _ = handle.exit_status_request(channel, 1).await;
+                let _ = handle.eof(channel).await;
+                let _ = handle.close(channel).await;
+                return Ok(());
+            }
+        };
+
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut chan_stream = ch.into_stream();
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let mut proc_buf = [0u8; 8192];
+            let mut chan_buf = [0u8; 8192];
+            let mut stdin_opt = Some(stdin);
+            let mut stdout_done = false;
+
+            loop {
+                tokio::select! {
+                    result = stdout.read(&mut proc_buf), if !stdout_done => {
+                        match result {
+                            Ok(0) => stdout_done = true,
+                            Ok(n) => {
+                                if chan_stream.write_all(&proc_buf[..n]).await.is_err() {
+                                    break;
+                                }
+                                let _ = chan_stream.flush().await;
+                            }
+                            Err(_) => stdout_done = true,
+                        }
+                    }
+
+                    result = chan_stream.read(&mut chan_buf), if stdin_opt.is_some() => {
+                        match result {
+                            Ok(0) => {
+                                stdin_opt = None;
+                            }
+                            Ok(n) => {
+                                if let Some(ref mut stdin) = stdin_opt {
+                                    let _ = stdin.write_all(&chan_buf[..n]).await;
+                                }
+                            }
+                            Err(_) => {
+                                stdin_opt = None;
+                            }
+                        }
+                    }
+
+                    else => break,
+                }
+            }
+
+            let exit_code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(1) as u32;
+
+            let _ = handle.exit_status_request(channel, exit_code).await;
+            let _ = handle.eof(channel).await;
+            let _ = handle.close(channel).await;
+        });
+
+        Ok(())
     }
 }
 
-/// Build a minimal SSH server config (host key handled outside).
+/// Get or create the SSH keys directory.
+fn ssh_keys_dir() -> Result<PathBuf> {
+    let dir = dirs::config_dir()
+        .ok_or_else(|| anyhow!("No config directory found"))?
+        .join("m87")
+        .join("ssh_keys");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Load an existing SSH host key or generate a new one for this device.
+fn load_or_generate_host_key() -> Result<russh::keys::PrivateKey> {
+    let key_path = ssh_keys_dir()?.join("host_key.pem");
+
+    if key_path.exists() {
+        let pem = std::fs::read_to_string(&key_path)?;
+        let key = russh::keys::PrivateKey::from_openssh(&pem)
+            .map_err(|e| anyhow!("Failed to parse host key: {}", e))?;
+        info!("Loaded existing SSH host key");
+        Ok(key)
+    } else {
+        let key = russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519)
+            .map_err(|e| anyhow!("Failed to generate key: {}", e))?;
+
+        // Serialize to OpenSSH format
+        let pem = key
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .map_err(|e| anyhow!("Failed to serialize key: {}", e))?;
+
+        // Save with restricted permissions (0o600 on Unix)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .mode(0o600)
+                .open(&key_path)?
+                .write_all(pem.as_bytes())?;
+        }
+        #[cfg(not(unix))]
+        std::fs::write(&key_path, &pem)?;
+
+        info!("Generated new SSH host key");
+        Ok(key)
+    }
+}
+
+/// Build a minimal SSH server config with persistent host key.
 pub fn make_server_config() -> Arc<ServerConfig> {
     let mut config = ServerConfig::default();
     config.server_id = russh::SshId::Standard("SSH-2.0-m87-ssh".to_string());
-    config.inactivity_timeout = Some(Duration::from_secs(600));
+    config.inactivity_timeout = Some(Duration::from_hours(2));
     config.auth_rejection_time = Duration::from_millis(0);
     config.window_size = 4 * 1024 * 1024; // OK > 1MB
     config.channel_buffer_size = 4 * 1024 * 1024; // OK > 1MB
     config.maximum_packet_size = 65535; // MUST stay <= 65535
 
-    let host_key = russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519)
-        .expect("failed to generate SSH host key");
+    let host_key = load_or_generate_host_key().unwrap_or_else(|e| {
+        warn!("Failed to load/save host key: {}, using ephemeral key", e);
+        russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519)
+            .expect("failed to generate SSH host key")
+    });
     config.keys.push(host_key);
     Arc::new(config)
 }
@@ -148,7 +390,7 @@ impl server::Handler for M87SshHandler {
         }
 
         self.session_channels.insert(id, channel);
-        session.channel_success(id)?;
+        // session.channel_success(id)?;
         Ok(true)
     }
 
@@ -159,7 +401,9 @@ impl server::Handler for M87SshHandler {
     ) -> Result<(), Self::Error> {
         self.session_channels.remove(&channel);
         self.ptys.remove(&channel);
+        self.pty_writers.remove(&channel);
         self.pty_sizes.remove(&channel);
+        self.env_vars.remove(&channel);
         Ok(())
     }
 
@@ -190,7 +434,7 @@ impl server::Handler for M87SshHandler {
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        _term: &str,
+        term: &str,
         col_width: u32,
         row_height: u32,
         _pix_width: u32,
@@ -199,6 +443,13 @@ impl server::Handler for M87SshHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.pty_sizes.insert(channel, (col_width, row_height));
+
+        // Save TERM so we can apply it when spawning shell
+        self.env_vars
+            .entry(channel)
+            .or_default()
+            .insert("TERM".to_string(), term.to_string());
+
         session.channel_success(channel)?;
         Ok(())
     }
@@ -223,45 +474,96 @@ impl server::Handler for M87SshHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let pty = self.spawn_pty_shell_for_channel(channel)?;
-
+        // Spawn PTY + shell
+        let reader = self.spawn_pty_shell_for_channel(channel)?;
         session.channel_success(channel)?;
 
         let handle = self.handle.clone().unwrap();
+        let pty_session = self.ptys.get(&channel).unwrap().clone();
 
-        tokio::spawn(async move {
-            let mut buf = [0u8; 8192];
+        // -------- PTY → SSH (stdout) --------
+        tokio::spawn({
+            let reader = reader.clone();
+            let handle = handle.clone();
+            async move {
+                loop {
+                    let data = tokio::task::spawn_blocking({
+                        let reader = reader.clone();
+                        move || {
+                            use std::io::Read;
+                            let mut buf = [0u8; 8192];
+                            let mut guard = reader.lock().unwrap();
 
-            loop {
-                let n = task::spawn_blocking({
-                    let pty = pty.clone();
-                    move || {
-                        use std::io::Read;
-                        let mut guard = pty.blocking_lock();
-                        guard.reader.read(&mut buf)
-                    }
-                })
-                .await
-                .unwrap_or(Ok(0))
-                .unwrap_or(0);
-
-                if n == 0 {
-                    break;
-                }
-
-                if handle
-                    .data(channel, buf[..n].to_vec().into())
+                            match guard.read(&mut buf) {
+                                Ok(n) if n > 0 => Some(buf[..n].to_vec()),
+                                Ok(_) => None, // NOT EOF for PTY
+                                Err(_) => None,
+                            }
+                        }
+                    })
                     .await
-                    .is_err()
-                {
-                    break;
+                    .ok()
+                    .flatten();
+
+                    if let Some(bytes) = data {
+                        if handle.data(channel, bytes.into()).await.is_err() {
+                            break;
+                        }
+                    } else {
+                        // PTY idle — do NOT exit
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
                 }
             }
+        });
 
+        // -------- Shell lifetime → SSH close --------
+        tokio::spawn(async move {
+            let exit_code = tokio::task::spawn_blocking(move || {
+                let mut guard = futures::executor::block_on(pty_session.lock());
+                guard.child.wait().ok().and_then(|s| Some(s.exit_code()))
+            })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+
+            let _ = handle.exit_status_request(channel, exit_code).await;
             let _ = handle.eof(channel).await;
             let _ = handle.close(channel).await;
         });
 
+        Ok(())
+    }
+
+    async fn signal(
+        &mut self,
+        channel: ChannelId,
+        signal_name: russh::Sig,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        tracing::debug!("SSH signal {:?} on {:?}", signal_name, channel);
+
+        if let Some(pty) = self.ptys.get(&channel) {
+            // Best-effort: send SIGINT to the PTY child
+            let _ = pty.lock().await.child.kill();
+        }
+        Ok(())
+    }
+
+    async fn env_request(
+        &mut self,
+        channel: ChannelId,
+        variable_name: &str,
+        variable_value: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.env_vars
+            .entry(channel)
+            .or_default()
+            .insert(variable_name.to_string(), variable_value.to_string());
+
+        session.channel_success(channel)?;
         Ok(())
     }
 
@@ -271,14 +573,25 @@ impl server::Handler for M87SshHandler {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(pty) = self.ptys.get(&channel) {
-            let pty = pty.clone();
+        tracing::debug!(
+            "SSH data received: {} bytes for channel {:?}",
+            data.len(),
+            channel
+        );
+
+        // Route to PTY writer (for shell sessions)
+        // Note: exec sessions use Channel::into_stream() so data flows directly
+        if let Some(writer) = self.pty_writers.get(&channel) {
+            let writer = writer.clone();
             let buf = data.to_vec();
             task::spawn_blocking(move || {
                 use std::io::Write;
-                let mut guard = pty.blocking_lock();
-                let _ = guard.writer.write_all(&buf);
+                let mut guard = writer.lock().unwrap();
+                let _ = guard.write_all(&buf);
+                let _ = guard.flush();
             });
+        } else {
+            tracing::debug!("No writer found for channel {:?}", channel);
         }
         Ok(())
     }
@@ -292,41 +605,16 @@ impl server::Handler for M87SshHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         let cmd = String::from_utf8_lossy(data).to_string();
-        let handle = self.handle.clone().unwrap();
 
         session.channel_success(channel)?;
 
-        let cwd = self.root_dir.clone();
-
-        tokio::spawn(async move {
-            use std::process::Stdio;
-            let output = Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&cmd)
-                .current_dir(cwd)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()
-                .await;
-
-            match output {
-                Ok(out) => {
-                    if !out.stdout.is_empty() {
-                        let _ = handle.data(channel, out.stdout.into()).await;
-                    }
-                    if !out.stderr.is_empty() {
-                        let _ = handle.data(channel, out.stderr.into()).await;
-                    }
-                }
-                Err(e) => {
-                    let msg = format!("command failed: {e}\n");
-                    let _ = handle.data(channel, msg.into_bytes().into()).await;
-                }
-            }
-
-            let _ = handle.eof(channel).await;
-            let _ = handle.close(channel).await;
-        });
+        if self.pty_sizes.contains_key(&channel) {
+            // PTY-backed exec (for Zed / VS Code terminals)
+            self.exec_with_pty(channel, &cmd)?;
+        } else {
+            // Pipe-based exec (scp-style, one-shot commands, etc.)
+            self.exec_without_pty(channel, &cmd).await?;
+        }
 
         Ok(())
     }
@@ -359,5 +647,37 @@ impl server::Handler for M87SshHandler {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn default_shell() -> String {
+    use std::{ffi::CStr, path::Path};
+    // 1. $SHELL (most reliable)
+    if let Ok(shell) = std::env::var("SHELL") {
+        if !shell.is_empty() {
+            return shell;
+        }
+    }
+
+    // 2. /etc/passwd via libc
+    unsafe {
+        let uid = libc::geteuid();
+        let pwd = libc::getpwuid(uid);
+        if !pwd.is_null() {
+            let shell = CStr::from_ptr((*pwd).pw_shell);
+            if let Ok(shell) = shell.to_str() {
+                if !shell.is_empty() {
+                    return shell.to_string();
+                }
+            }
+        }
+    }
+
+    // 3. Common fallbacks
+    if Path::new("/bin/bash").exists() {
+        "/bin/bash".to_string()
+    } else {
+        "/bin/sh".to_string()
     }
 }

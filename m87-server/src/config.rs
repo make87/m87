@@ -67,7 +67,7 @@ impl AppConfig {
             .collect();
 
         let certificate_path = std::env::var("CERTIFICATE_PATH")
-            .unwrap_or_else(|_| "/data/m87/certs/".to_string());
+            .unwrap_or_else(|_| "/tmp/data/m87/certs/".to_string());
 
         let webtransport_port = std::env::var("WEBTRANSPORT_PORT")
             .unwrap_or_else(|_| "8085".into())
