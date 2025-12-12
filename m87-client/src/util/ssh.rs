@@ -384,7 +384,6 @@ impl server::Handler for M87SshHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         use std::process::Stdio;
-        use tokio::io::AsyncReadExt;
 
         let cmd = String::from_utf8_lossy(data).to_string();
         let handle = self.handle.clone().unwrap();
@@ -428,48 +427,71 @@ impl server::Handler for M87SshHandler {
 
         // Spawn bidirectional copy between SSH channel and process
         tokio::spawn(async move {
-            // Copy in both directions using tokio::select!
-            let copy_result = async {
-                let mut chan_buf = [0u8; 8192];
-                let mut proc_buf = [0u8; 8192];
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt};
 
-                loop {
-                    tokio::select! {
-                        // Channel -> Process stdin
-                        result = chan_stream.read(&mut chan_buf) => {
-                            match result {
-                                Ok(0) => {
-                                    // EOF from channel, close stdin
-                                    drop(stdin);
+            // For short-lived commands, we need to read all stdout before closing
+            // For long-lived commands (like Zed proxy), we need bidirectional streaming
+
+            let mut proc_buf = [0u8; 8192];
+            let mut chan_buf = [0u8; 8192];
+            let mut stdin_opt = Some(stdin);
+            let mut stdout_done = false;
+
+            loop {
+                let stdin_active = stdin_opt.is_some();
+
+                tokio::select! {
+                    biased; // Prioritize stdout to ensure we don't miss output
+
+                    // Process stdout -> Channel (prioritized)
+                    result = stdout.read(&mut proc_buf), if !stdout_done => {
+                        match result {
+                            Ok(0) => {
+                                stdout_done = true;
+                                // Don't break yet - need to close channel properly
+                            }
+                            Ok(n) => {
+                                if chan_stream.write_all(&proc_buf[..n]).await.is_err() {
                                     break;
                                 }
-                                Ok(n) => {
-                                    use tokio::io::AsyncWriteExt;
-                                    if stdin.write_all(&chan_buf[..n]).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Err(_) => break,
+                                // Flush to ensure data is sent immediately
+                                let _ = chan_stream.flush().await;
                             }
-                        }
-                        // Process stdout -> Channel
-                        result = stdout.read(&mut proc_buf) => {
-                            match result {
-                                Ok(0) => break, // Process done
-                                Ok(n) => {
-                                    use tokio::io::AsyncWriteExt;
-                                    if chan_stream.write_all(&proc_buf[..n]).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Err(_) => break,
+                            Err(_) => {
+                                stdout_done = true;
                             }
                         }
                     }
-                }
-            };
 
-            copy_result.await;
+                    // Channel -> Process stdin
+                    result = chan_stream.read(&mut chan_buf), if stdin_active => {
+                        match result {
+                            Ok(0) => {
+                                // EOF from channel, close stdin
+                                stdin_opt.take();
+                            }
+                            Ok(n) => {
+                                if let Some(ref mut stdin) = stdin_opt {
+                                    if stdin.write_all(&chan_buf[..n]).await.is_err() {
+                                        stdin_opt.take();
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                stdin_opt.take();
+                            }
+                        }
+                    }
+
+                    else => {
+                        // Both directions done
+                        break;
+                    }
+                }
+            }
+
+            // Final flush
+            let _ = chan_stream.flush().await;
 
             // Wait for process exit and send status
             let exit_code = match child.wait().await {
