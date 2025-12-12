@@ -399,7 +399,7 @@ impl server::Handler for M87SshHandler {
                 .output()
                 .await;
 
-            match output {
+            let exit_code = match output {
                 Ok(out) => {
                     if !out.stdout.is_empty() {
                         let _ = handle.data(channel, out.stdout.into()).await;
@@ -407,13 +407,17 @@ impl server::Handler for M87SshHandler {
                     if !out.stderr.is_empty() {
                         let _ = handle.data(channel, out.stderr.into()).await;
                     }
+                    out.status.code().unwrap_or(1) as u32
                 }
                 Err(e) => {
                     let msg = format!("command failed: {e}\n");
                     let _ = handle.data(channel, msg.into_bytes().into()).await;
+                    1
                 }
-            }
+            };
 
+            // Send exit status (required by SSH protocol for exec)
+            let _ = handle.exit_status_request(channel, exit_code).await;
             let _ = handle.eof(channel).await;
             let _ = handle.close(channel).await;
         });
