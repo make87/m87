@@ -57,11 +57,36 @@ impl M87SftpHandler {
         NEXT_HANDLE.fetch_add(1, Ordering::Relaxed).to_string()
     }
 
+    /// Resolve a path like scp does:
+    /// - `/absolute/path` → use as-is
+    /// - `~/path` or `~` → expand to home directory
+    /// - `relative/path` → resolve relative to home directory
     fn resolve_path(&self, path: &str) -> Result<PathBuf, StatusCode> {
+        // Get home directory for relative path resolution
+        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+
+        // Determine the base path based on the path format (scp-style)
+        let expanded = if path.starts_with('/') {
+            // Absolute path - use as-is
+            PathBuf::from(path)
+        } else if path == "~" {
+            // Just home directory
+            home_dir.clone()
+        } else if let Some(rest) = path.strip_prefix("~/") {
+            // ~/something - expand tilde
+            home_dir.join(rest)
+        } else {
+            // Relative path - resolve relative to home directory (like scp)
+            home_dir.join(path)
+        };
+
+        // Clean the path (remove . and ..)
         let mut clean = PathBuf::new();
-        for comp in Path::new(path).components() {
+        for comp in expanded.components() {
             match comp {
-                Component::RootDir => {}
+                Component::RootDir => {
+                    clean.push("/");
+                }
                 Component::CurDir => {}
                 Component::ParentDir => {
                     clean.pop();
@@ -73,10 +98,8 @@ impl M87SftpHandler {
             }
         }
 
-        let full = self.root.join(&clean);
-
         // Try to canonicalize the full path first (for existing files)
-        if let Ok(canon) = std::fs::canonicalize(&full) {
+        if let Ok(canon) = std::fs::canonicalize(&clean) {
             if !canon.starts_with(&self.root) {
                 return Err(StatusCode::PermissionDenied);
             }
@@ -85,7 +108,7 @@ impl M87SftpHandler {
 
         // File doesn't exist - canonicalize parent directory instead
         // This allows file creation while preventing path traversal
-        let parent = full.parent().ok_or(StatusCode::NoSuchFile)?;
+        let parent = clean.parent().ok_or(StatusCode::NoSuchFile)?;
         let canon_parent = std::fs::canonicalize(parent).map_err(|_| StatusCode::NoSuchFile)?;
 
         if !canon_parent.starts_with(&self.root) {
@@ -93,7 +116,7 @@ impl M87SftpHandler {
         }
 
         // Return parent + filename (the file will be created)
-        let filename = full.file_name().ok_or(StatusCode::NoSuchFile)?;
+        let filename = clean.file_name().ok_or(StatusCode::NoSuchFile)?;
         Ok(canon_parent.join(filename))
     }
 

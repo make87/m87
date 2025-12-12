@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use russh::server;
 
 use crate::{
@@ -6,11 +8,8 @@ use crate::{
 };
 
 pub async fn handle_ssh_io(io: QuicIo) {
-    let home_dir = dirs::home_dir().unwrap();
-    let home_dir = home_dir.to_path_buf();
-
     let config = make_server_config();
-    let handler = M87SshHandler::new(home_dir);
+    let handler = M87SshHandler::new(PathBuf::from("/"));
 
     match server::run_stream(config, io, handler).await {
         Ok(running) => {
