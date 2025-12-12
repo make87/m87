@@ -2,9 +2,8 @@
 //!
 //! Tests for `m87 <device> docker <args>`
 //!
-//! Note: These tests require Docker to be available on the agent.
-//! In a containerized test environment, this requires Docker-in-Docker
-//! or mounting the Docker socket.
+//! These tests use Docker-in-Docker via socket mounting. The e2e agent container
+//! has Docker CLI installed and mounts /var/run/docker.sock from the host.
 
 use super::fixtures::TestSetup;
 use super::helpers::E2EError;
@@ -19,18 +18,11 @@ async fn test_docker_ps() -> Result<(), E2EError> {
 
     tracing::info!("docker ps output: {}", output);
 
-    // Docker ps should return container list format or indicate Docker isn't available
-    // Header typically contains CONTAINER ID or similar
-    let is_docker_output = output.contains("CONTAINER")
-        || output.contains("container")
-        || output.is_empty()  // No running containers
-        || output.contains("Cannot connect")  // Docker not available
-        || output.contains("not installed")  // Docker CLI not installed
-        || output.contains("No such file");  // Docker binary not found
-
+    // Docker ps should return container list with header
+    // Should see CONTAINER ID header (Docker is now available via socket mount)
     assert!(
-        is_docker_output,
-        "Unexpected docker ps output: {}",
+        output.contains("CONTAINER ID") || output.contains("CONTAINER"),
+        "Expected Docker ps output with CONTAINER header, got: {}",
         output
     );
 
@@ -48,18 +40,11 @@ async fn test_docker_images() -> Result<(), E2EError> {
 
     tracing::info!("docker images output: {}", output);
 
-    // Docker images should return image list format or indicate Docker isn't available
-    let is_docker_output = output.contains("REPOSITORY")
-        || output.contains("IMAGE")
-        || output.contains("TAG")
-        || output.is_empty()
-        || output.contains("Cannot connect")
-        || output.contains("not installed")
-        || output.contains("No such file");
-
+    // Docker images should return image list with header
+    // Note: Docker CE uses "IMAGE" header, older versions use "REPOSITORY"
     assert!(
-        is_docker_output,
-        "Unexpected docker images output: {}",
+        output.contains("REPOSITORY") || output.contains("IMAGE"),
+        "Expected Docker images output with IMAGE/REPOSITORY header, got: {}",
         output
     );
 
@@ -77,18 +62,10 @@ async fn test_docker_info() -> Result<(), E2EError> {
 
     tracing::info!("docker info output: {}", output);
 
-    // Docker info should return system info or indicate Docker isn't available
-    let is_docker_output = output.contains("Server")
-        || output.contains("Containers")
-        || output.contains("Images")
-        || output.contains("Storage Driver")
-        || output.contains("Cannot connect")
-        || output.contains("not installed")
-        || output.contains("No such file");
-
+    // Docker info should return system information
     assert!(
-        is_docker_output,
-        "Unexpected docker info output: {}",
+        output.contains("Server") || output.contains("Containers") || output.contains("Images"),
+        "Expected Docker info output with system info, got: {}",
         output
     );
 
@@ -106,17 +83,10 @@ async fn test_docker_version() -> Result<(), E2EError> {
 
     tracing::info!("docker version output: {}", output);
 
-    // Docker version should return version info or indicate Docker isn't available
-    let is_docker_output = output.contains("Version")
-        || output.contains("Client")
-        || output.contains("Server")
-        || output.contains("Cannot connect")
-        || output.contains("not installed")
-        || output.contains("No such file");
-
+    // Docker version should return version info
     assert!(
-        is_docker_output,
-        "Unexpected docker version output: {}",
+        output.contains("Version") || output.contains("Client") || output.contains("Server"),
+        "Expected Docker version output, got: {}",
         output
     );
 

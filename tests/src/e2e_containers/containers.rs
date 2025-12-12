@@ -1,6 +1,6 @@
 use std::time::Duration;
 use testcontainers::{
-    core::{ExecCommand, IntoContainerPort, WaitFor},
+    core::{ExecCommand, IntoContainerPort, Mount, WaitFor},
     runners::AsyncRunner,
     ContainerAsync, GenericImage, ImageExt,
 };
@@ -119,12 +119,28 @@ impl E2EInfra {
     async fn start_agent(run_id: &str) -> Result<ContainerAsync<GenericImage>, Box<dyn std::error::Error>> {
         let container_name = format!("e2e-agent-{}", run_id);
         // Note: with_entrypoint and with_cmd must be called on GenericImage before ImageExt methods
-        let image = GenericImage::new(CLIENT_IMAGE_NAME, CLIENT_IMAGE_TAG)
+        let mut image = GenericImage::new(CLIENT_IMAGE_NAME, CLIENT_IMAGE_TAG)
             .with_entrypoint("sh")
             .with_cmd(vec!["-c", "sleep infinity"])
             .with_env_var("RUST_LOG", "info,m87_client=debug")
             .with_network(NETWORK_NAME)
             .with_container_name(&container_name);
+
+        // Mount Docker socket for Docker-in-Docker support
+        // Handle cross-platform Docker socket paths:
+        // - Linux: /var/run/docker.sock
+        // - macOS Docker Desktop: ~/.docker/run/docker.sock (or /var/run/docker.sock if symlink enabled)
+        // - Windows WSL2: /var/run/docker.sock
+        let docker_socket = get_docker_socket_path();
+        if let Some(socket_path) = docker_socket {
+            tracing::info!("Mounting Docker socket from: {}", socket_path);
+            image = image.with_mount(Mount::bind_mount(
+                socket_path,
+                "/var/run/docker.sock",
+            ));
+        } else {
+            tracing::warn!("Docker socket not found - Docker tests may fail");
+        }
 
         let container = image.start().await?;
         Ok(container)
@@ -347,4 +363,44 @@ impl E2EInfra {
         );
         Ok(combined)
     }
+}
+
+/// Get the Docker socket path for the current platform
+/// Returns None if no socket is found
+fn get_docker_socket_path() -> Option<String> {
+    use std::path::Path;
+
+    // Check in order of preference:
+    // 1. DOCKER_HOST environment variable (explicit override)
+    if let Ok(docker_host) = std::env::var("DOCKER_HOST") {
+        if docker_host.starts_with("unix://") {
+            let path = docker_host.strip_prefix("unix://").unwrap();
+            if Path::new(path).exists() {
+                return Some(path.to_string());
+            }
+        }
+    }
+
+    // 2. Standard Linux/WSL2 path
+    if Path::new("/var/run/docker.sock").exists() {
+        return Some("/var/run/docker.sock".to_string());
+    }
+
+    // 3. macOS Docker Desktop user-specific path (since Docker Desktop 4.13)
+    if let Ok(home) = std::env::var("HOME") {
+        let macos_path = format!("{}/.docker/run/docker.sock", home);
+        if Path::new(&macos_path).exists() {
+            return Some(macos_path);
+        }
+    }
+
+    // 4. Colima (popular Docker Desktop alternative on macOS)
+    if let Ok(home) = std::env::var("HOME") {
+        let colima_path = format!("{}/.colima/default/docker.sock", home);
+        if Path::new(&colima_path).exists() {
+            return Some(colima_path);
+        }
+    }
+
+    None
 }

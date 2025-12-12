@@ -71,16 +71,13 @@ async fn build_images() -> Result<(), String> {
         }
     }
 
-    // Build client image
-    tracing::info!(
-        "Building {} (Docker cache will speed up if unchanged)...",
-        CLIENT_IMAGE
-    );
+    // Build base client image first (m87-client:latest)
+    tracing::info!("Building m87-client:latest (base image)...");
     let status = Command::new("docker")
         .args([
             "build",
             "-t",
-            CLIENT_IMAGE,
+            "m87-client:latest",
             "-f",
             "m87-client/Dockerfile",
             "--build-arg",
@@ -96,15 +93,50 @@ async fn build_images() -> Result<(), String> {
     match status {
         Ok(s) if !s.success() => {
             return Err(format!(
-                "Failed to build client image (exit code: {:?})",
+                "Failed to build base client image (exit code: {:?})",
                 s.code()
             ));
         }
         Err(e) => {
-            return Err(format!("Failed to run docker build for client: {}", e));
+            return Err(format!("Failed to run docker build for base client: {}", e));
         }
         _ => {
-            tracing::info!("Client image built successfully");
+            tracing::info!("Base client image built successfully");
+        }
+    }
+
+    // Build e2e client image (extends base with Docker CLI)
+    tracing::info!(
+        "Building {} (e2e image with Docker CLI)...",
+        CLIENT_IMAGE
+    );
+    let status = Command::new("docker")
+        .args([
+            "build",
+            "-t",
+            CLIENT_IMAGE,
+            "-f",
+            "m87-client/Dockerfile.e2e",
+            ".",
+        ])
+        .current_dir(&workspace_root)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await;
+
+    match status {
+        Ok(s) if !s.success() => {
+            return Err(format!(
+                "Failed to build e2e client image (exit code: {:?})",
+                s.code()
+            ));
+        }
+        Err(e) => {
+            return Err(format!("Failed to run docker build for e2e client: {}", e));
+        }
+        _ => {
+            tracing::info!("E2E client image built successfully");
         }
     }
 
