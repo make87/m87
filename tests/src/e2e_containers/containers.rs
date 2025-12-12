@@ -149,6 +149,10 @@ impl E2EInfra {
     async fn start_cli(run_id: &str) -> Result<ContainerAsync<GenericImage>, Box<dyn std::error::Error>> {
         let container_name = format!("e2e-cli-{}", run_id);
         // Note: with_entrypoint and with_cmd must be called on GenericImage before ImageExt methods
+        // IMPORTANT: We intentionally do NOT mount the Docker socket here.
+        // The CLI container has Docker CLI installed but no local Docker access.
+        // This ensures Docker tests truly verify that `m87 <device> docker` correctly
+        // proxies commands to the agent (which does have the Docker socket mounted).
         let image = GenericImage::new(CLIENT_IMAGE_NAME, CLIENT_IMAGE_TAG)
             .with_entrypoint("sh")
             .with_cmd(vec!["-c", "sleep infinity"])
