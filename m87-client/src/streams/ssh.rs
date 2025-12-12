@@ -9,9 +9,7 @@ pub async fn handle_ssh_io(io: QuicIo) {
     let home_dir = dirs::home_dir().unwrap();
     let home_dir = home_dir.to_path_buf();
 
-    tracing::info!("Creating SSH server config...");
     let config = make_server_config();
-    tracing::info!("SSH config created, starting run_stream...");
     let handler = M87SshHandler::new(home_dir);
 
     match server::run_stream(config, io, handler).await {
