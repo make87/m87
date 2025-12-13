@@ -7,6 +7,10 @@ services:
     container_name: m87-server
     restart: always
     init: true
+    labels:
+      # Watchtower: always update to :latest, even if container was started with a versioned tag
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.image-reference=ghcr.io/make87/m87-server:latest"
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - MONGO_URI=mongodb://mongo:27017
@@ -39,6 +43,20 @@ services:
       - nexus-network
     ports:
       - "27017:27017"
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    profiles:
+      - auto-update
+    restart: always
+    environment:
+      DOCKER_API_VERSION: 1.44  # support Docker v29
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --cleanup --label-enable --interval 300
+    networks:
+      - nexus-network
 
 networks:
   nexus-network:
