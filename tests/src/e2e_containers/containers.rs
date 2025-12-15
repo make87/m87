@@ -304,7 +304,7 @@ impl E2EInfra {
 
     /// Execute a CLI command and return the output
     pub async fn cli_exec(&self, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
-        let cmd = format!("m87 {}", args.join(" "));
+        let cmd = format!("m87 {} --verbose", args.join(" "));
         let mut result = self
             .cli
             .exec(ExecCommand::new(vec!["sh", "-c", &cmd]))
