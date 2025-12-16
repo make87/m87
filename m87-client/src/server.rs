@@ -399,8 +399,8 @@ pub async fn connect_control_tunnel() -> Result<()> {
             }
 
             // QUIC connection closed
-            _ = quic_conn.closed() => {
-                warn!("control tunnel closed by peer");
+            res = quic_conn.closed() => {
+                warn!("control tunnel closed by peer {:?}", res);
                 udp_channels.remove_all().await;
                 break;
             }

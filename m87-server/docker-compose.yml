@@ -13,7 +13,7 @@ services:
       - "com.centurylinklabs.watchtower.image-reference=ghcr.io/make87/m87-server:latest"
     environment:
       - RUST_LOG=${RUST_LOG:-info}
-      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_URI=mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@mongo:27017/m87-server?authSource=admin
       - MONGO_DB=m87-server
       - OAUTH_ISSUER=${OAUTH_ISSUER:-https://auth.make87.com/}
       - OAUTH_AUDIENCE=${OAUTH_AUDIENCE:-https://auth.make87.com}
@@ -37,12 +37,13 @@ services:
     image: mongo:7
     container_name: mongo
     restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
     volumes:
       - mongo-data:/data/db
     networks:
       - nexus-network
-    ports:
-      - "27017:27017"
 
   watchtower:
     image: containrrr/watchtower
