@@ -47,30 +47,36 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
   build:
-    name: Build Binaries (${{ inputs.build_profile }}) - ${{ needs.read-version.outputs.version }}
+    name: Build ${{ matrix.package }} (${{ inputs.build_profile }}) - ${{ matrix.arch }}
     needs: read-version
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
-          # AMD64 builds
           - runner: ubuntu-24.04-amd64-2
             target: x86_64-unknown-linux-gnu
             arch: amd64
             package: m87-client
-          - runner: ubuntu-24.04-amd64-2
-            target: x86_64-unknown-linux-gnu
-            arch: amd64
-            package: m87-server
-          # ARM64 builds
+            dockerfile: m87-client/Dockerfile
+            binary_name: m87
           - runner: ubuntu-24.04-arm64-2
             target: aarch64-unknown-linux-gnu
             arch: arm64
             package: m87-client
+            dockerfile: m87-client/Dockerfile
+            binary_name: m87
+          - runner: ubuntu-24.04-amd64-2
+            target: x86_64-unknown-linux-gnu
+            arch: amd64
+            package: m87-server
+            dockerfile: m87-server/Dockerfile
+            binary_name: m87-server
           - runner: ubuntu-24.04-arm64-2
             target: aarch64-unknown-linux-gnu
             arch: arm64
             package: m87-server
+            dockerfile: m87-server/Dockerfile
+            binary_name: m87-server
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -80,61 +86,47 @@ jobs:
       - name: Pull latest changes
         run: git pull origin ${{ github.ref_name }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Build ${{ matrix.package }} for ${{ matrix.arch }}
+      - name: Build ${{ matrix.package }} using manylinux2014 container
         run: |
           if [ "${{ inputs.build_profile }}" = "release" ]; then
-            cargo build --release --package ${{ matrix.package }}
+            PROFILE="release"
           else
-            cargo build --package ${{ matrix.package }}
+            PROFILE="debug"
           fi
 
-      - name: Determine binary name
-        id: binary-info
-        run: |
-          if [ "${{ matrix.package }}" = "m87-client" ]; then
-            BINARY_NAME="m87"
-          else
-            BINARY_NAME="m87-server"
-          fi
-          echo "binary_name=$BINARY_NAME" >> $GITHUB_OUTPUT
+          # Build only the builder stage and extract binary
+          docker buildx build \
+            --file ${{ matrix.dockerfile }} \
+            --build-arg BUILD_PROFILE=$PROFILE \
+            --target builder \
+            --output type=local,dest=./build-output \
+            .
 
-      - name: Rename and prepare binary
-        run: |
-          BINARY_NAME="${{ steps.binary-info.outputs.binary_name }}"
-          TARGET="${{ matrix.target }}"
-
-          # Determine target directory based on build profile
-          if [ "${{ inputs.build_profile }}" = "release" ]; then
-            TARGET_DIR="target/release"
-          else
-            TARGET_DIR="target/debug"
-          fi
-
-          # Copy binary to a standardized location
-          mkdir -p dist
-          cp ${TARGET_DIR}/$BINARY_NAME dist/${BINARY_NAME}-${TARGET}
-
-          # Make it executable
-          chmod +x dist/${BINARY_NAME}-${TARGET}
+          # Copy binary to artifacts
+          mkdir -p artifacts
+          cp build-output/workspace/target/$PROFILE/${{ matrix.binary_name }} artifacts/${{ matrix.binary_name }}-${{ matrix.target }}
+          chmod +x artifacts/${{ matrix.binary_name }}-${{ matrix.target }}
 
           # Show info
           echo "Build profile: ${{ inputs.build_profile }}"
-          echo "Binary: ${BINARY_NAME}-${TARGET}"
-          ls -lh dist/${BINARY_NAME}-${TARGET}
-          file dist/${BINARY_NAME}-${TARGET}
-          echo "Size: $(du -h dist/${BINARY_NAME}-${TARGET} | cut -f1)"
+          echo "Binary: ${{ matrix.binary_name }}-${{ matrix.target }}"
+          ls -lh artifacts/${{ matrix.binary_name }}-${{ matrix.target }}
+          file artifacts/${{ matrix.binary_name }}-${{ matrix.target }}
+
+          # Verify glibc version requirement
+          echo "GLIBC requirements:"
+          strings artifacts/${{ matrix.binary_name }}-${{ matrix.target }} | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 || echo "No GLIBC symbols found"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.binary-info.outputs.binary_name }}-${{ matrix.target }}
-          path: dist/${{ steps.binary-info.outputs.binary_name }}-${{ matrix.target }}
+          name: ${{ matrix.binary_name }}-${{ matrix.target }}
+          path: artifacts/${{ matrix.binary_name }}-${{ matrix.target }}
           if-no-files-found: error
 
-  # NEW JOB: generate per-crate THIRDPARTY_LICENSES.html
   attribution:
     name: Generate attribution files
     needs: read-version
