@@ -19,7 +19,7 @@ permissions:
 jobs:
   read-version:
     name: Read Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.get-version.outputs.version }}
     steps:
@@ -53,25 +53,25 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: ubuntu-24.04-amd64-2
+          - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             arch: amd64
             package: m87-client
             dockerfile: m87-client/Dockerfile
             binary_name: m87
-          - runner: ubuntu-24.04-arm64-2
+          - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             arch: arm64
             package: m87-client
             dockerfile: m87-client/Dockerfile
             binary_name: m87
-          - runner: ubuntu-24.04-amd64-2
+          - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             arch: amd64
             package: m87-server
             dockerfile: m87-server/Dockerfile
             binary_name: m87-server
-          - runner: ubuntu-24.04-arm64-2
+          - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             arch: arm64
             package: m87-server
@@ -132,7 +132,7 @@ jobs:
   attribution:
     name: Generate attribution files
     needs: read-version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -186,10 +186,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: ubuntu-24.04-amd64-2
+          - runner: ubuntu-24.04
             arch: amd64
             platform: linux/amd64
-          - runner: ubuntu-24.04-arm64-2
+          - runner: ubuntu-24.04-arm
             arch: arm64
             platform: linux/arm64
     steps:
@@ -229,7 +229,7 @@ jobs:
   release:
     name: Release - ${{ needs.read-version.outputs.version }}
     needs: [read-version, build, docker-build, attribution]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
