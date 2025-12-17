@@ -1,14 +1,20 @@
 # ===========================
-# Build Stage
+# Build Stage (manylinux2014 for glibc 2.17 compatibility)
 # ===========================
-FROM rust:1.90-slim-bookworm AS builder
 
-# Build profile: "release" or "dev"
+FROM quay.io/pypa/manylinux2014 AS builder
+
+# Build profile: "release" or "debug"
 ARG BUILD_PROFILE=release
 
+# Install Rust
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+
 WORKDIR /workspace
-# Install build dependencies
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
@@ -30,15 +36,15 @@ RUN if [ "$BUILD_PROFILE" = "release" ]; then \
 # ===========================
 FROM gcr.io/distroless/cc-debian12
 
-# Build profile: "release" or "dev" -> maps to "release" or "debug" directory
+# Build profile: "release" or "debug"
 ARG BUILD_PROFILE=release
 
 WORKDIR /app
 
-# Copy compiled binary from builder
-# Note: dev profile outputs to "debug" directory, release to "release"
+# Copy compiled binary from manylinux builder
+# Binary compiled on glibc 2.17 is forward-compatible with glibc 2.36 (bookworm)
 COPY --from=builder /workspace/target/${BUILD_PROFILE}/m87-server /app/m87-server
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt
 
 # Default entrypoint
 ENTRYPOINT ["/app/m87-server"]
