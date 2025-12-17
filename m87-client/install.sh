@@ -27,7 +27,7 @@ INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="m87"
 GITHUB_REPO="make87/make87"
 # This version is set during release - do not change manually
-VERSION="__VERSION__"
+VERSION="0.0.36"
 
 # Helper functions
 info() {
