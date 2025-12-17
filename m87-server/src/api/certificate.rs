@@ -120,7 +120,6 @@ pub fn create_selfsigned_pair(
     Ok((vec![cert], key))
 }
 
-/// REST TLS config → Axum will use this directly.
 pub async fn create_tls_config(cfg: &AppConfig) -> ServerResult<RustlsServerConfig> {
     let (certs, key) = load_cert_and_key(cfg).await?;
 
@@ -135,7 +134,6 @@ pub async fn create_tls_config(cfg: &AppConfig) -> ServerResult<RustlsServerConf
     Ok(tls)
 }
 
-/// QUIC TLS config → Quinn endpoint
 pub async fn create_quic_server_config(cfg: &AppConfig) -> ServerResult<QuicServerConfig> {
     let (certs, key) = load_cert_and_key(cfg).await?;
 
@@ -150,7 +148,7 @@ pub async fn create_quic_server_config(cfg: &AppConfig) -> ServerResult<QuicServ
     tls.alpn_protocols = vec![
         b"m87-quic".to_vec(), // CLI & m87 agent QUIC
         b"h3".to_vec(),       // HTTP/3 for WebTransport
-        b"h3-29".to_vec(),    // optional, but Chrome still sends these
+        b"h3-29".to_vec(),    // Chrome still sends these
     ];
 
     let crypto = QuinnQuicServerCrypto::try_from(tls)
@@ -160,6 +158,11 @@ pub async fn create_quic_server_config(cfg: &AppConfig) -> ServerResult<QuicServ
 
     let mut t = TransportConfig::default();
     t.max_concurrent_bidi_streams(1024u32.into());
+    //make sure we dont black hole packets
+    t.initial_mtu(1200)
+        .min_mtu(1200)
+        .mtu_discovery_config(None)
+        .enable_segmentation_offload(false);
     t.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
 
     cfg.transport = Arc::new(t);
