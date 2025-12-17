@@ -47,7 +47,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
   build:
-    name: Build ${{ matrix.package }} (${{ inputs.build_profile }}) - ${{ matrix.arch }}
+    name: Build ${{ matrix.package }} (${{ inputs.build_profile }}) - ${{ matrix.os }}/${{ matrix.arch }}
     needs: read-version
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -56,6 +56,7 @@ jobs:
           # Linux builds (Docker/manylinux2014)
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            os: linux
             arch: amd64
             package: m87-client
             dockerfile: m87-client/Dockerfile
@@ -63,6 +64,7 @@ jobs:
             use_docker: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            os: linux
             arch: arm64
             package: m87-client
             dockerfile: m87-client/Dockerfile
@@ -70,6 +72,7 @@ jobs:
             use_docker: true
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            os: linux
             arch: amd64
             package: m87-server
             dockerfile: m87-server/Dockerfile
@@ -77,6 +80,7 @@ jobs:
             use_docker: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            os: linux
             arch: arm64
             package: m87-server
             dockerfile: m87-server/Dockerfile
@@ -85,6 +89,7 @@ jobs:
           # macOS builds (native cargo)
           - runner: macos-latest
             target: aarch64-apple-darwin
+            os: macos
             arch: arm64
             package: m87-client
             binary_name: m87
