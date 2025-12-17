@@ -6,8 +6,8 @@ use m87_shared::metrics::SystemMetrics;
 use reqwest::Client;
 
 #[cfg(feature = "agent")]
-use tracing::warn;
-use tracing::{error, info};
+use tracing::{info,debug,warn};
+use tracing::error;
 
 #[cfg(feature = "agent")]
 use crate::{auth::AuthManager, config::Config, device::services::service_info::ServiceInfo};
@@ -266,7 +266,6 @@ pub async fn connect_control_tunnel() -> Result<()> {
     use m87_shared::device::short_device_id;
     use quinn::Connection;
     use tokio::sync::watch;
-    use tracing::{debug, warn};
 
     let config = Config::load().context("Failed to load configuration")?;
     let token = AuthManager::get_device_token()?;

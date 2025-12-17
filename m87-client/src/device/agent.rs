@@ -17,7 +17,6 @@ use crate::{
 };
 
 use crate::server::send_heartbeat;
-use crate::util::logging::init_logging;
 use crate::util::shutdown::SHUTDOWN;
 use crate::util::system_info::get_system_info;
 
@@ -284,7 +283,6 @@ pub async fn status() -> Result<()> {
 }
 
 pub async fn run() -> Result<()> {
-    // init_logging("info", false, false);
     info!("Running device");
     let shutdown = signal::ctrl_c();
     pin!(shutdown);

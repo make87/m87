@@ -4,7 +4,7 @@ use crate::util::shutdown::SHUTDOWN;
 use crate::{auth::AuthManager, config::Config, devices};
 use anyhow::Result;
 use termion::{raw::IntoRawMode, terminal_size};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncWriteExt};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
