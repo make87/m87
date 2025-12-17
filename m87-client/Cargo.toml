@@ -1,6 +1,6 @@
 [package]
 name = "m87-client"
-version = "0.0.0-dev0"
+version = "0.0.39-dev1"
 edition = "2024"
 authors = ["Phillip Thomas <phillip@make87.com>", "Nisse Knudsen <nisse@make87.com>"]
 description = "Unified CLI and device for connecting edge systems to the make87 platform"
