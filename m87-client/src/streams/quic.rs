@@ -84,6 +84,12 @@ pub async fn get_quic_connection(
     let mut client_cfg = ClientConfig::new(crypto);
     let mut transport = quinn::TransportConfig::default();
     transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    //make sure we dont black hole packets
+    transport
+        .initial_mtu(1200)
+        .min_mtu(1200)
+        .mtu_discovery_config(None)
+        .enable_segmentation_offload(false);
     transport.max_idle_timeout(Some(
         IdleTimeout::try_from(Duration::from_secs(10)).unwrap(),
     )); // 10 seconds

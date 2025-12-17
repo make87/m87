@@ -206,6 +206,7 @@ enum AgentCommands {
         email: Option<String>,
     },
 
+    Logout,
     /// Run the agent daemon (blocking, used by systemd service)
     Run,
 
@@ -355,6 +356,10 @@ pub async fn cli() -> anyhow::Result<()> {
                 let sysinfo = util::system_info::get_system_info().await?;
                 auth::register_device(owner_scope, sysinfo).await?;
                 tracing::info!("[done] Device registered as agent successfully");
+            }
+            AgentCommands::Logout => {
+                auth::logout_device().await?;
+                tracing::info!("[done] Logged out successfully");
             }
             AgentCommands::Run => {
                 device::agent::run().await?;

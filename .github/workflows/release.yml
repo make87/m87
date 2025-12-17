@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       build_profile:
-        description: 'Build profile'
+        description: "Build profile"
         required: true
-        default: 'release'
+        default: "release"
         type: choice
         options:
           - release
