@@ -154,13 +154,55 @@ impl Config {
 
         std::fs::write(&config_path, contents).context("Failed to write config file")?;
 
+        // When running with sudo, fix ownership to the original user
+        #[cfg(unix)]
+        if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+            use std::process::Command;
+            // chown the config directory and file to the original user
+            let _ = Command::new("chown")
+                .args(["-R", &sudo_user, config_dir.to_str().unwrap_or("")])
+                .status();
+        }
+
         info!("Config saved to: {:?}", config_path);
         Ok(())
     }
 
     pub fn config_file_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir().context("Failed to get config directory")?;
+        let config_dir = Self::get_config_dir()?;
         Ok(config_dir.join("m87").join("config.json"))
+    }
+
+    /// Get config directory, respecting SUDO_USER on Unix systems.
+    /// Falls back to dirs::config_dir() which handles platform specifics.
+    fn get_config_dir() -> Result<PathBuf> {
+        // Check for SUDO_USER (Unix only - Windows doesn't have sudo)
+        #[cfg(unix)]
+        if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+            let home = homedir::home(&sudo_user)
+                .ok()
+                .flatten()
+                .context("Failed to get sudo user's home directory")?;
+
+            // On Linux, respect XDG_CONFIG_HOME if set to absolute path
+            #[cfg(target_os = "linux")]
+            if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+                let xdg_path = PathBuf::from(&xdg);
+                if xdg_path.is_absolute() {
+                    return Ok(xdg_path);
+                }
+            }
+
+            // Platform-specific defaults (matching dirs crate behavior)
+            #[cfg(target_os = "macos")]
+            return Ok(home.join("Library/Application Support"));
+
+            #[cfg(not(target_os = "macos"))]
+            return Ok(home.join(".config"));
+        }
+
+        // No sudo or Windows - use standard dirs crate
+        dirs::config_dir().context("Failed to get config directory")
     }
 
     pub fn add_owner_reference(owner_reference: String) -> Result<()> {

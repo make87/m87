@@ -15,6 +15,17 @@ use crate::util;
 use crate::util::logging::init_logging;
 use crate::util::tls::set_tls_provider;
 
+/// Save owner_reference to config if org_id or email is provided
+#[cfg(feature = "agent")]
+fn save_owner_if_provided(org_id: Option<String>, email: Option<String>) -> anyhow::Result<()> {
+    if let Some(owner) = org_id.or(email) {
+        let mut cfg = Config::load()?;
+        cfg.owner_reference = Some(owner);
+        cfg.save()?;
+    }
+    Ok(())
+}
+
 /// Print help with dynamically generated device commands section
 fn print_help_with_device_commands() {
     let mut cmd = Cli::command();
@@ -237,22 +248,54 @@ enum AgentCommands {
 
     Logout,
     /// Run the agent daemon (blocking, used by systemd service)
-    Run,
+    Run {
+        /// Organization ID to register agent under
+        #[arg(long = "org-id", conflicts_with = "email")]
+        org_id: Option<String>,
+
+        /// Email address to register agent under
+        #[arg(long, conflicts_with = "org_id")]
+        email: Option<String>,
+    },
 
     /// Start the agent service now (requires sudo)
-    Start,
+    Start {
+        /// Organization ID to register agent under
+        #[arg(long = "org-id", conflicts_with = "email")]
+        org_id: Option<String>,
+
+        /// Email address to register agent under
+        #[arg(long, conflicts_with = "org_id")]
+        email: Option<String>,
+    },
 
     /// Stop the agent service now (requires sudo)
     Stop,
 
     /// Restart the agent service (requires sudo)
-    Restart,
+    Restart {
+        /// Organization ID to register agent under
+        #[arg(long = "org-id", conflicts_with = "email")]
+        org_id: Option<String>,
+
+        /// Email address to register agent under
+        #[arg(long, conflicts_with = "org_id")]
+        email: Option<String>,
+    },
 
     /// Configure service to auto-start on boot (requires sudo)
     Enable {
         /// Enable AND start service immediately
         #[arg(long)]
         now: bool,
+
+        /// Organization ID to register agent under
+        #[arg(long = "org-id", conflicts_with = "email")]
+        org_id: Option<String>,
+
+        /// Email address to register agent under
+        #[arg(long, conflicts_with = "org_id")]
+        email: Option<String>,
     },
 
     /// Remove auto-start on boot (requires sudo)
@@ -304,7 +347,7 @@ pub async fn cli() -> anyhow::Result<()> {
     let cli_mode = match &cli.command {
         // Agent run must never be CLI mode
         #[cfg(feature = "agent")]
-        Commands::Agent(AgentCommands::Run) => {
+        Commands::Agent(AgentCommands::Run { .. }) => {
             verbose = true;
             false
         }
@@ -337,8 +380,6 @@ pub async fn cli() -> anyhow::Result<()> {
         Commands::Logout => {
             tracing::info!("Logging out...");
             auth::logout_cli().await?;
-            #[cfg(feature = "agent")]
-            auth::logout_device().await?;
             tracing::info!("[done] Logged out successfully");
         }
 
@@ -401,19 +442,23 @@ pub async fn cli() -> anyhow::Result<()> {
                 auth::logout_device().await?;
                 tracing::info!("[done] Logged out successfully");
             }
-            AgentCommands::Run => {
+            AgentCommands::Run { org_id, email } => {
+                save_owner_if_provided(org_id, email)?;
                 device::agent::run().await?;
             }
-            AgentCommands::Start => {
+            AgentCommands::Start { org_id, email } => {
+                save_owner_if_provided(org_id, email)?;
                 device::agent::start().await?;
             }
             AgentCommands::Stop => {
                 device::agent::stop().await?;
             }
-            AgentCommands::Restart => {
+            AgentCommands::Restart { org_id, email } => {
+                save_owner_if_provided(org_id, email)?;
                 device::agent::restart().await?;
             }
-            AgentCommands::Enable { now } => {
+            AgentCommands::Enable { now, org_id, email } => {
+                save_owner_if_provided(org_id, email)?;
                 device::agent::enable(now).await?;
             }
             AgentCommands::Disable { now } => {

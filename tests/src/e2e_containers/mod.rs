@@ -1,5 +1,6 @@
 //! E2E test containers and infrastructure
 
+mod agent_args;
 pub mod containers;
 mod device_registration;
 mod docker;

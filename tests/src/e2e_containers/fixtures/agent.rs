@@ -8,18 +8,34 @@ use crate::e2e_containers::helpers::{
 /// Builder for starting agent run with explicit steps
 pub struct AgentRunner<'a> {
     infra: &'a E2EInfra,
+    args: Vec<String>,
 }
 
 impl<'a> AgentRunner<'a> {
     /// Create a new agent runner builder
     pub fn new(infra: &'a E2EInfra) -> Self {
-        Self { infra }
+        Self {
+            infra,
+            args: vec![],
+        }
+    }
+
+    /// Add extra arguments to the agent run command
+    pub fn with_args(mut self, args: &[&str]) -> Self {
+        self.args = args.iter().map(|s| s.to_string()).collect();
+        self
     }
 
     /// Step 1: Start agent run process (runs in background)
     pub async fn start_run(&self) -> Result<(), E2EError> {
-        tracing::info!("Starting agent run...");
-        exec_background(&self.infra.agent, "m87 agent run", "/tmp/agent-run.log").await
+        let args_str = if self.args.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", self.args.join(" "))
+        };
+        let cmd = format!("m87 agent run{}", args_str);
+        tracing::info!("Starting agent run with command: {}", cmd);
+        exec_background(&self.infra.agent, &cmd, "/tmp/agent-run.log").await
     }
 
     /// Step 2: Wait for control tunnel to establish
