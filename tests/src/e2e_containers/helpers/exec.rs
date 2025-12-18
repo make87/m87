@@ -78,3 +78,36 @@ pub async fn is_port_listening(
     .await?;
     Ok(result.contains("listening") && !result.contains("not listening"))
 }
+
+/// Read config.json from agent container
+pub async fn read_agent_config(
+    container: &ContainerAsync<GenericImage>,
+) -> Result<String, E2EError> {
+    exec_shell(container, "cat /root/.config/m87/config.json").await
+}
+
+/// Update owner_reference in agent config using jq-like sed replacement
+pub async fn set_owner_reference(
+    container: &ContainerAsync<GenericImage>,
+    owner: &str,
+) -> Result<(), E2EError> {
+    // Use sed to replace the owner_reference value in the JSON
+    let cmd = format!(
+        r#"sed -i 's/"owner_reference": *"[^"]*"/"owner_reference": "{}"/' /root/.config/m87/config.json && sed -i 's/"owner_reference": *null/"owner_reference": "{}"/' /root/.config/m87/config.json"#,
+        owner, owner
+    );
+    exec_shell(container, &cmd).await?;
+    Ok(())
+}
+
+/// Clear owner_reference from agent config (set to null)
+pub async fn clear_owner_reference(
+    container: &ContainerAsync<GenericImage>,
+) -> Result<(), E2EError> {
+    exec_shell(
+        container,
+        r#"sed -i 's/"owner_reference": *"[^"]*"/"owner_reference": null/' /root/.config/m87/config.json"#,
+    )
+    .await?;
+    Ok(())
+}
