@@ -13,6 +13,7 @@ pub mod retry;
 #[cfg(feature = "agent")]
 pub mod system_info;
 
+pub mod device_cache;
 pub mod fs;
 pub mod log_renderer;
 pub mod ssh;

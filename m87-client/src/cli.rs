@@ -309,6 +309,10 @@ pub async fn cli() -> anyhow::Result<()> {
             false
         }
         Commands::Ssh(SshCommands::Connect(_)) => {
+            verbose = true;
+            false
+        }
+        Commands::Update { .. } => {
             verbose = false;
             false
         }

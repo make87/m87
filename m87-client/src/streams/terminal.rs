@@ -11,9 +11,8 @@ use std::path::Path;
 use std::{io::Read, io::Write, sync::Arc};
 
 use crate::streams::quic::QuicIo;
-use crate::util::system_info::get_system_info;
 
-pub async fn handle_terminal_io(io: &mut QuicIo) {
+pub async fn handle_terminal_io(term: Option<String>, io: &mut QuicIo) {
     // Notify client that shell is initializing
     let _ = io.write_all(b"\n\rInitializing shell..").await;
 
@@ -22,9 +21,21 @@ pub async fn handle_terminal_io(io: &mut QuicIo) {
     // --------------------------------------------------------------------
     let pty_system = native_pty_system();
 
+    let mut buf = [0u8; 5];
+    io.read_exact(&mut buf).await.ok();
+
+    let (rows, cols) = if buf[0] == 0xFF {
+        (
+            u16::from_be_bytes([buf[1], buf[2]]),
+            u16::from_be_bytes([buf[3], buf[4]]),
+        )
+    } else {
+        (24, 80)
+    };
+
     let pair = match pty_system.openpty(PtySize {
-        rows: 24,
-        cols: 80,
+        rows,
+        cols,
         pixel_width: 0,
         pixel_height: 0,
     }) {
@@ -44,7 +55,9 @@ pub async fn handle_terminal_io(io: &mut QuicIo) {
 
     let mut cmd = CommandBuilder::new(shell);
     cmd.args(&["-l", "-i"]);
-    cmd.env("TERM", "xterm-256color");
+    let term = term.as_deref().unwrap_or("xterm-256color");
+    cmd.env("TERM", term);
+    cmd.env("COLORTERM", "truecolor");
 
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
@@ -121,36 +134,7 @@ pub async fn handle_terminal_io(io: &mut QuicIo) {
         return;
     }
 
-    match get_system_info().await {
-        Ok(i) => {
-            let banner = format!(
-                "\r\n\
-            ┌────────────────────────────────────────────────────────────┐\r\n\
-            │ make87 remote shell                                        │\r\n\
-            ├────────────────────────────────────────────────────────────┤\r\n\
-            │ user:    {:<49} │\r\n\
-            │ host:    {:<49} │\r\n\
-            │ os:      {:<49} │\r\n\
-            │ arch:    {:<49} │\r\n\
-            │ cpu:     {:<49} │\r\n\
-            │ memory:  {:<49} │\r\n\
-            │ ip:      {:<49} │\r\n\
-            ├────────────────────────────────────────────────────────────┤\r\n\r\n",
-                i.username,
-                i.hostname,
-                i.operating_system,
-                i.architecture,
-                format!("{} ({} cores)", i.cpu_name, i.cores.unwrap_or(0)),
-                format!("{:.1} GB", i.memory.unwrap_or(0.0)),
-                i.public_ip_address.as_deref().unwrap_or("n/a"),
-            );
-
-            let _ = io.write_all(banner.as_bytes()).await;
-        }
-        Err(_) => {
-            let _ = io.write_all(b"Shell connected successfully\r\n").await;
-        }
-    }
+    let _ = io.write_all(b"Shell connected successfully\r\n").await;
 
     // --------------------------------------------------------------------
     // 5. Main loop: IO <-> PTY

@@ -4,29 +4,28 @@ use crate::util::shutdown::SHUTDOWN;
 use crate::{auth::AuthManager, config::Config, devices};
 use anyhow::Result;
 use termion::{raw::IntoRawMode, terminal_size};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 pub async fn run_shell(device: &str) -> Result<()> {
     let config = Config::load()?;
     let base = config.get_server_hostname();
-    let dev = devices::list_devices()
-        .await?
-        .into_iter()
-        .find(|d| d.name == device)
-        .ok_or_else(|| anyhow::anyhow!("Device not found"))?;
+    tracing::info!("Resolving device address.");
+    let short_id = devices::resolve_device_short_id_cached(device).await?;
 
     let token = AuthManager::get_cli_token().await?;
-
+    let term = std::env::var("TERM").ok();
     // --- open QUIC terminal stream ---
     let stream_type = StreamType::Terminal {
         token: token.to_string(),
+        term,
     };
+    tracing::info!("Connecting to device.");
     let (_, io) = open_quic_io(
         &base,
         &token,
-        &dev.short_id,
+        &short_id,
         stream_type,
         config.trust_invalid_server_cert,
     )
@@ -52,7 +51,6 @@ pub async fn run_shell(device: &str) -> Result<()> {
     }
 
     tracing::info!("[done] Connected.");
-    tracing::info!("\r");
 
     // === stdin → channel ===
     let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();

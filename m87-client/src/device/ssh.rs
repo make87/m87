@@ -17,7 +17,7 @@ use crate::{
 // It must NEVER spawn `ssh` or assume a TTY.
 pub async fn connect_device_ssh(device_name: &str) -> Result<()> {
     let config = Config::load()?;
-    let dev = devices::get_device_by_name(device_name).await?;
+    let short_id = devices::resolve_device_short_id_cached(device_name).await?;
 
     let token = AuthManager::get_cli_token().await?;
     let hostname = config.get_server_hostname();
@@ -25,7 +25,7 @@ pub async fn connect_device_ssh(device_name: &str) -> Result<()> {
     let (conn, mut quic) = open_quic_io(
         &hostname,
         &token,
-        &dev.short_id,
+        &short_id,
         StreamType::Ssh {
             token: token.to_string(),
         },

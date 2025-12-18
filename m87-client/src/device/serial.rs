@@ -40,7 +40,7 @@ fn open_pty() -> Result<(RawFd, String)> {
 pub async fn open_serial(device: &str, port: &str, baud: u32) -> Result<()> {
     let cfg = Config::load()?;
     let token = AuthManager::get_cli_token().await?;
-    let dev = devices::get_device_by_name(device).await?;
+    let short_id = devices::resolve_device_short_id_cached(device).await?;
     let host = cfg.get_server_hostname();
 
     let stream_type = StreamType::Serial {
@@ -51,7 +51,7 @@ pub async fn open_serial(device: &str, port: &str, baud: u32) -> Result<()> {
     let (_, remote_io) = open_quic_io(
         &host,
         &token,
-        &dev.short_id,
+        &short_id,
         stream_type,
         cfg.trust_invalid_server_cert,
     )

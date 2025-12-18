@@ -213,6 +213,7 @@ impl TunnelTarget {
 pub enum StreamType {
     Terminal {
         token: String,
+        term: Option<String>,
     },
     Exec {
         token: String,
@@ -256,7 +257,7 @@ impl StreamType {
 
     pub fn get_token(&self) -> &str {
         match self {
-            StreamType::Terminal { token } => token,
+            StreamType::Terminal { token, .. } => token,
             StreamType::Exec { token, .. } => token,
             StreamType::Logs { token, .. } => token,
             StreamType::Tunnel { token, .. } => token,

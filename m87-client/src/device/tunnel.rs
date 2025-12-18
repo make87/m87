@@ -19,9 +19,8 @@ use tracing::{debug, error, info, warn};
 
 pub async fn open_local_tunnel(device_name: &str, tunnel_specs: Vec<String>) -> Result<()> {
     let config = Config::load()?;
-    let dev = devices::get_device_by_name(device_name).await?;
+    let device_short_id = devices::resolve_device_short_id_cached(device_name).await?;
     let token = AuthManager::get_cli_token().await?;
-    let device_short_id = dev.short_id;
     let trust = config.trust_invalid_server_cert;
 
     let tunnels: Vec<TunnelTarget> = TunnelTarget::from_list(tunnel_specs)?;

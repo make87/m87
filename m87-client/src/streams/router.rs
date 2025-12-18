@@ -35,9 +35,9 @@ pub async fn handle_incoming_stream(
     // }
 
     match stream_type {
-        StreamType::Terminal { .. } => {
+        StreamType::Terminal { term, .. } => {
             debug!("router: dispatching to terminal handler");
-            handle_terminal_io(&mut io).await;
+            handle_terminal_io(term, &mut io).await;
         }
         StreamType::Exec { .. } => {
             debug!("router: dispatching to exec handler");

@@ -54,7 +54,7 @@ impl LocalOrRemotePath {
 pub async fn open_sftp_session(device_name: &str) -> anyhow::Result<SftpSession> {
     let cfg = Config::load()?;
     let token = AuthManager::get_cli_token().await?;
-    let dev = devices::get_device_by_name(&device_name).await?;
+    let short_id = devices::resolve_device_short_id_cached(&device_name).await?;
     let host = &cfg.get_server_hostname();
 
     // open raw tunnel through HTTPS upgrade
@@ -64,7 +64,7 @@ pub async fn open_sftp_session(device_name: &str) -> anyhow::Result<SftpSession>
     let (_, io) = open_quic_io(
         &host,
         &token,
-        &dev.short_id,
+        &short_id,
         stream_type,
         cfg.trust_invalid_server_cert,
     )

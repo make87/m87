@@ -17,7 +17,6 @@ use crate::{
 };
 
 use crate::server::send_heartbeat;
-use crate::util::logging::init_logging;
 use crate::util::shutdown::SHUTDOWN;
 use crate::util::system_info::get_system_info;
 

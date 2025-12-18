@@ -23,10 +23,12 @@ pub async fn update(interactive: bool) -> Result<bool> {
     info!("Checking for updates...");
     let current_version = cargo_crate_version!();
 
+    let asset_name = arch_bin_name();
     let maybe_status = self_update::backends::github::Update::configure()
         .repo_owner("make87")
         .repo_name("make87")
-        .bin_name(arch_bin_name())
+        .bin_name(asset_name)
+        .identifier(asset_name)
         .current_version(current_version)
         .no_confirm(!interactive)
         .build()
@@ -36,20 +38,17 @@ pub async fn update(interactive: bool) -> Result<bool> {
         Ok(status) => {
             let new_version = status.version();
             if new_version != current_version {
-                info!("Updated from {} → {}", current_version, new_version);
-                if interactive {
-                    info!("Updated from {} → {}", current_version, new_version);
-                }
+                info!("[done] Updated from {} → {}", current_version, new_version);
                 return Ok(true);
             } else if interactive {
-                info!("You are running the latest version ({})", current_version);
+                info!(
+                    "[done] You are running the latest version ({})",
+                    current_version
+                );
             }
         }
         Err(e) => {
-            warn!("Self-update failed: {}", e);
-            if interactive {
-                warn!("Failed to check for updates: {}", e);
-            }
+            warn!("[done] Self-update failed: {}", e);
         }
     }
 
