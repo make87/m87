@@ -195,7 +195,13 @@ pub enum DeviceCommand {
     Shell,
     /// Forward remote port(s) to localhost
     Tunnel {
-        /// Remote target as [ip:]port[/proto] (e.g., "8080" or "192.168.1.50:554" or "192.168.1.50:554/tcp" or "192.168.1.50:554/udp" or "192.168.1.50:554/udp+mcast")
+        /// Port forwarding target(s). Supports single ports and ranges.
+        /// Examples:
+        ///   8080                    - forward single port
+        ///   8080-8090               - forward port range (same local/remote)
+        ///   8080-8090:9080-9090     - map local range to different remote range
+        ///   8080:192.168.1.50:9080  - forward to specific host
+        ///   8080-8090:192.168.1.50:9080-9090/tcp - range with host and protocol
         targets: Vec<String>,
     },
     /// Run docker commands on the device

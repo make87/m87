@@ -76,6 +76,7 @@ pub enum TunnelParseError {
     InvalidProtocol(String),
     InvalidSyntax(String),
     InvalidPort(ParseIntError),
+    InvalidRange(String),
 }
 
 impl fmt::Display for TunnelParseError {
@@ -84,6 +85,7 @@ impl fmt::Display for TunnelParseError {
             TunnelParseError::InvalidProtocol(p) => write!(f, "invalid protocol '{}'", p),
             TunnelParseError::InvalidSyntax(s) => write!(f, "invalid tunnel spec '{}'", s),
             TunnelParseError::InvalidPort(e) => write!(f, "invalid number: {}", e),
+            TunnelParseError::InvalidRange(r) => write!(f, "invalid port range: {}", r),
         }
     }
 }
@@ -96,6 +98,25 @@ impl From<ParseIntError> for TunnelParseError {
     }
 }
 
+/// Parse a port spec that may be a single port or a range (e.g., "8080" or "8080-8090")
+/// Returns (start, end) where start == end for single ports
+fn parse_port_spec(s: &str) -> Result<(u16, u16), TunnelParseError> {
+    if let Some((start_str, end_str)) = s.split_once('-') {
+        let start: u16 = start_str.parse()?;
+        let end: u16 = end_str.parse()?;
+        if end < start {
+            return Err(TunnelParseError::InvalidRange(format!(
+                "end port {} is less than start port {}",
+                end, start
+            )));
+        }
+        Ok((start, end))
+    } else {
+        let port: u16 = s.parse()?;
+        Ok((port, port))
+    }
+}
+
 // Examples accepted (SSH -L style: local_port:remote_host:remote_port):
 // "8080"                         -> forward local:8080 to remote 127.0.0.1:8080
 // "8080:1337"                    -> forward local:8080 to remote 127.0.0.1:1337
@@ -103,6 +124,9 @@ impl From<ParseIntError> for TunnelParseError {
 // "8080/tcp"                     -> TCP only
 // "8080:1337/udp"                -> UDP only
 // "1554:192.168.0.101:554/tcp"   -> TCP to specific host
+// "8080-8090"                    -> forward local:8080-8090 to remote 8080-8090
+// "8080-8090:9080-9090"          -> forward local:8080-8090 to remote 9080-9090 (offset mapping)
+// "8080-8090:192.168.0.101:9080-9090/tcp" -> TCP range to specific host with offset
 // /var/run/jtop.sock             -> forward local jtop socket to remote jtop socket
 // /var/run/jtop.sock:/var/run/remote.sock -> forward local jtop socket to remote jtop socket
 impl TunnelTarget {
@@ -148,7 +172,7 @@ impl TunnelTarget {
             }
 
             //
-            // CASE 4: TCP/UDP parsing
+            // CASE 4: TCP/UDP parsing (with port range support)
             //
             let mut parts = token.split('/');
             let body = parts.next().unwrap();
@@ -165,35 +189,82 @@ impl TunnelTarget {
 
             let nums: Vec<&str> = body.split(':').collect();
 
-            let (local_port, remote_host, remote_port) = match nums.as_slice() {
-                [lp] => ((*lp).parse()?, "127.0.0.1".to_string(), (*lp).parse()?),
+            // Parse port specs (may be single ports or ranges)
+            let (local_start, local_end, remote_host, remote_start, _remote_end) =
+                match nums.as_slice() {
+                    // "8080" or "8080-8090" → local range to same remote range
+                    [lp] => {
+                        let (l_start, l_end) = parse_port_spec(lp)?;
+                        (l_start, l_end, "127.0.0.1".to_string(), l_start, l_end)
+                    }
 
-                [lp, rp] => ((*lp).parse()?, "127.0.0.1".to_string(), (*rp).parse()?),
+                    // "8080:9080" or "8080-8090:9080-9090" → local to remote (with optional ranges)
+                    [lp, rp] => {
+                        let (l_start, l_end) = parse_port_spec(lp)?;
+                        let (r_start, r_end) = parse_port_spec(rp)?;
 
-                [lp, host, rp] => ((*lp).parse()?, (*host).to_string(), (*rp).parse()?),
+                        // Validate range sizes match
+                        let l_size = l_end - l_start;
+                        let r_size = r_end - r_start;
+                        if l_size != r_size {
+                            return Err(TunnelParseError::InvalidRange(format!(
+                                "local range size ({}) does not match remote range size ({})",
+                                l_size + 1,
+                                r_size + 1
+                            )));
+                        }
 
-                _ => {
-                    return Err(TunnelParseError::InvalidSyntax(body.to_string()));
+                        (l_start, l_end, "127.0.0.1".to_string(), r_start, r_end)
+                    }
+
+                    // "8080:host:9080" or "8080-8090:host:9080-9090" → local to host:remote
+                    [lp, host, rp] => {
+                        let (l_start, l_end) = parse_port_spec(lp)?;
+                        let (r_start, r_end) = parse_port_spec(rp)?;
+
+                        // Validate range sizes match
+                        let l_size = l_end - l_start;
+                        let r_size = r_end - r_start;
+                        if l_size != r_size {
+                            return Err(TunnelParseError::InvalidRange(format!(
+                                "local range size ({}) does not match remote range size ({})",
+                                l_size + 1,
+                                r_size + 1
+                            )));
+                        }
+
+                        (l_start, l_end, (*host).to_string(), r_start, r_end)
+                    }
+
+                    _ => {
+                        return Err(TunnelParseError::InvalidSyntax(body.to_string()));
+                    }
+                };
+
+            // Expand ranges into individual targets
+            let range_size = local_end - local_start;
+            for offset in 0..=range_size {
+                let local_port = local_start + offset;
+                let remote_port = remote_start + offset;
+
+                match protocol {
+                    Some("tcp") => out.push(TunnelTarget::Tcp(TcpTarget {
+                        local_port,
+                        remote_host: remote_host.clone(),
+                        remote_port,
+                    })),
+                    Some("udp") => out.push(TunnelTarget::Udp(UdpTarget {
+                        local_port,
+                        remote_host: remote_host.clone(),
+                        remote_port,
+                    })),
+                    None => out.push(TunnelTarget::Tcp(TcpTarget {
+                        local_port,
+                        remote_host: remote_host.clone(),
+                        remote_port,
+                    })),
+                    _ => unreachable!(),
                 }
-            };
-
-            match protocol {
-                Some("tcp") => out.push(TunnelTarget::Tcp(TcpTarget {
-                    local_port,
-                    remote_host,
-                    remote_port,
-                })),
-                Some("udp") => out.push(TunnelTarget::Udp(UdpTarget {
-                    local_port,
-                    remote_host,
-                    remote_port,
-                })),
-                None => out.push(TunnelTarget::Tcp(TcpTarget {
-                    local_port,
-                    remote_host,
-                    remote_port,
-                })),
-                _ => unreachable!(),
             }
         }
 
@@ -281,5 +352,169 @@ impl StreamType {
         // deserialize directly into enum
         let msg: StreamType = serde_json::from_slice(&buf)?;
         Ok(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_single_port() {
+        let targets = TunnelTarget::from_list(vec!["8080".to_string()]).unwrap();
+        assert_eq!(targets.len(), 1);
+        match &targets[0] {
+            TunnelTarget::Tcp(t) => {
+                assert_eq!(t.local_port, 8080);
+                assert_eq!(t.remote_port, 8080);
+                assert_eq!(t.remote_host, "127.0.0.1");
+            }
+            _ => panic!("Expected TcpTarget"),
+        }
+    }
+
+    #[test]
+    fn test_parse_port_range_same() {
+        let targets = TunnelTarget::from_list(vec!["8080-8082".to_string()]).unwrap();
+        assert_eq!(targets.len(), 3);
+
+        for (i, target) in targets.iter().enumerate() {
+            match target {
+                TunnelTarget::Tcp(t) => {
+                    assert_eq!(t.local_port, 8080 + i as u16);
+                    assert_eq!(t.remote_port, 8080 + i as u16);
+                    assert_eq!(t.remote_host, "127.0.0.1");
+                }
+                _ => panic!("Expected TcpTarget"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_port_range_offset() {
+        let targets = TunnelTarget::from_list(vec!["8080-8082:9080-9082".to_string()]).unwrap();
+        assert_eq!(targets.len(), 3);
+
+        for (i, target) in targets.iter().enumerate() {
+            match target {
+                TunnelTarget::Tcp(t) => {
+                    assert_eq!(t.local_port, 8080 + i as u16);
+                    assert_eq!(t.remote_port, 9080 + i as u16);
+                    assert_eq!(t.remote_host, "127.0.0.1");
+                }
+                _ => panic!("Expected TcpTarget"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_port_range_with_host() {
+        let targets =
+            TunnelTarget::from_list(vec!["8080-8082:192.168.1.50:9080-9082".to_string()]).unwrap();
+        assert_eq!(targets.len(), 3);
+
+        for (i, target) in targets.iter().enumerate() {
+            match target {
+                TunnelTarget::Tcp(t) => {
+                    assert_eq!(t.local_port, 8080 + i as u16);
+                    assert_eq!(t.remote_port, 9080 + i as u16);
+                    assert_eq!(t.remote_host, "192.168.1.50");
+                }
+                _ => panic!("Expected TcpTarget"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_port_range_udp() {
+        let targets = TunnelTarget::from_list(vec!["8080-8082/udp".to_string()]).unwrap();
+        assert_eq!(targets.len(), 3);
+
+        for (i, target) in targets.iter().enumerate() {
+            match target {
+                TunnelTarget::Udp(t) => {
+                    assert_eq!(t.local_port, 8080 + i as u16);
+                    assert_eq!(t.remote_port, 8080 + i as u16);
+                }
+                _ => panic!("Expected UdpTarget"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_port_range_mismatch() {
+        let result = TunnelTarget::from_list(vec!["8080-8082:9080-9085".to_string()]);
+        assert!(result.is_err());
+        match result {
+            Err(TunnelParseError::InvalidRange(msg)) => {
+                assert!(msg.contains("does not match"));
+            }
+            _ => panic!("Expected InvalidRange error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_port_range_invalid_order() {
+        let result = TunnelTarget::from_list(vec!["8090-8080".to_string()]);
+        assert!(result.is_err());
+        match result {
+            Err(TunnelParseError::InvalidRange(msg)) => {
+                assert!(msg.contains("less than"));
+            }
+            _ => panic!("Expected InvalidRange error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mixed_single_and_range() {
+        let targets =
+            TunnelTarget::from_list(vec!["8080".to_string(), "3000-3002".to_string()]).unwrap();
+        assert_eq!(targets.len(), 4); // 1 + 3
+
+        match &targets[0] {
+            TunnelTarget::Tcp(t) => {
+                assert_eq!(t.local_port, 8080);
+            }
+            _ => panic!("Expected TcpTarget"),
+        }
+
+        for (i, target) in targets[1..].iter().enumerate() {
+            match target {
+                TunnelTarget::Tcp(t) => {
+                    assert_eq!(t.local_port, 3000 + i as u16);
+                }
+                _ => panic!("Expected TcpTarget"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_existing_single_port_with_remote() {
+        // Ensure existing functionality still works
+        let targets = TunnelTarget::from_list(vec!["8080:9090".to_string()]).unwrap();
+        assert_eq!(targets.len(), 1);
+        match &targets[0] {
+            TunnelTarget::Tcp(t) => {
+                assert_eq!(t.local_port, 8080);
+                assert_eq!(t.remote_port, 9090);
+            }
+            _ => panic!("Expected TcpTarget"),
+        }
+    }
+
+    #[test]
+    fn test_existing_single_port_with_host() {
+        // Ensure existing functionality still works
+        let targets =
+            TunnelTarget::from_list(vec!["8080:192.168.1.50:9090".to_string()]).unwrap();
+        assert_eq!(targets.len(), 1);
+        match &targets[0] {
+            TunnelTarget::Tcp(t) => {
+                assert_eq!(t.local_port, 8080);
+                assert_eq!(t.remote_port, 9090);
+                assert_eq!(t.remote_host, "192.168.1.50");
+            }
+            _ => panic!("Expected TcpTarget"),
+        }
     }
 }
