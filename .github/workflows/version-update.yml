@@ -66,9 +66,10 @@ jobs:
       - name: Update version in install.sh
         run: |
           VERSION="${{ steps.extract-version.outputs.version }}"
-          sed -i "s/^VERSION=\"__VERSION__\"/VERSION=\"$VERSION\"/" m87-client/install.sh
+          # Only replace __VERSION__ in the M87_VERSION assignment line, not in the validation check
+          sed -i "s/M87_VERSION:-__VERSION__/M87_VERSION:-$VERSION/" m87-client/install.sh
           echo "Updated m87-client/install.sh to version $VERSION"
-          grep "^VERSION=" m87-client/install.sh
+          grep "VERSION=" m87-client/install.sh
 
       - name: Update Docker image tag in docker-compose.yml
         run: |
