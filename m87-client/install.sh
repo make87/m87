@@ -34,7 +34,9 @@ INSTALL_DIR="$HOME/.local/bin"
 BINARY_NAME="m87"
 GITHUB_REPO="make87/make87"
 # This version is set during release - do not change manually
-VERSION="__VERSION__"
+VERSION="${M87_VERSION:-__VERSION__}"
+# Allow custom download URL for testing (e.g., M87_DOWNLOAD_URL=http://localhost:8000)
+DOWNLOAD_BASE_URL="${M87_DOWNLOAD_URL:-https://github.com/$GITHUB_REPO/releases/download}"
 
 # Helper functions
 info() {
@@ -230,7 +232,7 @@ main() {
 
     # Step 3: Download binary
     binary_name="${BINARY_NAME}-${TARGET}"
-    download_url="https://github.com/$GITHUB_REPO/releases/download/v${VERSION}/${binary_name}"
+    download_url="${DOWNLOAD_BASE_URL}/v${VERSION}/${binary_name}"
     binary_path="$tmp_dir/$binary_name"
 
     info "Downloading $binary_name..."
@@ -239,7 +241,7 @@ main() {
 
     # Step 4: Download and verify checksum
     info "Verifying checksum..."
-    checksums_url="https://github.com/$GITHUB_REPO/releases/download/v${VERSION}/SHA256SUMS"
+    checksums_url="${DOWNLOAD_BASE_URL}/v${VERSION}/SHA256SUMS"
     checksums_file="$tmp_dir/SHA256SUMS"
 
     if download "$checksums_url" "$checksums_file" 2>/dev/null; then

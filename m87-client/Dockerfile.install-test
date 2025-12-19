@@ -1,0 +1,24 @@
+# Minimal container for testing install.sh
+# No pre-installed m87 binary - clean environment for install testing
+
+FROM debian:bookworm-slim
+
+# Install dependencies needed by install.sh and for testing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user for realistic testing (install should work without root)
+RUN useradd -m -s /bin/bash testuser
+
+# Create serve directory and make it accessible to testuser
+RUN mkdir -p /srv/download && chown testuser:testuser /srv/download
+
+# Switch to non-root user
+USER testuser
+WORKDIR /home/testuser
+
+# Keep container running
+CMD ["sleep", "infinity"]
