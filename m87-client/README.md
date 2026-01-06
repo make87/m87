@@ -88,21 +88,39 @@ m87 update
 
 To make a device remotely accessible:
 
-```
+```sh
 m87 agent run --email you@example.com   # register and run agent (waits for approval)
 ```
 
 Then approve the device from your workstation with `m87 devices approve <request-id>`.
 
-Or use systemd:
+#### Systemd Service
 
+Managing the systemd service requires root. Since the installer places `m87` in `~/.local/bin` (not in sudo's PATH), use one of these approaches:
+
+**Option 1: Inline path resolution**
+
+```sh
+sudo "$(which m87)" agent enable --now
+sudo "$(which m87)" agent status
+sudo "$(which m87)" agent stop
 ```
-sudo m87 agent enable --now    # install and start service
+
+**Option 2: Symlink to system path (one-time setup)**
+
+```sh
+sudo ln -s ~/.local/bin/m87 /usr/local/bin/m87
+```
+
+Then use directly:
+
+```sh
+sudo m87 agent enable --now
 sudo m87 agent status
 sudo m87 agent stop
 ```
 
-`sudo` is required to manage systemd services. The agent itself runs as your user, not root.
+The agent itself runs as your user, not root.
 
 ## Port Forwarding
 
