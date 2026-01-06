@@ -11,6 +11,11 @@ on:
         options:
           - release
           - dev
+      skip_tests:
+        description: "Skip running tests before release"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -46,9 +51,39 @@ jobs:
           echo "Version from Cargo.toml: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+  test:
+    name: Run Tests
+    runs-on: ubuntu-24.04
+    if: ${{ !inputs.skip_tests }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Run m87-client unit tests
+        run: cargo test --all-features --package m87-client
+
+      - name: Run m87-server unit tests
+        run: cargo test --all-features --package m87-server
+
   build:
     name: Build ${{ matrix.package }} (${{ inputs.build_profile }}) - ${{ matrix.os }}/${{ matrix.arch }}
-    needs: read-version
+    needs: [read-version, test]
+    # Run if tests passed OR if tests were skipped
+    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -178,7 +213,8 @@ jobs:
 
   attribution:
     name: Generate attribution files
-    needs: read-version
+    needs: [read-version, test]
+    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
@@ -228,7 +264,8 @@ jobs:
 
   docker-build:
     name: Build Docker Image (${{ inputs.build_profile }}) - ${{ matrix.arch }}
-    needs: [read-version]
+    needs: [read-version, test]
+    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
