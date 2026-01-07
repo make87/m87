@@ -96,31 +96,14 @@ Then approve the device from your workstation with `m87 devices approve <request
 
 #### Systemd Service
 
-Managing the systemd service requires root. Since the installer places `m87` in `~/.local/bin` (not in sudo's PATH), use one of these approaches:
-
-**Option 1: Inline path resolution**
-
 ```sh
-sudo "$(which m87)" agent enable --now
-sudo "$(which m87)" agent status
-sudo "$(which m87)" agent stop
+m87 agent enable --now    # install, enable and start (prompts for sudo)
+m87 agent status          # show service status
+m87 agent stop            # stop the service
+m87 agent disable --now   # disable and stop
 ```
 
-**Option 2: Symlink to system path (one-time setup)**
-
-```sh
-sudo ln -s ~/.local/bin/m87 /usr/local/bin/m87
-```
-
-Then use directly:
-
-```sh
-sudo m87 agent enable --now
-sudo m87 agent status
-sudo m87 agent stop
-```
-
-The agent itself runs as your user, not root.
+The CLI automatically handles privilege escalation invoking `sudo`. The agent service runs as your user, not root.
 
 ## Port Forwarding
 

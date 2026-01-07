@@ -64,9 +64,9 @@ m87 devices approve rpi      # Approve pending agent
 
 ### Agent Setup (on the device)
 ```bash
-m87 login --agent                        # Register this device
+m87 login --agent            # Register this device
 # Wait for manager approval
-sudo "$(which m87)" agent enable --now   # Start agent service and persist after boot
+m87 agent enable --now       # Install, enable and start service (prompts for sudo)
 ```
 
 ## See Also

@@ -85,6 +85,11 @@ enum Commands {
     #[command(subcommand)]
     Agent(AgentCommands),
 
+    /// Internal commands for privileged operations (hidden from help)
+    #[cfg(feature = "agent")]
+    #[command(subcommand, hide = true)]
+    Internal(InternalCommands),
+
     /// Manage devices and groups (requires manager role)
     #[command(subcommand)]
     Devices(DevicesCommands),
@@ -330,6 +335,48 @@ enum AgentCommands {
     Status,
 }
 
+/// Hidden internal commands for privileged operations (not shown in help)
+#[cfg(feature = "agent")]
+#[derive(Subcommand)]
+enum InternalCommands {
+    /// Install/update agent service file and optionally enable it (must be run as root)
+    AgentSetupPrivileged {
+        /// Username to run the service as
+        #[arg(long)]
+        user: String,
+
+        /// User's home directory
+        #[arg(long)]
+        home: String,
+
+        /// Path to the m87 executable
+        #[arg(long)]
+        exe_path: String,
+
+        /// Enable service to start on boot
+        #[arg(long)]
+        enable: bool,
+
+        /// Enable and start the service immediately
+        #[arg(long)]
+        enable_now: bool,
+
+        /// Only restart if service was already running
+        #[arg(long)]
+        restart_if_running: bool,
+    },
+
+    /// Stop the agent service (must be run as root)
+    AgentStopPrivileged,
+
+    /// Disable the agent service (must be run as root)
+    AgentDisablePrivileged {
+        /// Also stop the service immediately
+        #[arg(long)]
+        now: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum DevicesCommands {
     /// List all accessible devices
@@ -487,6 +534,34 @@ pub async fn cli() -> anyhow::Result<()> {
             }
             AgentCommands::Status => {
                 device::agent::status().await?;
+            }
+        },
+
+        #[cfg(feature = "agent")]
+        Commands::Internal(cmd) => match cmd {
+            InternalCommands::AgentSetupPrivileged {
+                user,
+                home,
+                exe_path,
+                enable,
+                enable_now,
+                restart_if_running,
+            } => {
+                device::agent::internal_setup_privileged(
+                    &user,
+                    &home,
+                    &exe_path,
+                    enable,
+                    enable_now,
+                    restart_if_running,
+                )
+                .await?;
+            }
+            InternalCommands::AgentStopPrivileged => {
+                device::agent::internal_stop_privileged().await?;
+            }
+            InternalCommands::AgentDisablePrivileged { now } => {
+                device::agent::internal_disable_privileged(now).await?;
             }
         },
 
