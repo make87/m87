@@ -36,7 +36,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart={exe_path} agent run
-WorkingDirectory=%h
+WorkingDirectory={home}
 Restart=on-failure
 RestartSec=3
 User={username}
