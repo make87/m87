@@ -13,6 +13,9 @@ pub mod retry;
 #[cfg(feature = "agent")]
 pub mod system_info;
 
+#[cfg(feature = "agent")]
+pub mod unix;
+
 pub mod device_cache;
 pub mod docker;
 pub mod fs;

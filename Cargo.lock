@@ -2517,6 +2517,7 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "m87-shared",
+ "nix 0.30.1",
  "once_cell",
  "openidconnect",
  "portable-pty",
