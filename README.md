@@ -1,16 +1,20 @@
-# make87
+# m87
 
 **Secure, outbound-only access to physical devices — with a native-feeling development, debugging, and software deployment experience.**
 
-m87 is a lightweight **CLI + runtime** for connecting to, debugging, and deploying software to distributed hardware fleets — all over a single outbound connection and without VPNs or inbound firewalls.
+**m87 is make87's command line and device runtime** for connecting to, debugging, and deploying software to distributed hardware fleets — all over a single outbound connection and without VPNs or inbound firewall rules.
+
+In this repo:
+- **`m87` command** = what you type in your terminal
+- **m87 runtime** = the on-device process that maintains the outbound connection and executes actions
 
 ---
 
 ## 🚀 Quick Start (Try in 5 minutes)
 
-### 1. Install the CLI
+### 1. Install the m87 command line
 
-Install the CLI on both your **developer machine** and the **edge device**.
+Install the `m87` command on your **developer machine**. (You'll run the m87 runtime on the edge device in step 3.)
 
 #### ⚡ One-liner (recommended)
 
@@ -50,7 +54,7 @@ m87 login
 
 ### 3. Set up the edge device
 
-On the edge device, start the runtime:
+On the edge device, start the **m87 runtime** (the on-device process):
 
 ```bash
 m87 runtime run --email you@example.com
@@ -87,13 +91,13 @@ Now you're connected — no inbound access, no firewall rules, and no VPN requir
 
 ## ✨ What Makes m87 Different
 
-m87 isn’t *just* remote access — it’s designed so **working with real devices feels like local development and deployment**:
+m87 isn't *just* remote access — it's designed so **working with real devices feels like local development and deployment**:
 
 * **Outbound-only access:** works behind NATs / firewalls without opening inbound ports.
-* **Native dev experience:** shell, port/sockets forwarding, logs, and live debugging feel like you’re working locally.
-* **Deployment-ready:** one CLI that transitions from access to orchestrating software deployments across fleets.
+* **Native dev experience:** shell, port/sockets forwarding, logs, and live debugging feel like you're working locally.
+* **Deployment-ready:** one command line that transitions from access to orchestrating software deployments across fleets.
 
-If you’ve ever SSH’d into an embedded device only to run into network traps or scaling pain, m87 makes those workflows easy and repeatable.
+If you've ever SSH'd into an embedded device only to run into network traps or scaling pain, m87 makes those workflows easy and repeatable.
 
 ---
 
@@ -147,12 +151,12 @@ cargo build --release
 
 ## 🤝 Contributing
 
-Contributions, bug reports, and feedback are welcome! Whether you’re a tinkerer, an early adopter, or looking to integrate m87 into your stack:
+Contributions, bug reports, and feedback are welcome! Whether you're a tinkerer, an early adopter, or looking to integrate m87 into your stack:
 
 1. Open issues for ideas and bugs
 2. Submit PRs — we review quickly
 
-Let’s build a better developer experience for physical systems.
+Let's build a better developer experience for physical systems.
 
 ---
 
