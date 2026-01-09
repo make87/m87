@@ -89,7 +89,7 @@ pub async fn start_udp_forward(
         last: Arc<Mutex<Instant>>,
     }
 
-    // === QUIC → AGENT UDP ===
+    // === QUIC → RUNTIME UDP ===
     {
         let target_host = target.remote_host.clone();
         let target_port = target.remote_port;
@@ -195,7 +195,7 @@ pub async fn start_udp_forward(
     }
 
     info!(
-        "Agent UDP forward ready: channel {} → {}:{}",
+        "Runtime UDP forward ready: channel {} → {}:{}",
         chan_id, target.remote_host, target.remote_port
     );
 }

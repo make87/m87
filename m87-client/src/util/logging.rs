@@ -112,7 +112,7 @@ pub fn init_tracing_with_log_layer(
 
     match (cli_mode, verbose) {
         (_, true) => {
-            // Agent / daemon normal mode
+            // Runtime / daemon normal mode
             tracing_subscriber::registry()
                 .with(filter)
                 .with(tracing_fmt::layer())
@@ -127,7 +127,7 @@ pub fn init_tracing_with_log_layer(
                 .init();
         }
         (false, false) => {
-            // Agent / daemon normal mode
+            // Runtime / daemon normal mode
             tracing_subscriber::registry()
                 .with(filter)
                 .with(tracing_fmt::layer())

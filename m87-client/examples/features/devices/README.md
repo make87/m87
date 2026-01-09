@@ -71,9 +71,9 @@ The device will need to re-register if rejected.
 m87 devices list
 ```
 
-### Approve New Agent
+### Approve New Runtime
 ```bash
-# Device registered via `m87 login --agent` on remote machine
+# Device registered via `m87 runtime login` on remote machine
 m87 devices list             # Shows device as "pending"
 m87 devices approve rpi      # Allow access
 m87 rpi shell                # Connect to the device
@@ -81,5 +81,5 @@ m87 rpi shell                # Connect to the device
 
 ## See Also
 
-- [auth/](../auth/) - Authentication and agent registration
+- [auth/](../auth/) - Authentication and runtime registration
 - [shell/](../shell/) - Interactive shell access

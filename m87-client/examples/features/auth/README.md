@@ -6,9 +6,9 @@ Authenticate with the make87 platform.
 
 m87 supports two authentication modes:
 - **Manager login** (default): OAuth2 browser flow for managing devices from your computer
-- **Agent registration** (Linux only): Headless device registration for autonomous agents
+- **Runtime registration** (Linux only): Headless device registration for autonomous runtimes
 
-Nothing prevents you from running an agent and a manager on the same device.
+Nothing prevents you from running a runtime and a manager on the same device.
 
 ## Manager Login
 
@@ -19,19 +19,19 @@ m87 login
 
 After authentication, your CLI is authorized to manage devices across your organization.
 
-## Agent Registration (Linux)
+## Runtime Registration (Linux)
 
-Register a device as an agent to enable remote management:
+Register a device as a runtime to enable remote management:
 
 ```bash
-# Register under your account (prompts for org selection)
-m87 login --agent
+# Register and run the runtime (prompts for org selection)
+m87 runtime run
 
 # Register under specific organization
-m87 login --agent --org-id <org-id>
+m87 runtime run --org-id <org-id>
 
 # Register under specific user email
-m87 login --agent --email admin@example.com
+m87 runtime run --email admin@example.com
 ```
 
 After registration, the device appears in `m87 devices list` with status "pending" until approved by a manager.
@@ -43,15 +43,14 @@ After registration, the device appears in `m87 devices list` with status "pendin
 m87 logout
 ```
 
-This clears both manager and agent credentials from the device.
+This clears both manager and runtime credentials from the device.
 
 ## Flags
 
 | Flag | Description |
 |------|-------------|
-| `--agent` | Register device as agent (Linux only) |
-| `--org-id <id>` | Organization ID for agent registration |
-| `--email <email>` | User email for agent registration |
+| `--org-id <id>` | Organization ID for runtime registration |
+| `--email <email>` | User email for runtime registration |
 
 ## Workflow
 
@@ -59,14 +58,14 @@ This clears both manager and agent credentials from the device.
 ```bash
 m87 login                    # Authenticate as manager
 m87 devices list             # View all devices
-m87 devices approve rpi      # Approve pending agent
+m87 devices approve rpi      # Approve pending runtime
 ```
 
-### Agent Setup (on the device)
+### Runtime Setup (on the device)
 ```bash
-m87 login --agent            # Register this device
+m87 runtime run              # Register and run this device
 # Wait for manager approval
-m87 agent enable --now       # Install, enable and start service (prompts for sudo)
+m87 runtime enable --now     # Install, enable and start service (prompts for sudo)
 ```
 
 ## See Also

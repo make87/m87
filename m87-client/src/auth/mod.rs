@@ -1,16 +1,16 @@
 use anyhow::{Context, Result, anyhow};
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use m87_shared::device::DeviceSystemInfo;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use std::time::Duration;
 use tracing::info;
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 mod device;
 mod oauth;
 
@@ -184,8 +184,8 @@ impl AuthManager {
         Ok(())
     }
 
-    // Agent-specific: Device registration
-    #[cfg(feature = "agent")]
+    // Runtime-specific: Device registration
+    #[cfg(feature = "runtime")]
     pub async fn login_device(
         auth_handler: &mut device::DeviceAuthRequestHandler,
         timeout: Duration,
@@ -268,8 +268,8 @@ async fn update_server_urls() -> Result<()> {
     Ok(())
 }
 
-// Agent-specific: Device registration for agents
-#[cfg(feature = "agent")]
+// Runtime-specific: Device registration for runtimes
+#[cfg(feature = "runtime")]
 pub async fn register_device(
     owner_scope: Option<String>,
     device_system_info: DeviceSystemInfo,
@@ -291,7 +291,7 @@ pub async fn register_device(
         })
         .or_else(|| std::env::var(OWNER_REFERENCE_ENV_VAR).ok());
 
-    let mut api_url = config.agent_server_url.clone();
+    let mut api_url = config.runtime_server_url.clone();
 
     // ------------------------------------------------------------
     // If either value is missing → call registration
@@ -308,8 +308,8 @@ pub async fn register_device(
         api_url = Some(resolved_api.clone());
         owner_scope = Some(resolved_owner.clone());
 
-        if config.agent_server_url.is_none() {
-            config.agent_server_url = Some(resolved_api);
+        if config.runtime_server_url.is_none() {
+            config.runtime_server_url = Some(resolved_api);
         }
         if config.owner_reference.is_none() {
             config.owner_reference = Some(resolved_owner);
@@ -364,8 +364,8 @@ pub async fn logout_cli() -> Result<()> {
     AuthManager::delete_cli_credentials().await
 }
 
-// Agent-specific: Logout device credentials
-#[cfg(feature = "agent")]
+// Runtime-specific: Logout device credentials
+#[cfg(feature = "runtime")]
 pub async fn logout_device() -> Result<()> {
     AuthManager::delete_device_credentials().await
 }

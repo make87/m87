@@ -25,7 +25,7 @@ pub async fn run_metrics(device: &str) -> Result<()> {
 
 async fn run_metrics_inner(device: &str) -> Result<()> {
     let config = Config::load()?;
-    // let host = config.get_agent_server_hostname();
+    // let host = config.get_runtime_server_hostname();
     let resolved = devices::resolve_device_short_id_cached(device).await?;
     let token = AuthManager::get_cli_token().await?;
 

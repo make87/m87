@@ -19,7 +19,7 @@ const ADMIN_KEY: &str = "e2e-admin-key";
 pub struct E2EInfra {
     pub mongo: ContainerAsync<GenericImage>,
     pub server: ContainerAsync<GenericImage>,
-    pub agent: ContainerAsync<GenericImage>,
+    pub runtime: ContainerAsync<GenericImage>,
     pub cli: ContainerAsync<GenericImage>,
     /// Unique ID for this test run (used for container names)
     run_id: String,
@@ -65,20 +65,20 @@ impl E2EInfra {
         // Wait for server to be ready
         Self::wait_for_server(&server).await?;
 
-        // Start agent and CLI containers
-        let agent = Self::start_agent(&run_id).await?;
+        // Start runtime and CLI containers
+        let runtime = Self::start_runtime(&run_id).await?;
         let cli = Self::start_cli(&run_id).await?;
-        tracing::info!("Agent and CLI containers started");
+        tracing::info!("Runtime and CLI containers started");
 
-        // Configure agent and CLI
-        Self::configure_agent(&agent, &run_id).await?;
+        // Configure runtime and CLI
+        Self::configure_runtime(&runtime, &run_id).await?;
         Self::configure_cli(&cli, &run_id).await?;
-        tracing::info!("Agent and CLI configured");
+        tracing::info!("Runtime and CLI configured");
 
         Ok(Self {
             mongo,
             server,
-            agent,
+            runtime,
             cli,
             run_id,
         })
@@ -116,8 +116,8 @@ impl E2EInfra {
         Ok(container)
     }
 
-    async fn start_agent(run_id: &str) -> Result<ContainerAsync<GenericImage>, Box<dyn std::error::Error>> {
-        let container_name = format!("e2e-agent-{}", run_id);
+    async fn start_runtime(run_id: &str) -> Result<ContainerAsync<GenericImage>, Box<dyn std::error::Error>> {
+        let container_name = format!("e2e-runtime-{}", run_id);
         // Note: with_entrypoint and with_cmd must be called on GenericImage before ImageExt methods
         let mut image = GenericImage::new(CLIENT_IMAGE_NAME, CLIENT_IMAGE_TAG)
             .with_entrypoint("sh")
@@ -205,8 +205,8 @@ impl E2EInfra {
         Err("Server did not become ready within timeout".into())
     }
 
-    async fn configure_agent(
-        agent: &ContainerAsync<GenericImage>,
+    async fn configure_runtime(
+        runtime: &ContainerAsync<GenericImage>,
         run_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let server_name = format!("e2e-server-{}", run_id);
@@ -225,7 +225,7 @@ impl E2EInfra {
             server_name, server_name, server_name
         );
 
-        agent
+        runtime
             .exec(ExecCommand::new(vec![
                 "sh",
                 "-c",
@@ -233,7 +233,7 @@ impl E2EInfra {
             ]))
             .await?;
 
-        agent
+        runtime
             .exec(ExecCommand::new(vec![
                 "sh",
                 "-c",
@@ -314,12 +314,12 @@ impl E2EInfra {
         Ok(String::from_utf8_lossy(&stdout).to_string())
     }
 
-    /// Execute an agent command and return the output
+    /// Execute a runtime command and return the output
     #[allow(dead_code)]
-    pub async fn agent_exec(&self, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    pub async fn runtime_exec(&self, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
         let cmd = format!("m87 {}", args.join(" "));
         let mut result = self
-            .agent
+            .runtime
             .exec(ExecCommand::new(vec!["sh", "-c", &cmd]))
             .await?;
 
@@ -327,28 +327,28 @@ impl E2EInfra {
         Ok(String::from_utf8_lossy(&stdout).to_string())
     }
 
-    /// Start agent login in background (doesn't block)
-    pub async fn start_agent_login(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // Run agent login in background using nohup
-        self.agent
+    /// Start runtime login in background (doesn't block)
+    pub async fn start_runtime_login(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Run runtime login in background using nohup
+        self.runtime
             .exec(ExecCommand::new(vec![
                 "sh",
                 "-c",
-                "nohup m87 agent login --org-id e2e@test.local > /tmp/agent-login.log 2>&1 &",
+                "nohup m87 runtime login --org-id e2e@test.local > /tmp/runtime-login.log 2>&1 &",
             ]))
             .await?;
 
         Ok(())
     }
 
-    /// Get agent login log output
-    pub async fn get_agent_login_log(&self) -> Result<String, Box<dyn std::error::Error>> {
+    /// Get runtime login log output
+    pub async fn get_runtime_login_log(&self) -> Result<String, Box<dyn std::error::Error>> {
         let mut result = self
-            .agent
+            .runtime
             .exec(ExecCommand::new(vec![
                 "sh",
                 "-c",
-                "cat /tmp/agent-login.log 2>/dev/null || echo ''",
+                "cat /tmp/runtime-login.log 2>/dev/null || echo ''",
             ]))
             .await?;
 

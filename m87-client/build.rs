@@ -1,16 +1,16 @@
 fn main() {
     // Check if features were explicitly provided via CLI/Cargo.toml
-    let agent_from_cli = std::env::var("CARGO_FEATURE_AGENT").is_ok();
+    let runtime_from_cli = std::env::var("CARGO_FEATURE_RUNTIME").is_ok();
     let manager_from_cli = std::env::var("CARGO_FEATURE_MANAGER").is_ok();
 
     // Only auto-detect features based on OS if none were explicitly specified
-    if !agent_from_cli && !manager_from_cli {
+    if !runtime_from_cli && !manager_from_cli {
         let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
 
         match target_os.as_str() {
             "linux" => {
-                // Linux gets both agent and manager capabilities
-                println!("cargo:rustc-cfg=feature=\"agent\"");
+                // Linux gets both runtime and manager capabilities
+                println!("cargo:rustc-cfg=feature=\"runtime\"");
                 println!("cargo:rustc-cfg=feature=\"manager\"");
             }
             "macos" | "windows" => {

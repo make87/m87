@@ -166,7 +166,7 @@ async fn tunnel_device_port_udp(
     let stream_type = tunnel_spec.to_stream_type(token);
     let mut quic_io = open_quic_stream(&conn, stream_type).await?;
 
-    // === Read channel_id assigned by the agent ===
+    // === Read channel_id assigned by the runtime ===
     let mut id_buf = [0u8; 4];
     quic_io.recv.read_exact(&mut id_buf).await?;
     let channel_id = u32::from_be_bytes(id_buf);

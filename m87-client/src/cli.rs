@@ -10,13 +10,13 @@ use crate::device::tunnel;
 use crate::devices;
 use crate::tui;
 use crate::update;
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use crate::util;
 use crate::util::logging::init_logging;
 use crate::util::tls::set_tls_provider;
 
 /// Save owner_reference to config if org_id or email is provided
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 fn save_owner_if_provided(org_id: Option<String>, email: Option<String>) -> anyhow::Result<()> {
     if let Some(owner) = org_id.or(email) {
         let mut cfg = Config::load()?;
@@ -80,13 +80,13 @@ enum Commands {
     /// Logout and deauthenticate this device
     Logout,
 
-    /// Manage local agent service (requires root privileges - use sudo)
-    #[cfg(feature = "agent")]
+    /// Manage local runtime service (requires root privileges - use sudo)
+    #[cfg(feature = "runtime")]
     #[command(subcommand)]
-    Agent(AgentCommands),
+    Runtime(RuntimeCommands),
 
     /// Internal commands for privileged operations (hidden from help)
-    #[cfg(feature = "agent")]
+    #[cfg(feature = "runtime")]
     #[command(subcommand, hide = true)]
     Internal(InternalCommands),
 
@@ -157,7 +157,7 @@ enum ConfigCommands {
     Set {
         /// Override API URL (e.g. https://eu.public.make87.dev)
         #[arg(long)]
-        agent_server_url: Option<String>,
+        runtime_server_url: Option<String>,
 
         /// Set owner reference (email or org id)
         #[arg(long)]
@@ -258,53 +258,53 @@ pub enum DeviceObserveCommand {
     },
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 #[derive(Subcommand)]
-enum AgentCommands {
-    /// Register this device as an agent (headless flow, requires approval)
+enum RuntimeCommands {
+    /// Register this device as a runtime (headless flow, requires approval)
     Login {
-        /// Organization ID to register agent under
+        /// Organization ID to register runtime under
         #[arg(long = "org-id", conflicts_with = "email")]
         org_id: Option<String>,
 
-        /// Email address to register agent under
+        /// Email address to register runtime under
         #[arg(long, conflicts_with = "org_id")]
         email: Option<String>,
     },
 
     Logout,
-    /// Run the agent daemon (blocking, used by systemd service)
+    /// Run the runtime daemon (blocking, used by systemd service)
     Run {
-        /// Organization ID to register agent under
+        /// Organization ID to register runtime under
         #[arg(long = "org-id", conflicts_with = "email")]
         org_id: Option<String>,
 
-        /// Email address to register agent under
+        /// Email address to register runtime under
         #[arg(long, conflicts_with = "org_id")]
         email: Option<String>,
     },
 
-    /// Start the agent service now (requires sudo)
+    /// Start the runtime service now (requires sudo)
     Start {
-        /// Organization ID to register agent under
+        /// Organization ID to register runtime under
         #[arg(long = "org-id", conflicts_with = "email")]
         org_id: Option<String>,
 
-        /// Email address to register agent under
+        /// Email address to register runtime under
         #[arg(long, conflicts_with = "org_id")]
         email: Option<String>,
     },
 
-    /// Stop the agent service now (requires sudo)
+    /// Stop the runtime service now (requires sudo)
     Stop,
 
-    /// Restart the agent service (requires sudo)
+    /// Restart the runtime service (requires sudo)
     Restart {
-        /// Organization ID to register agent under
+        /// Organization ID to register runtime under
         #[arg(long = "org-id", conflicts_with = "email")]
         org_id: Option<String>,
 
-        /// Email address to register agent under
+        /// Email address to register runtime under
         #[arg(long, conflicts_with = "org_id")]
         email: Option<String>,
     },
@@ -315,11 +315,11 @@ enum AgentCommands {
         #[arg(long)]
         now: bool,
 
-        /// Organization ID to register agent under
+        /// Organization ID to register runtime under
         #[arg(long = "org-id", conflicts_with = "email")]
         org_id: Option<String>,
 
-        /// Email address to register agent under
+        /// Email address to register runtime under
         #[arg(long, conflicts_with = "org_id")]
         email: Option<String>,
     },
@@ -331,16 +331,16 @@ enum AgentCommands {
         now: bool,
     },
 
-    /// Show local agent service status
+    /// Show local runtime service status
     Status,
 }
 
 /// Hidden internal commands for privileged operations (not shown in help)
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 #[derive(Subcommand)]
 enum InternalCommands {
-    /// Install/update agent service file and optionally enable it (must be run as root)
-    AgentSetupPrivileged {
+    /// Install/update runtime service file and optionally enable it (must be run as root)
+    RuntimeSetupPrivileged {
         /// Username to run the service as
         #[arg(long)]
         user: String,
@@ -366,11 +366,11 @@ enum InternalCommands {
         restart_if_running: bool,
     },
 
-    /// Stop the agent service (must be run as root)
-    AgentStopPrivileged,
+    /// Stop the runtime service (must be run as root)
+    RuntimeStopPrivileged,
 
-    /// Disable the agent service (must be run as root)
-    AgentDisablePrivileged {
+    /// Disable the runtime service (must be run as root)
+    RuntimeDisablePrivileged {
         /// Also stop the service immediately
         #[arg(long)]
         now: bool,
@@ -413,9 +413,9 @@ pub async fn cli() -> anyhow::Result<()> {
     let mut verbose = cli.verbose;
 
     let cli_mode = match &cli.command {
-        // Agent run must never be CLI mode
-        #[cfg(feature = "agent")]
-        Commands::Agent(AgentCommands::Run { .. }) => {
+        // Runtime run must never be CLI mode
+        #[cfg(feature = "runtime")]
+        Commands::Runtime(RuntimeCommands::Run { .. }) => {
             verbose = true;
             false
         }
@@ -497,49 +497,49 @@ pub async fn cli() -> anyhow::Result<()> {
             }
         },
 
-        #[cfg(feature = "agent")]
-        Commands::Agent(cmd) => match cmd {
-            AgentCommands::Login { org_id, email } => {
+        #[cfg(feature = "runtime")]
+        Commands::Runtime(cmd) => match cmd {
+            RuntimeCommands::Login { org_id, email } => {
                 let owner_scope = org_id.or(email);
-                tracing::info!("Registering device as agent...");
+                tracing::info!("Registering device as runtime...");
                 let sysinfo = util::system_info::get_system_info().await?;
                 auth::register_device(owner_scope, sysinfo).await?;
-                tracing::info!("[done] Device registered as agent successfully");
+                tracing::info!("[done] Device registered as runtime successfully");
             }
-            AgentCommands::Logout => {
+            RuntimeCommands::Logout => {
                 auth::logout_device().await?;
                 tracing::info!("[done] Logged out successfully");
             }
-            AgentCommands::Run { org_id, email } => {
+            RuntimeCommands::Run { org_id, email } => {
                 save_owner_if_provided(org_id, email)?;
-                device::agent::run().await?;
+                crate::runtime::run().await?;
             }
-            AgentCommands::Start { org_id, email } => {
+            RuntimeCommands::Start { org_id, email } => {
                 save_owner_if_provided(org_id, email)?;
-                device::agent::start().await?;
+                crate::runtime::start().await?;
             }
-            AgentCommands::Stop => {
-                device::agent::stop().await?;
+            RuntimeCommands::Stop => {
+                crate::runtime::stop().await?;
             }
-            AgentCommands::Restart { org_id, email } => {
+            RuntimeCommands::Restart { org_id, email } => {
                 save_owner_if_provided(org_id, email)?;
-                device::agent::restart().await?;
+                crate::runtime::restart().await?;
             }
-            AgentCommands::Enable { now, org_id, email } => {
+            RuntimeCommands::Enable { now, org_id, email } => {
                 save_owner_if_provided(org_id, email)?;
-                device::agent::enable(now).await?;
+                crate::runtime::enable(now).await?;
             }
-            AgentCommands::Disable { now } => {
-                device::agent::disable(now).await?;
+            RuntimeCommands::Disable { now } => {
+                crate::runtime::disable(now).await?;
             }
-            AgentCommands::Status => {
-                device::agent::status().await?;
+            RuntimeCommands::Status => {
+                crate::runtime::status().await?;
             }
         },
 
-        #[cfg(feature = "agent")]
+        #[cfg(feature = "runtime")]
         Commands::Internal(cmd) => match cmd {
-            InternalCommands::AgentSetupPrivileged {
+            InternalCommands::RuntimeSetupPrivileged {
                 user,
                 home,
                 exe_path,
@@ -547,7 +547,7 @@ pub async fn cli() -> anyhow::Result<()> {
                 enable_now,
                 restart_if_running,
             } => {
-                device::agent::internal_setup_privileged(
+                crate::runtime::internal_setup_privileged(
                     &user,
                     &home,
                     &exe_path,
@@ -557,11 +557,11 @@ pub async fn cli() -> anyhow::Result<()> {
                 )
                 .await?;
             }
-            InternalCommands::AgentStopPrivileged => {
-                device::agent::internal_stop_privileged().await?;
+            InternalCommands::RuntimeStopPrivileged => {
+                crate::runtime::internal_stop_privileged().await?;
             }
-            InternalCommands::AgentDisablePrivileged { now } => {
-                device::agent::internal_disable_privileged(now).await?;
+            InternalCommands::RuntimeDisablePrivileged { now } => {
+                crate::runtime::internal_disable_privileged(now).await?;
             }
         },
 
@@ -655,7 +655,7 @@ pub async fn cli() -> anyhow::Result<()> {
 
         Commands::Config(cmd) => match cmd {
             ConfigCommands::Set {
-                agent_server_url: api_url,
+                runtime_server_url,
                 owner_reference,
                 make87_api_url,
                 make87_app_url,
@@ -663,8 +663,8 @@ pub async fn cli() -> anyhow::Result<()> {
             } => {
                 let mut cfg = Config::load().context("Failed to load config")?;
 
-                if let Some(url) = api_url {
-                    cfg.agent_server_url = Some(url);
+                if let Some(url) = runtime_server_url {
+                    cfg.runtime_server_url = Some(url);
                 }
 
                 if let Some(owner) = owner_reference {

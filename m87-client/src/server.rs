@@ -121,8 +121,8 @@ pub async fn get_manager_server_urls(make87_api_url: &str, token: &str) -> Resul
     Ok(manager_urls)
 }
 
-// Agent-specific: Used by device registration
-#[cfg(feature = "agent")]
+// Runtime-specific: Used by device registration
+#[cfg(feature = "runtime")]
 pub async fn set_auth_request(
     api_url: &str,
     body: DeviceAuthRequestBody,
@@ -142,8 +142,8 @@ pub async fn set_auth_request(
     }
 }
 
-// Agent-specific: Used by device registration
-#[cfg(feature = "agent")]
+// Runtime-specific: Used by device registration
+#[cfg(feature = "runtime")]
 pub async fn check_auth_request(
     api_url: &str,
     request_id: &str,

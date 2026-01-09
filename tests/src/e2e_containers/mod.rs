@@ -1,6 +1,6 @@
 //! E2E test containers and infrastructure
 
-mod agent_args;
+mod runtime_args;
 pub mod containers;
 mod device_registration;
 mod docker;
@@ -17,5 +17,5 @@ mod tunnel;
 
 // Re-export commonly used items
 pub use containers::E2EInfra;
-pub use fixtures::{AgentRunner, DeviceRegistration, RegisteredDevice, TestSetup};
+pub use fixtures::{RuntimeRunner, DeviceRegistration, RegisteredDevice, TestSetup};
 pub use helpers::{E2EError, E2EResult};

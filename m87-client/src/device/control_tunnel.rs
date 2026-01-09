@@ -1,18 +1,18 @@
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use crate::device::services::collect_all_services;
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use anyhow::Context;
 use anyhow::Result;
 
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::error;
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use tracing::{debug, warn};
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use crate::{auth::AuthManager, config::Config};
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 pub use m87_shared::heartbeat::{HeartbeatRequest, HeartbeatResponse};
 
 use crate::util::system_info::get_system_info;
@@ -23,8 +23,8 @@ pub struct HeartbeatState {
     first_heartbeat: bool,
 }
 
-// Agent-specific: Maintain persistent control tunnel connection
-#[cfg(feature = "agent")]
+// Runtime-specific: Maintain persistent control tunnel connection
+#[cfg(feature = "runtime")]
 pub async fn connect_control_tunnel() -> Result<()> {
     use std::sync::Arc;
 
@@ -42,7 +42,7 @@ pub async fn connect_control_tunnel() -> Result<()> {
     let control_host = format!(
         "control-{}.{}",
         short_id,
-        config.get_agent_server_hostname()
+        config.get_runtime_server_hostname()
     );
     debug!("Connecting QUIC control tunnel to {}", control_host);
 

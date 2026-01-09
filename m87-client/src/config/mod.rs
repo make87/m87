@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, anyhow};
 use m87_shared::config::ObservationConfig;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use sha1::{Digest, Sha1};
 use std::{fs, path::PathBuf};
 use tracing::{error, info, warn};
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use crate::util::mac;
 
 fn default_heartbeat_interval() -> u64 {
@@ -22,8 +22,8 @@ fn default_make87_app_url() -> String {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
-    #[serde(default, rename = "agent_server_url", alias = "api_url")]
-    pub agent_server_url: Option<String>,
+    #[serde(default, alias = "agent_server_url", alias = "api_url")]
+    pub runtime_server_url: Option<String>,
     #[serde(default = "default_make87_api_url")]
     pub make87_api_url: String,
     #[serde(default = "default_make87_app_url")]
@@ -49,7 +49,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            agent_server_url: None,
+            runtime_server_url: None,
             make87_api_url: "https://api.make87.com".to_string(),
             make87_app_url: "https://app.make87.com".to_string(),
             device_id: get_default_device_id(),
@@ -67,11 +67,11 @@ impl Default for Config {
 }
 
 fn get_default_device_id() -> String {
-    #[cfg(feature = "agent")]
+    #[cfg(feature = "runtime")]
     {
-        Config::deterministic_device_id()
+        return Config::deterministic_device_id();
     }
-    #[cfg(not(feature = "agent"))]
+    #[cfg(not(feature = "runtime"))]
     {
         "".to_string()
     }
@@ -90,8 +90,8 @@ impl Config {
         Ok(())
     }
 
-    pub fn get_agent_server_url(&self) -> String {
-        match &self.agent_server_url {
+    pub fn get_runtime_server_url(&self) -> String {
+        match &self.runtime_server_url {
             Some(url) => url.clone(),
             None => {
                 error!("API URL not set. Make sure to login in order to set it!");
@@ -100,16 +100,16 @@ impl Config {
         }
     }
 
-    pub fn get_agent_server_hostname(&self) -> String {
-        let url = self.get_agent_server_url();
+    pub fn get_runtime_server_hostname(&self) -> String {
+        let url = self.get_runtime_server_url();
         url.trim_start_matches("https://")
             .trim_start_matches("http://")
             .to_string()
     }
 
     /// Create a deterministic BSON-style ObjectId string from hostname and MAC address.
-    /// Agent-specific: Used for device registration
-    #[cfg(feature = "agent")]
+    /// Runtime-specific: Used for device registration
+    #[cfg(feature = "runtime")]
     pub fn deterministic_device_id() -> String {
         use sysinfo::System;
 
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.agent_server_url, None);
+        assert_eq!(config.runtime_server_url, None);
         assert_eq!(config.log_level, "info");
     }
 
@@ -245,35 +245,35 @@ mod tests {
         let config = Config::default();
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: Config = serde_json::from_str(&json).unwrap();
-        assert_eq!(config.agent_server_url, deserialized.agent_server_url);
+        assert_eq!(config.runtime_server_url, deserialized.runtime_server_url);
     }
 
     #[test]
-    fn test_get_agent_server_hostname_strips_https() {
+    fn test_get_runtime_server_hostname_strips_https() {
         let mut config = Config::default();
-        config.agent_server_url = Some("https://api.example.com".to_string());
-        assert_eq!(config.get_agent_server_hostname(), "api.example.com");
+        config.runtime_server_url = Some("https://api.example.com".to_string());
+        assert_eq!(config.get_runtime_server_hostname(), "api.example.com");
     }
 
     #[test]
-    fn test_get_agent_server_hostname_strips_http() {
+    fn test_get_runtime_server_hostname_strips_http() {
         let mut config = Config::default();
-        config.agent_server_url = Some("http://api.example.com".to_string());
-        assert_eq!(config.get_agent_server_hostname(), "api.example.com");
+        config.runtime_server_url = Some("http://api.example.com".to_string());
+        assert_eq!(config.get_runtime_server_hostname(), "api.example.com");
     }
 
     #[test]
-    fn test_get_agent_server_hostname_with_port() {
+    fn test_get_runtime_server_hostname_with_port() {
         let mut config = Config::default();
-        config.agent_server_url = Some("https://api.example.com:8443".to_string());
-        assert_eq!(config.get_agent_server_hostname(), "api.example.com:8443");
+        config.runtime_server_url = Some("https://api.example.com:8443".to_string());
+        assert_eq!(config.get_runtime_server_hostname(), "api.example.com:8443");
     }
 
     #[test]
-    fn test_get_agent_server_hostname_no_protocol() {
+    fn test_get_runtime_server_hostname_no_protocol() {
         let mut config = Config::default();
-        config.agent_server_url = Some("api.example.com".to_string());
-        assert_eq!(config.get_agent_server_hostname(), "api.example.com");
+        config.runtime_server_url = Some("api.example.com".to_string());
+        assert_eq!(config.get_runtime_server_hostname(), "api.example.com");
     }
 
     #[test]

@@ -4,16 +4,16 @@ pub mod network;
 pub mod shutdown;
 pub mod subprocess;
 
-// Agent-specific utilities
-#[cfg(feature = "agent")]
+// Runtime-specific utilities
+#[cfg(feature = "runtime")]
 pub mod mac;
 
 pub mod retry;
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 pub mod system_info;
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 pub mod unix;
 
 pub mod device_cache;

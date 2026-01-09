@@ -19,8 +19,8 @@ use crate::util::unix::{
 };
 use crate::{auth::register_device, util::tls::set_tls_provider};
 
-const SERVICE_NAME: &str = "m87-agent";
-const SERVICE_FILE: &str = "/etc/systemd/system/m87-agent.service";
+const SERVICE_NAME: &str = "m87-runtime";
+const SERVICE_FILE: &str = "/etc/systemd/system/m87-runtime.service";
 const SERVICE_FILE_MODE: u32 = 0o644;
 
 /// Generate the systemd service file content with all XDG environment variables
@@ -29,13 +29,13 @@ fn generate_service_content(exe_path: &Path, username: &str, home: &Path) -> Str
 
     format!(
         r#"[Unit]
-Description=m87 Agent Service
+Description=m87 Runtime Service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={exe_path} agent run
+ExecStart={exe_path} runtime run
 WorkingDirectory={home}
 Restart=on-failure
 RestartSec=3
@@ -54,7 +54,7 @@ UMask=0077
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=m87-agent
+SyslogIdentifier=m87-runtime
 
 # Resource limits
 TimeoutStopSec=30
@@ -147,17 +147,17 @@ pub async fn internal_setup_privileged(
     if enable_now {
         // enable --now: enable at boot AND start immediately
         run_systemctl_checked(&["enable", "--now", SERVICE_NAME])?;
-        info!("Enabled and started m87-agent service");
+        info!("Enabled and started m87-runtime service");
     } else if enable {
         // enable without --now: just enable at boot
         run_systemctl_checked(&["enable", SERVICE_NAME])?;
-        info!("Enabled m87-agent service (starts on boot)");
+        info!("Enabled m87-runtime service (starts on boot)");
     } else if restart_if_running && file_changed {
         // Check if service is active and restart if so
         let status = run_systemctl(&["is-active", "--quiet", SERVICE_NAME])?;
         if status.success() {
             run_systemctl_checked(&["restart", SERVICE_NAME])?;
-            info!("Restarted m87-agent service");
+            info!("Restarted m87-runtime service");
         }
     }
 
@@ -171,7 +171,7 @@ pub async fn internal_stop_privileged() -> Result<()> {
     }
 
     run_systemctl_checked(&["stop", SERVICE_NAME])?;
-    info!("Stopped m87-agent service");
+    info!("Stopped m87-runtime service");
     Ok(())
 }
 
@@ -183,10 +183,10 @@ pub async fn internal_disable_privileged(now: bool) -> Result<()> {
 
     if now {
         run_systemctl_checked(&["disable", "--now", SERVICE_NAME])?;
-        info!("Disabled and stopped m87-agent service");
+        info!("Disabled and stopped m87-runtime service");
     } else {
         run_systemctl_checked(&["disable", SERVICE_NAME])?;
-        info!("Disabled m87-agent service");
+        info!("Disabled m87-runtime service");
     }
     Ok(())
 }
@@ -225,7 +225,7 @@ async fn setup_service(enable: bool, enable_now: bool, restart_if_running: bool)
         // Re-exec with sudo using absolute path
         let mut args = vec![
             "internal",
-            "agent-setup-privileged",
+            "runtime-setup-privileged",
             "--user",
             &user_info.username,
             "--home",
@@ -248,7 +248,7 @@ async fn setup_service(enable: bool, enable_now: bool, restart_if_running: bool)
     }
 }
 
-/// CLI: m87 agent enable [--now]
+/// CLI: m87 runtime enable [--now]
 /// Enables auto-start on boot (auto-installs/updates service file)
 pub async fn enable(now: bool) -> Result<()> {
     // enable: always enable at boot
@@ -256,37 +256,37 @@ pub async fn enable(now: bool) -> Result<()> {
     setup_service(true, now, false).await
 }
 
-/// CLI: m87 agent start
-/// Starts the agent service (auto-installs/updates service file)
+/// CLI: m87 runtime start
+/// Starts the runtime service (auto-installs/updates service file)
 pub async fn start() -> Result<()> {
     // start: enable at boot AND start immediately
     setup_service(true, true, false).await
 }
 
-/// CLI: m87 agent restart
-/// Restarts the agent service (auto-installs/updates service file)
+/// CLI: m87 runtime restart
+/// Restarts the runtime service (auto-installs/updates service file)
 pub async fn restart() -> Result<()> {
     // restart: just restart if running (don't enable if not already enabled)
     setup_service(false, false, true).await
 }
 
-/// CLI: m87 agent stop
-/// Stops the agent service
+/// CLI: m87 runtime stop
+/// Stops the runtime service
 pub async fn stop() -> Result<()> {
     if is_root() {
         internal_stop_privileged().await
     } else {
-        reexec_with_sudo(&["internal", "agent-stop-privileged"])
+        reexec_with_sudo(&["internal", "runtime-stop-privileged"])
     }
 }
 
-/// CLI: m87 agent disable [--now]
+/// CLI: m87 runtime disable [--now]
 /// Disables auto-start on boot
 pub async fn disable(now: bool) -> Result<()> {
     if is_root() {
         internal_disable_privileged(now).await
     } else {
-        let mut args = vec!["internal", "agent-disable-privileged"];
+        let mut args = vec!["internal", "runtime-disable-privileged"];
         if now {
             args.push("--now");
         }
@@ -294,7 +294,7 @@ pub async fn disable(now: bool) -> Result<()> {
     }
 }
 
-/// CLI: m87 agent status
+/// CLI: m87 runtime status
 /// Shows service status (no sudo required for viewing status)
 pub async fn status() -> Result<()> {
     let status = run_systemctl(&["status", "--lines=0", SERVICE_NAME])?;
@@ -303,15 +303,15 @@ pub async fn status() -> Result<()> {
     // Exit code 4 means service unknown/not installed
     if let Some(code) = status.code() {
         if code == 4 {
-            warn!("Service not installed. Run 'm87 agent enable --now' to install and start.");
+            warn!("Service not installed. Run 'm87 runtime enable --now' to install and start.");
         }
     }
 
     Ok(())
 }
 
-/// CLI: m87 agent run
-/// Main agent daemon entry point (used by systemd service)
+/// CLI: m87 runtime run
+/// Main runtime daemon entry point (used by systemd service)
 pub async fn run() -> Result<()> {
     info!("Running device");
 

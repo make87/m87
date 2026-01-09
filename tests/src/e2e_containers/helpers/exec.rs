@@ -79,14 +79,14 @@ pub async fn is_port_listening(
     Ok(result.contains("listening") && !result.contains("not listening"))
 }
 
-/// Read config.json from agent container
-pub async fn read_agent_config(
+/// Read config.json from runtime container
+pub async fn read_runtime_config(
     container: &ContainerAsync<GenericImage>,
 ) -> Result<String, E2EError> {
     exec_shell(container, "cat /root/.config/m87/config.json").await
 }
 
-/// Update owner_reference in agent config using jq-like sed replacement
+/// Update owner_reference in runtime config using jq-like sed replacement
 pub async fn set_owner_reference(
     container: &ContainerAsync<GenericImage>,
     owner: &str,
@@ -100,7 +100,7 @@ pub async fn set_owner_reference(
     Ok(())
 }
 
-/// Clear owner_reference from agent config (set to null)
+/// Clear owner_reference from runtime config (set to null)
 pub async fn clear_owner_reference(
     container: &ContainerAsync<GenericImage>,
 ) -> Result<(), E2EError> {

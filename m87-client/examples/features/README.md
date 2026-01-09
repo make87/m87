@@ -5,7 +5,7 @@ Documentation for core m87 CLI features.
 ## Available Features
 
 ### [auth/](./auth/)
-Authentication and device registration (login, logout, agent setup).
+Authentication and device registration (login, logout, runtime setup).
 
 ### [devices/](./devices/)
 Device management (list, approve, reject pending devices).
@@ -20,7 +20,7 @@ Run commands on remote devices with optional TTY support.
 File operations (sync, ls) with `device:path` syntax.
 
 ### [logs/](./logs/)
-Stream m87 agent logs from remote devices.
+Stream m87 runtime logs from remote devices.
 
 ### [shell/](./shell/)
 Interactive shell sessions on remote devices.

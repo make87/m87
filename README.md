@@ -2,7 +2,7 @@
 
 **Secure, outbound-only access to physical devices — with a native-feeling development, debugging, and software deployment experience.**
 
-m87 is a lightweight **CLI + agent** for connecting to, debugging, and deploying software to distributed hardware fleets — all over a single outbound connection and without VPNs or inbound firewalls.
+m87 is a lightweight **CLI + runtime** for connecting to, debugging, and deploying software to distributed hardware fleets — all over a single outbound connection and without VPNs or inbound firewalls.
 
 ---
 
@@ -50,13 +50,13 @@ m87 login
 
 ### 3. Set up the edge device
 
-On the edge device, start the agent:
+On the edge device, start the runtime:
 
 ```bash
-m87 agent run --email you@example.com
+m87 runtime run --email you@example.com
 ```
 
-This registers the device (printing a request ID) and waits for approval. Once approved, the agent starts automatically.
+This registers the device (printing a request ID) and waits for approval. Once approved, the runtime starts automatically.
 
 ### 4. Approve the device
 

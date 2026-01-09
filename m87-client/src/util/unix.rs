@@ -1,5 +1,5 @@
-//! Unix-specific utilities for agent operations.
-//! Only compiled when `feature = "agent"` is enabled.
+//! Unix-specific utilities for runtime operations.
+//! Only compiled when `feature = "runtime"` is enabled.
 
 use anyhow::{bail, Context, Result};
 use nix::unistd::{Uid, User};

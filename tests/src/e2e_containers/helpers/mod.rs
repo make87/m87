@@ -25,8 +25,8 @@ pub enum E2EError {
     #[error("Device not found")]
     DeviceNotFound,
 
-    #[error("Agent crashed: {0}")]
-    AgentCrashed(String),
+    #[error("Runtime crashed: {0}")]
+    RuntimeCrashed(String),
 
     #[error("Parse error: {0}")]
     Parse(String),
