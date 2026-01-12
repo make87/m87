@@ -23,6 +23,6 @@ mod ssh;
 #[cfg(feature = "runtime")]
 mod terminal;
 #[cfg(feature = "runtime")]
-mod tunnel;
+mod forward;
 #[cfg(feature = "runtime")]
 pub mod udp_manager;

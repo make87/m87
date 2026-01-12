@@ -28,5 +28,5 @@ Interactive shell sessions on remote devices.
 ### [stats/](./stats/)
 Real-time system metrics dashboard.
 
-### [tunnels/](./tunnels/)
-Create secure tunnels to access services running on remote devices.
+### [forward/](./forward/)
+Forward ports from remote devices to your local machine.

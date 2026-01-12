@@ -7,7 +7,7 @@ pub mod system_metrics;
 
 pub mod docker;
 pub mod fs;
-pub mod tunnel;
+pub mod forward;
 
 #[cfg(feature = "runtime")]
 pub mod control_tunnel;

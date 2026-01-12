@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use crate::{
     streams::{
         quic::QuicIo,
-        stream_type::{SocketTarget, TcpTarget, TunnelTarget, UdpTarget},
+        stream_type::{SocketTarget, TcpTarget, ForwardTarget, UdpTarget},
         udp_manager::UdpChannelManager,
     },
     util::udp::{decode_socket_addr, encode_socket_addr},
@@ -25,17 +25,17 @@ const MAX_PACKET: usize = 65535;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn handle_port_forward_io(
-    tunnel_target: TunnelTarget,
+    forward_target: ForwardTarget,
     mut io: QuicIo,
     manager: UdpChannelManager,
     datagram_tx: tokio::sync::mpsc::Sender<(u32, Bytes)>,
 ) {
-    match tunnel_target {
-        TunnelTarget::Tcp(target) => tcp_forward(target, &mut io).await,
+    match forward_target {
+        ForwardTarget::Tcp(target) => tcp_forward(target, &mut io).await,
 
-        TunnelTarget::Udp(target) => udp_unicast_forward(target, io, manager, datagram_tx).await,
-        TunnelTarget::Socket(target) => socket_forward(target, io).await,
-        TunnelTarget::Vpn(_target) => {}
+        ForwardTarget::Udp(target) => udp_unicast_forward(target, io, manager, datagram_tx).await,
+        ForwardTarget::Socket(target) => socket_forward(target, io).await,
+        ForwardTarget::Vpn(_target) => {}
     }
 }
 

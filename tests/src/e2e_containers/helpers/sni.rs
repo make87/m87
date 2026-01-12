@@ -65,10 +65,10 @@ impl SniSetup {
         Ok(())
     }
 
-    /// Add /etc/hosts entry for CLI tunnel
+    /// Add /etc/hosts entry for CLI forward
     ///
     /// The CLI connects to `{device_short_id}.{server_name}`
-    pub async fn setup_cli_tunnel(
+    pub async fn setup_cli_forward(
         &self,
         cli: &ContainerAsync<GenericImage>,
         device_short_id: &str,
@@ -83,7 +83,7 @@ impl SniSetup {
         Ok(())
     }
 
-    /// Setup both agent and CLI tunnel hosts entries
+    /// Setup both agent control tunnel and CLI forward hosts entries
     pub async fn setup_both(
         &self,
         agent: &ContainerAsync<GenericImage>,
@@ -92,7 +92,7 @@ impl SniSetup {
     ) -> Result<(), E2EError> {
         self.setup_agent_control_tunnel(agent, device_short_id)
             .await?;
-        self.setup_cli_tunnel(cli, device_short_id).await?;
+        self.setup_cli_forward(cli, device_short_id).await?;
         Ok(())
     }
 
@@ -101,8 +101,8 @@ impl SniSetup {
         format!("control-{}.{}", device_short_id, self.server_name)
     }
 
-    /// Get the CLI tunnel hostname for a device
-    pub fn cli_tunnel_host(&self, device_short_id: &str) -> String {
+    /// Get the CLI forward hostname for a device
+    pub fn cli_forward_host(&self, device_short_id: &str) -> String {
         format!("{}.{}", device_short_id, self.server_name)
     }
 }
