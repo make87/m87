@@ -11,3 +11,4 @@ serde_yaml = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 hex = "0.4"
+uuid = { version = "1.19", features = ["v4"] }

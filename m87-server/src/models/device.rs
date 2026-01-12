@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use m87_shared::deploy_spec::DeploymentRevision;
+use m87_shared::device::DeviceStatus;
 use mongodb::bson::{DateTime, Document, doc, oid::ObjectId};
 
 use serde::{Deserialize, Serialize};
@@ -9,7 +11,6 @@ use serde::{Deserialize, Serialize};
 pub use m87_shared::config::DeviceClientConfig;
 pub use m87_shared::device::{DeviceSystemInfo, PublicDevice, short_device_id};
 pub use m87_shared::heartbeat::{HeartbeatRequest, HeartbeatResponse};
-use tracing_subscriber::fmt::format;
 
 use crate::config::AppConfig;
 use crate::models::deploy_spec::{CreateDeployReportBody, DeployReportDoc, DeployRevisionDoc};
@@ -104,10 +105,9 @@ pub struct DeviceDoc {
     pub owner_scope: String,
     pub allowed_scopes: Vec<String>,
     pub system_info: DeviceSystemInfo,
-    pub instruction_hash: i64,
     pub api_key_id: ObjectId,
     #[serde(default)]
-    pub last_instruction_hash: String,
+    pub last_config_hash: String,
     #[serde(default)]
     pub last_deployment_hash: String,
 }
@@ -144,12 +144,25 @@ impl DeviceDoc {
             owner_scope: create_body.owner_scope,
             allowed_scopes,
             system_info: create_body.system_info,
-            instruction_hash: 0,
             api_key_id: create_body.api_key_id,
-            last_instruction_hash: "".to_string(),
+            last_config_hash: "".to_string(),
             last_deployment_hash: "".to_string(),
         };
         let _ = db.devices().insert_one(node.clone()).await?;
+        Ok(())
+    }
+
+    pub async fn invalidate_deployment_hash(
+        db: &Arc<Mongo>,
+        device_oid: &ObjectId,
+    ) -> ServerResult<()> {
+        let _ = db
+            .devices()
+            .update_one(
+                doc! { "_id": device_oid },
+                doc! { "$set": { "last_deployment_hash": "" } },
+            )
+            .await?;
         Ok(())
     }
 
@@ -206,7 +219,7 @@ impl DeviceDoc {
             .devices()
             .update_one(
                 doc! {
-                    "device_id": &self.id.unwrap()
+                    "_id": &self.id.unwrap()
                 },
                 doc! {
                     "$set": update_fields
@@ -230,12 +243,7 @@ impl DeviceDoc {
             }
         }
 
-        // TODO: Store or log the metrics for monitoring/alerting
-        //
-        let target_hash = format!(
-            "{}-{}",
-            self.last_deployment_hash, self.last_instruction_hash
-        );
+        let target_hash = format!("{}-{}", self.last_deployment_hash, self.last_config_hash);
         if payload.last_instruction_hash == target_hash {
             return Ok(HeartbeatResponse {
                 up_to_date: true,
@@ -247,24 +255,27 @@ impl DeviceDoc {
 
         let out = DeployRevisionDoc::get_active_device_deployment(&db, self.id.unwrap()).await;
         let target_revision = match out {
-            Ok(revision) => Some(revision.revision),
-            Err(_) => None,
+            Ok(Some(revision)) => Some(revision.revision),
+            Ok(None) => Some(DeploymentRevision::empty()),
+            _ => None,
         };
 
         let new_deployment_hash = match &target_revision {
-            Some(revision) => revision.get_id(),
+            Some(revision) => revision.get_hash(),
             None => "".to_string(),
         };
+        let config_hash = self.config.get_hash().to_string();
         // update last_deployment_hash in database
         let _ = db
             .devices()
             .update_one(
                 doc! {
-                    "device_id": &self.id.unwrap()
+                    "_id": &self.id.unwrap()
                 },
                 doc! {
                     "$set": doc! {
-                        "last_deployment_hash": &new_deployment_hash
+                        "last_deployment_hash": &new_deployment_hash,
+                        "last_config_hash": &config_hash,
                     }
                 },
             )
@@ -273,14 +284,33 @@ impl DeviceDoc {
         let resp = HeartbeatResponse {
             up_to_date: false,
             config: Some(self.config.clone()),
-            instruction_hash: format!(
-                "{}-{}",
-                new_deployment_hash,
-                self.last_instruction_hash.clone(),
-            ),
+            instruction_hash: format!("{}-{}", new_deployment_hash, config_hash,),
             target_revision,
         };
         Ok(resp)
+    }
+
+    pub async fn get_status(&self, db: &Arc<Mongo>, since: u32) -> ServerResult<DeviceStatus> {
+        let active_revision =
+            DeployRevisionDoc::get_active_device_deployment(db, self.id.clone().unwrap()).await?;
+        let observations = match active_revision {
+            Some(revision) => {
+                let observations = DeployReportDoc::get_device_observations_since(
+                    db,
+                    &revision.revision.id.unwrap(),
+                    &self.id.clone().unwrap(),
+                    since,
+                )
+                .await?;
+                observations
+            }
+            None => vec![],
+        };
+        let status = DeviceStatus {
+            incidents: vec![],
+            observations,
+        };
+        Ok(status)
     }
 }
 

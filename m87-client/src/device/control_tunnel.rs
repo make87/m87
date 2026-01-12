@@ -6,14 +6,12 @@ use anyhow::Context;
 use anyhow::Result;
 
 use serde::{Serialize, de::DeserializeOwned};
-#[cfg(feature = "agent")]
-use tokio::sync::mpsc;
 use tracing::error;
 #[cfg(feature = "agent")]
 use tracing::{debug, warn};
 
 #[cfg(feature = "agent")]
-use crate::{auth::AuthManager, config::Config, device::unit_manager::UnitManager};
+use crate::{auth::AuthManager, config::Config, device::deployment_manager::UnitManager};
 
 #[cfg(feature = "agent")]
 pub use m87_shared::heartbeat::{HeartbeatRequest, HeartbeatResponse};
@@ -69,7 +67,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<UnitManager>) -> Result<()
     // let mut recv = quic_conn.accept_uni().await?;
 
     let state = Arc::new(tokio::sync::Mutex::new(HeartbeatState {
-        last_instruction_hash: "a".to_string(),
+        last_instruction_hash: "".to_string(),
         heartbeat_interval: config.heartbeat_interval_secs,
         first_heartbeat: true,
     }));
@@ -98,8 +96,12 @@ pub async fn connect_control_tunnel(unit_manager: Arc<UnitManager>) -> Result<()
                             new_cfg.save()?;
                         }
                         if let Some(target_units_config) = resp.target_revision {
-                            tracing::info!("Received new target units config");
-                            manager_clone.set_desired_units(target_units_config);
+                            tracing::info!("Received new target deployment");
+                            let res = manager_clone.set_desired_units(target_units_config).await;
+                            if let Err(e) = res {
+                                tracing::error!("Failed to set target deployment: {}", e);
+                                continue;
+                            }
                         }
 
                         st.last_instruction_hash = resp.instruction_hash;
@@ -118,7 +120,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<UnitManager>) -> Result<()
             loop {
                 use std::time::Duration;
 
-                use crate::device::unit_manager::{ack_event, on_new_event};
+                use crate::device::deployment_manager::{ack_event, on_new_event};
 
                 tokio::select! {
                     _ = shutdown.changed() => break,
@@ -137,7 +139,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<UnitManager>) -> Result<()
                         tracing::info!("Sending heartbeat with event udpate");
 
                         if write_msg(&mut send, &req).await.is_ok() {
-                            ack_event(&claimed).await;
+                            let _ = ack_event(&claimed).await;
                         }
                     },
 

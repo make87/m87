@@ -1,11 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 use m87_shared::deploy_spec::{
-    CommandSpec, DeployReportKind, DeploymentRevision, DeploymentRevisionReport, HealthSpec,
-    LivenessSpec, OnFailure, Outcome, RetrySpec, RollbackPolicy, RollbackReport, RunOnceKey,
-    RunReport, RunSpec, RunState, RunType, Step, StepReport, UndoMode, WorkdirMode,
+    DeployReportKind, DeploymentRevision, DeploymentRevisionReport, HealthSpec, LivenessSpec,
+    OnFailure, Outcome, RetrySpec, RollbackPolicy, RollbackReport, RunReport, RunSpec, RunState,
+    RunType, Step, StepReport, Undo, UndoMode, WorkdirMode,
 };
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
@@ -17,7 +15,7 @@ use tokio::{fs, io::AsyncWriteExt, sync::RwLock, time::sleep};
 use crate::{
     device::log_manager::LogManager,
     util::{
-        command::{RunCommandError, build_command, run_command},
+        command::{RunCommandError, run_command},
         shutdown::SHUTDOWN,
     },
 };
@@ -38,56 +36,56 @@ fn inflight_dir() -> Result<PathBuf> {
     Ok(events_dir()?.join("inflight"))
 }
 
-fn unit_state_dir() -> Result<PathBuf> {
-    Ok(data_dir()?.join("unit_state"))
-}
-
 async fn ensure_dirs() -> Result<()> {
-    fs::create_dir_all(unit_state_dir()?).await?;
     fs::create_dir_all(pending_dir()?).await?;
     fs::create_dir_all(inflight_dir()?).await?;
     Ok(())
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct UnitLocalState {
-    pub completed_run_once_keys: HashSet<String>,
+pub struct LocalRunState {
     pub consecutive_health_failures: u32,
+    #[serde(default)]
+    pub ran_successful: bool,
+    #[serde(default)]
+    pub reported_once: bool,
+    #[serde(default)]
+    pub last_health: bool,
+    #[serde(default)]
+    pub last_alive: bool,
 }
 
-impl UnitLocalState {
-    fn state_file_path(unit_id: &str) -> Result<PathBuf> {
-        // Sanitize unit_id to make it filesystem-safe
-        let safe_id = unit_id.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-
-        let state_dir = unit_state_dir()?;
-        Ok(state_dir.join(format!("{}.json", safe_id)))
+impl LocalRunState {
+    fn state_file_path(work_dir: &Path) -> Result<PathBuf> {
+        Ok(work_dir.join("run_state.json"))
     }
 
-    fn load(unit_id: &str) -> Result<UnitLocalState> {
-        let path = UnitLocalState::state_file_path(unit_id)?;
+    fn load(work_dir: &Path) -> Result<LocalRunState> {
+        let path = LocalRunState::state_file_path(work_dir)?;
 
         if !path.exists() {
-            return Ok(UnitLocalState::default());
+            return Ok(LocalRunState::default());
         }
 
+        let display_name = work_dir.display();
         let contents = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read state file for unit {}", unit_id))?;
+            .with_context(|| format!("Failed to read state file for dir {}", &display_name))?;
 
-        let state: UnitLocalState = serde_json::from_str(&contents)
-            .with_context(|| format!("Failed to parse state file for unit {}", unit_id))?;
+        let state: LocalRunState = serde_json::from_str(&contents)
+            .with_context(|| format!("Failed to parse state file for dir {}", &display_name))?;
 
         Ok(state)
     }
 
-    fn save(unit_id: &str, st: &UnitLocalState) -> Result<()> {
-        let path = UnitLocalState::state_file_path(unit_id)?;
+    fn save(work_dir: &Path, st: &LocalRunState) -> Result<()> {
+        let path = LocalRunState::state_file_path(work_dir)?;
 
         let contents =
             serde_json::to_string_pretty(st).context("Failed to serialize unit state")?;
+        let display_name = work_dir.display();
 
         std::fs::write(&path, contents)
-            .with_context(|| format!("Failed to write state file for unit {}", unit_id))?;
+            .with_context(|| format!("Failed to write state file for dir {}", &display_name))?;
 
         Ok(())
     }
@@ -221,12 +219,13 @@ impl UnitManager {
     /// Get reference to the log manager for external use (e.g., streams/logs routing)
     pub async fn start_log_follow(&self) -> Result<()> {
         if let Some(spec) = RevisionStore::get_desired_config()? {
-            for (_, unit) in spec.get_unit_map() {
+            for (_, unit) in spec.get_job_map() {
                 if let Some(observer_spec) = &unit.observe {
                     if let Some(log_spec) = &observer_spec.logs {
                         let workdir = self.resolve_workdir(&unit).await?;
                         self.log_manager
-                            .follow_start(unit.get_id(), log_spec, unit.env, workdir);
+                            .follow_start(unit.id, log_spec, unit.env, workdir)
+                            .await;
                     }
                 }
             }
@@ -235,10 +234,10 @@ impl UnitManager {
         Ok(())
     }
 
-    pub fn stop_log_follow(&self) -> Result<()> {
+    pub async fn stop_log_follow(&self) -> Result<()> {
         if let Some(spec) = RevisionStore::get_desired_config()? {
-            for (_, unit) in spec.get_unit_map() {
-                self.log_manager.follow_stop(unit.get_id());
+            for (_, unit) in spec.get_job_map() {
+                self.log_manager.follow_stop(unit.id).await;
             }
         }
         Ok(())
@@ -246,31 +245,35 @@ impl UnitManager {
 
     /// Replace desired set (authoritative). Marks changes dirty.
     pub async fn set_desired_units(&self, config: DeploymentRevision) -> Result<()> {
-        let mut new_map = HashMap::new();
-        for u in &config.units {
-            new_map.insert(u.get_id(), u.clone());
-        }
+        let new_map = config.get_job_map();
 
         let old_desired = match RevisionStore::get_desired_config()? {
-            Some(spec) => spec.get_unit_map(),
+            Some(spec) => spec.get_job_map(),
             None => BTreeMap::new(),
         };
         let mut dirty = self.dirty.write().await;
 
         // mark changed/added as dirty
-        for (id, new_u) in &new_map {
+        for (id, u) in &new_map {
             match old_desired.get(id) {
-                Some(old_u) if unit_semantically_equal(old_u, new_u) => {}
+                // if hashes match its semantically equal
+                Some(_) => {
+                    let wd = self.resolve_workdir(u).await?;
+                    let st = LocalRunState::load(&wd)?;
+                    if !st.ran_successful {
+                        dirty.insert(u.get_hash());
+                    }
+                }
                 _ => {
-                    dirty.insert(id.clone());
+                    dirty.insert(u.get_hash());
                 }
             }
         }
 
         // mark removed as dirty so we can stop logs / stop service if needed
-        for id in old_desired.keys() {
+        for (id, u) in old_desired.iter() {
             if !new_map.contains_key(id) {
-                dirty.insert(id.clone());
+                dirty.insert(u.get_hash());
             }
         }
 
@@ -284,6 +287,25 @@ impl UnitManager {
         Ok(())
     }
 
+    async fn set_dirty_ids(&self) -> Result<()> {
+        let desired = match RevisionStore::get_desired_config()? {
+            Some(spec) => spec.get_job_map(),
+            None => BTreeMap::new(),
+        };
+        let mut dirty = self.dirty.write().await;
+
+        // mark removed as dirty so we can stop logs / stop service if needed
+        for (_, u) in desired.iter() {
+            let wd = self.resolve_workdir(u).await?;
+            if let Ok(st) = LocalRunState::load(&wd) {
+                if !st.ran_successful {
+                    dirty.insert(u.get_hash());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Start the single supervisor loop.
     pub fn start(self: Arc<Self>) {
         tokio::spawn(async move {
@@ -293,12 +315,14 @@ impl UnitManager {
             // coarse tick keeps CPU low; checks run only when due
             let tick = Duration::from_millis(250);
 
+            // add ids of desired jobs that are not ran_successfully
+            let _ = self.set_dirty_ids().await;
             loop {
                 if SHUTDOWN.is_cancelled() {
                     break;
                 }
 
-                // 1) reconcile dirty changes (apply/stop/observe log streams)
+                // 1) reconcile dirty changes (run missing / stop old)
                 if let Err(e) = self.reconcile_dirty().await {
                     tracing::error!("reconcile error: {e}");
                     let Ok(Some(desired)) = RevisionStore::get_desired_config() else {
@@ -308,7 +332,7 @@ impl UnitManager {
 
                     let _ = enqueue_event(DeployReportKind::DeploymentRevisionReport(
                         DeploymentRevisionReport {
-                            revision_id: desired.get_id(),
+                            revision_id: desired.id.expect("revision id is required"),
                             outcome: Outcome::Failed,
                             dirty: true,
                             error: Some(format!("reconcile error: {e}")),
@@ -330,21 +354,21 @@ impl UnitManager {
                 };
 
                 if let Some(spec) = desired_spec {
-                    for (id, u) in spec.get_unit_map().iter() {
+                    for (id, u) in spec.get_job_map().iter() {
                         if !u.enabled {
                             continue;
                         }
                         let Some(obs) = &u.observe else {
                             continue;
                         };
-                        let desired_revision_id = spec.get_id();
+                        let desired_revision_id = spec.id.clone().expect("revision id is required");
 
                         if let Some(liv) = &obs.liveness {
                             let due = next_liveness.get(id).copied().unwrap_or(now);
                             if now >= due {
                                 next_liveness.insert(id.clone(), now + liv.every);
                                 let _ = self
-                                    .run_liveness_check(id, &desired_revision_id, u, liv)
+                                    .run_liveness_check(&u.id, &desired_revision_id, u, liv)
                                     .await;
                             }
                         }
@@ -353,7 +377,7 @@ impl UnitManager {
                             if now >= due {
                                 next_health.insert(id.clone(), now + health.every);
                                 let _ = self
-                                    .run_health_check(id, &desired_revision_id, u, health)
+                                    .run_health_check(&u.id, &desired_revision_id, u, health)
                                     .await;
                             }
                         }
@@ -376,8 +400,8 @@ impl UnitManager {
 
         let deploy_spec = RevisionStore::get_desired_config()?;
         let desired_snapshot = match &deploy_spec {
-            Some(spec) => spec.units.iter().map(|u| (u.get_id(), u.clone())).collect(),
-            None => HashMap::new(),
+            Some(spec) => spec.get_job_map(),
+            None => BTreeMap::new(),
         };
 
         for id in dirty_ids {
@@ -385,7 +409,7 @@ impl UnitManager {
                 None => {
                     // Unit removed - try to stop it using previous spec
                     if let Ok(Some(config)) = RevisionStore::get_previous_config() {
-                        if let Some(prev_spec) = config.get_run(&id) {
+                        if let Some(prev_spec) = config.get_job(&id) {
                             if matches!(prev_spec.run_type, RunType::Service) {
                                 let wd = match self.resolve_workdir(&prev_spec).await {
                                     Ok(wd) => wd,
@@ -406,7 +430,7 @@ impl UnitManager {
                     let wd = self.resolve_workdir(spec).await?;
 
                     let desired_revision_id = match &deploy_spec {
-                        Some(spec) => spec.get_id(),
+                        Some(spec) => spec.id.clone().expect("revision id is required"),
                         None => {
                             tracing::warn!("No deploy spec provided for unit {:?}", spec);
                             continue;
@@ -441,27 +465,6 @@ impl UnitManager {
     }
 
     async fn maybe_run_job(&self, spec: &RunSpec, revision_id: &str, wd: &Path) -> Result<()> {
-        // run_once gate
-        if let Some(ro) = &spec.run_once {
-            let key = match &ro.key {
-                RunOnceKey::Auto(b) if !*b => None,
-                RunOnceKey::Auto(_) => Some(spec.get_id()),
-                RunOnceKey::Explicit(s) => Some(s.clone()),
-            };
-
-            if let Some(key) = key {
-                let mut st = UnitLocalState::load(&spec.get_id())?;
-                if st.completed_run_once_keys.contains(&key) {
-                    // already done
-                    return Ok(());
-                }
-                self.execute_unit_steps(spec, revision_id, wd).await?;
-                st.completed_run_once_keys.insert(key);
-                UnitLocalState::save(&spec.get_id(), &st)?;
-                return Ok(());
-            }
-        }
-
         // normal job
         self.execute_unit_steps(spec, revision_id, wd).await
     }
@@ -473,26 +476,37 @@ impl UnitManager {
     async fn stop_service(&self, spec: &RunSpec, revision_id: &str, wd: &Path) -> Result<()> {
         if let Some(stop) = &spec.stop {
             self.execute_steps(
-                &spec.get_id(),
+                &spec.id,
                 revision_id,
                 wd,
                 &spec.env,
                 &stop.steps,
                 spec.on_failure.as_ref(),
             )
-            .await
-        } else {
-            Ok(())
+            .await?;
         }
+        // if ephemeral workspace, delete it
+        if let Some(workdir) = &spec.workdir {
+            if let WorkdirMode::Ephemeral = workdir.mode {
+                let path = self.get_workspace_path(spec)?;
+                tokio::fs::remove_dir_all(path).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn execute_unit_steps(&self, spec: &RunSpec, revision_id: &str, wd: &Path) -> Result<()> {
+        let mut st = LocalRunState::load(wd)?;
+        if st.ran_successful {
+            // already done
+            return Ok(());
+        }
         // materialize files (only if any)
         self.materialize_files(spec, wd).await?;
 
-        match self
+        let res = match self
             .execute_steps(
-                &spec.get_id(),
+                &spec.id,
                 &revision_id.to_string(),
                 wd,
                 &spec.env,
@@ -503,7 +517,7 @@ impl UnitManager {
         {
             Ok(()) => {
                 let _ = enqueue_event(DeployReportKind::RunReport(RunReport {
-                    run_id: spec.get_id(),
+                    run_id: spec.id.clone(),
                     revision_id: revision_id.to_string(),
                     outcome: Outcome::Success,
                     error: None,
@@ -513,7 +527,7 @@ impl UnitManager {
             }
             Err(e) => {
                 let _ = enqueue_event(DeployReportKind::RunReport(RunReport {
-                    run_id: spec.get_id(),
+                    run_id: spec.id.clone(),
                     revision_id: revision_id.to_string(),
                     outcome: Outcome::Failed,
                     error: Some(e.to_string()),
@@ -521,19 +535,25 @@ impl UnitManager {
                 .await;
                 Err(e)
             }
-        }
+        };
+
+        st.ran_successful = true;
+        LocalRunState::save(wd, &st)?;
+
+        res
     }
 
     async fn run_liveness_check(
         &self,
-        unit_id: &str,
+        run_id: &str,
         revision_id: &str,
         spec: &RunSpec,
         liv: &LivenessSpec,
     ) -> Result<()> {
         let wd = self.resolve_workdir(spec).await?;
+        let mut st = LocalRunState::load(&wd)?;
         let res = run_command(
-            unit_id,
+            run_id,
             &wd,
             &spec.env,
             &liv.check,
@@ -543,34 +563,48 @@ impl UnitManager {
         .await;
         match res {
             Ok(_) => {
-                let _ = enqueue_event(DeployReportKind::RunState(RunState {
-                    run_id: unit_id.to_string(),
-                    revision_id: revision_id.to_string(),
-                    healthy: None,
-                    alive: Some(true),
-                    report_time: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64,
-                }))
-                .await;
+                let needs_send = st.last_health == false || !st.reported_once;
+                st.last_alive = true;
+                LocalRunState::save(&wd, &st)?;
+                if needs_send {
+                    let _ = enqueue_event(DeployReportKind::RunState(RunState {
+                        run_id: run_id.to_string(),
+                        revision_id: revision_id.to_string(),
+                        healthy: None,
+                        alive: Some(true),
+                        report_time: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u32,
+                    }))
+                    .await;
+                    st.reported_once = true;
+                    LocalRunState::save(&wd, &st)?;
+                }
                 Ok(())
             }
             Err(e) => {
-                let _ = enqueue_event(DeployReportKind::RunState(RunState {
-                    run_id: unit_id.to_string(),
-                    revision_id: revision_id.to_string(),
-                    healthy: Some(false),
-                    alive: Some(false),
-                    report_time: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64,
-                }))
-                .await;
+                let needs_send = st.last_alive == false || !st.reported_once;
+                st.last_alive = false;
+                LocalRunState::save(&wd, &st)?;
+                if needs_send {
+                    let _ = enqueue_event(DeployReportKind::RunState(RunState {
+                        run_id: run_id.to_string(),
+                        revision_id: revision_id.to_string(),
+                        healthy: Some(false),
+                        alive: Some(false),
+                        report_time: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u32,
+                    }))
+                    .await;
+                    st.reported_once = true;
+                    LocalRunState::save(&wd, &st)?;
+                }
 
                 // Check if we should trigger rollback
-                let _ = self.check_rollback_on_liveness_failure(unit_id).await;
+                let _ = self.check_rollback_on_liveness_failure(run_id).await;
 
                 Err(e.into())
             }
@@ -579,16 +613,16 @@ impl UnitManager {
 
     async fn run_health_check(
         &self,
-        unit_id: &str,
+        run_id: &str,
         revision_id: &str,
         spec: &RunSpec,
         health: &HealthSpec,
     ) -> Result<()> {
         let wd = self.resolve_workdir(spec).await?;
-        let mut st = UnitLocalState::load(unit_id)?;
+        let mut st = LocalRunState::load(&wd)?;
 
         let res = run_command(
-            unit_id,
+            run_id,
             &wd,
             &spec.env,
             &health.run,
@@ -599,57 +633,54 @@ impl UnitManager {
         match res {
             Ok(_tail) => {
                 st.consecutive_health_failures = 0;
-                UnitLocalState::save(unit_id, &st)?;
-                let _ = enqueue_event(DeployReportKind::RunState(RunState {
-                    run_id: unit_id.to_string(),
-                    revision_id: revision_id.to_string(),
-                    healthy: Some(true),
-                    alive: Some(true),
-                    report_time: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64,
-                }))
-                .await;
+                let needs_send =
+                    st.last_health != true || st.last_alive != true || !st.reported_once;
+                st.last_health = true;
+                st.last_alive = true;
+                LocalRunState::save(&wd, &st)?;
+                if needs_send {
+                    let _ = enqueue_event(DeployReportKind::RunState(RunState {
+                        run_id: run_id.to_string(),
+                        revision_id: revision_id.to_string(),
+                        healthy: Some(true),
+                        alive: Some(true),
+                        report_time: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u32,
+                    }))
+                    .await;
+                    st.reported_once = true;
+                    LocalRunState::save(&wd, &st)?;
+                }
                 Ok(())
             }
             Err(e) => {
                 st.consecutive_health_failures = st.consecutive_health_failures.saturating_add(1);
                 let consecutive = st.consecutive_health_failures;
-                UnitLocalState::save(unit_id, &st)?;
+                let needs_send = st.last_health == true || !st.reported_once;
+                st.last_health = false;
+                LocalRunState::save(&wd, &st)?;
 
-                let _ = enqueue_event(DeployReportKind::RunState(RunState {
-                    run_id: unit_id.to_string(),
-                    revision_id: revision_id.to_string(),
-                    healthy: Some(false),
-                    alive: None,
-                    report_time: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64,
-                }))
-                .await;
-                // Check if we should trigger rollback
-                let _ = self
-                    .check_rollback_on_health_failure(revision_id, consecutive)
-                    .await;
-
-                // note: incident engine decides what to do when consecutive >= fails_after
-                if consecutive >= health.fails_after {
-                    // keep returning Err; caller ignores
+                if needs_send {
                     let _ = enqueue_event(DeployReportKind::RunState(RunState {
-                        run_id: unit_id.to_string(),
+                        run_id: run_id.to_string(),
                         revision_id: revision_id.to_string(),
                         healthy: Some(false),
                         alive: None,
                         report_time: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
-                            .as_millis() as u64,
+                            .as_millis() as u32,
                     }))
                     .await;
-                    return Err(e.into());
+                    st.reported_once = true;
+                    LocalRunState::save(&wd, &st)?;
                 }
+                // Check if we should trigger rollback
+                let _ = self
+                    .check_rollback_on_health_failure(revision_id, consecutive)
+                    .await;
                 Ok(())
             }
         }
@@ -744,7 +775,7 @@ impl UnitManager {
 
     async fn check_all_units_failing(&self) -> Result<bool> {
         let desired = match RevisionStore::get_desired_config()? {
-            Some(config) => config.get_unit_map(),
+            Some(config) => config.get_job_map(),
             None => return Ok(false),
         };
 
@@ -753,8 +784,9 @@ impl UnitManager {
         }
 
         let mut all_failing = true;
-        for (id, _spec) in &desired {
-            if let Ok(st) = UnitLocalState::load(id) {
+        for (_id, spec) in &desired {
+            let wd = self.resolve_workdir(spec).await?;
+            if let Ok(st) = LocalRunState::load(&wd) {
                 if st.consecutive_health_failures == 0 {
                     all_failing = false;
                     break;
@@ -786,7 +818,7 @@ impl UnitManager {
 
         tracing::info!(
             "Rolling back to previous configuration with {} units",
-            prev_config.units.len()
+            prev_config.jobs.len()
         );
 
         // Apply previous configuration (this will reset deployment_started_at)
@@ -807,7 +839,7 @@ impl UnitManager {
 
     async fn execute_steps(
         &self,
-        unit_id: &str,
+        run_id: &str,
         revision_id: &str,
         wd: &Path,
         env: &BTreeMap<String, String>,
@@ -823,16 +855,17 @@ impl UnitManager {
 
         for step in steps {
             let res = self
-                .run_step_with_retry(unit_id, revision_id, wd, env, step)
+                .run_step_with_retry(run_id, revision_id, wd, env, step)
                 .await;
             match res {
                 Ok(()) => executed.push(step),
                 Err(e) => {
                     // Undo
+                    tracing::error!("Failed to run step: {}", e);
                     match policy.undo {
                         UndoMode::None => {}
                         UndoMode::ExecutedSteps => {
-                            self.undo_steps(unit_id, revision_id, wd, env, &executed)
+                            self.undo_steps(run_id, revision_id, wd, env, &executed)
                                 .await;
                         }
                     }
@@ -859,7 +892,7 @@ impl UnitManager {
         for step in steps.iter().rev() {
             if let Some(undo) = &step.undo {
                 // if undo fails we dont care for now. run_step takes care of sending the event to the user
-                let _ = run_step(unit_id, wd, env, step, revision_id, 0, MAX_TAIL_BYTES).await;
+                let _ = run_undo(unit_id, wd, env, undo, step, revision_id, MAX_TAIL_BYTES).await;
             }
         }
     }
@@ -882,7 +915,7 @@ impl UnitManager {
         for i in 0..attempts {
             let res = run_step(unit_id, wd, env, step, revision_id, i, MAX_TAIL_BYTES).await;
             match res {
-                Ok(report) => return Ok(()),
+                Ok(()) => return Ok(()),
                 Err(e) => {
                     if i + 1 >= attempts {
                         return Err(e);
@@ -897,14 +930,21 @@ impl UnitManager {
 
     async fn resolve_workdir(&self, spec: &RunSpec) -> Result<PathBuf> {
         // observe-only still gets a deterministic cwd for relative paths in log/health commands
+        let resolved = self.get_workspace_path(spec)?;
+
+        tokio::fs::create_dir_all(&resolved).await?;
+        Ok(resolved)
+    }
+
+    fn get_workspace_path(&self, spec: &RunSpec) -> Result<PathBuf> {
         let base = if let Some(wd) = &spec.workdir {
             if let Some(p) = &wd.path {
                 PathBuf::from(p)
             } else {
-                self.root_dir.join("units").join(&spec.get_id())
+                self.root_dir.join("jobs").join(&spec.id)
             }
         } else {
-            self.root_dir.join("units").join(&spec.get_id())
+            self.root_dir.join("jobs").join(&spec.id)
         };
 
         // choose persistent/ephemeral
@@ -916,10 +956,13 @@ impl UnitManager {
 
         let resolved = match mode {
             WorkdirMode::Persistent => base,
-            WorkdirMode::Ephemeral => self.root_dir.join("tmp").join("units").join(&spec.get_id()),
+            WorkdirMode::Ephemeral => self
+                .root_dir
+                .join("tmp")
+                .join("jobs")
+                .join(&spec.get_hash()),
         };
 
-        tokio::fs::create_dir_all(&resolved).await?;
         Ok(resolved)
     }
 
@@ -930,16 +973,16 @@ impl UnitManager {
         for (rel, content) in &spec.files {
             let p = wd.join(rel);
             if let Some(parent) = p.parent() {
-                tokio::fs::create_dir_all(parent).await?;
+                let res = tokio::fs::create_dir_all(parent).await;
+                if let Err(e) = &res {
+                    tracing::error!("Failed to create directory: {}", e);
+                }
+                res?;
             }
             tokio::fs::write(&p, content).await?;
         }
         Ok(())
     }
-}
-
-fn unit_semantically_equal(a: &RunSpec, b: &RunSpec) -> bool {
-    a.get_id() == b.get_id()
 }
 
 pub async fn enqueue_event(event: DeployReportKind) -> Result<()> {
@@ -1062,6 +1105,11 @@ async fn run_step(
     i: u32,
     max_tail_bytes: usize,
 ) -> Result<()> {
+    tracing::info!(
+        "running step {}. Attempt {}",
+        step.name.clone().unwrap_or(format!("{}", step.run)),
+        i + 1
+    );
     let res = run_command(unit_id, wd, env, &step.run, step.timeout, max_tail_bytes).await;
     let res = match res {
         Ok(tail) => Ok(StepReport {
@@ -1069,6 +1117,73 @@ async fn run_step(
             run_id: unit_id.to_string(),
             name: step.name.clone(),
             attempts: i + 1,
+            log_tail: tail,
+            exit_code: None,
+            success: true,
+            is_undo: false,
+            error: None,
+            report_time: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        }),
+        Err(RunCommandError::Other(e)) => Err(e),
+        Err(RunCommandError::Io(e)) => Err(e.into()),
+        Err(RunCommandError::Failed(e)) => Ok(StepReport {
+            revision_id: revision_id.to_string(),
+            run_id: unit_id.to_string(),
+            name: step.name.clone(),
+            attempts: i + 1,
+            log_tail: e.combined_tail,
+            exit_code: e.exit_code,
+            success: false,
+            is_undo: false,
+            error: e.error,
+            report_time: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        }),
+    };
+    match res {
+        Ok(report) => {
+            enqueue_event(DeployReportKind::StepReport(report.clone())).await?;
+            if !report.success {
+                Err(anyhow!(
+                    "Step {} failed: {}",
+                    step.name.clone().unwrap_or("unknown step".to_string()),
+                    report.error.unwrap_or("unknown error".to_string())
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        Err(e) => Err(e),
+    }
+}
+
+async fn run_undo(
+    unit_id: &str,
+    wd: &Path,
+    env: &BTreeMap<String, String>,
+    undo: &Undo,
+    step: &Step,
+    revision_id: &str,
+    max_tail_bytes: usize,
+) -> Result<()> {
+    tracing::info!(
+        "undo step {}",
+        step.name.clone().unwrap_or(format!("{}", step.run))
+    );
+    let res = run_command(unit_id, wd, env, &undo.run, undo.timeout, max_tail_bytes).await;
+    let res = match res {
+        Ok(tail) => Ok(StepReport {
+            revision_id: revision_id.to_string(),
+            run_id: unit_id.to_string(),
+            name: step.name.clone(),
+            attempts: 0,
+            is_undo: true,
             log_tail: tail,
             exit_code: None,
             success: true,
@@ -1084,7 +1199,8 @@ async fn run_step(
             revision_id: revision_id.to_string(),
             run_id: unit_id.to_string(),
             name: step.name.clone(),
-            attempts: i + 1,
+            attempts: 0,
+            is_undo: true,
             log_tail: e.combined_tail,
             exit_code: e.exit_code,
             success: false,

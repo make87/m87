@@ -1,19 +1,23 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use futures::TryStreamExt;
-use m87_shared::deploy_spec::{
-    DeployReport, DeployReportKind, DeploymentRevision, DeploymentRevisionReport, RollbackReport,
-    RunReport, RunSpec, RunState, StepReport,
+use m87_shared::{
+    deploy_spec::{
+        DeployReport, DeployReportKind, DeploymentRevision, RunSpec, UpdateDeployRevisionBody,
+    },
+    device::ObserveStatus,
 };
 use mongodb::{
     bson::{Bson, DateTime as BsonDateTime, Document, doc, oid::ObjectId, to_bson},
-    options::{FindOneAndUpdateOptions, FindOptions, ReturnDocument},
+    options::FindOptions,
 };
 use serde::{Deserialize, Serialize};
+use tokio_stream::StreamExt;
 
 use crate::{
     auth::access_control::AccessControlled,
     db::Mongo,
+    models::device,
     response::{ServerError, ServerResult},
     util::pagination::RequestPagination,
 };
@@ -46,99 +50,74 @@ impl AccessControlled for DeployRevisionDoc {
     }
 }
 
-#[derive(Deserialize, Serialize, Default)]
-pub struct UpdateDeployRevisionBody {
-    #[serde(default)]
-    pub revision: Option<String>,
-    // yaml of the new run spec
-    #[serde(default)]
-    pub add_run_spec: Option<String>,
-    // yaml of the updated run spec
-    #[serde(default)]
-    pub update_run_spec: Option<String>,
-    // id of the run spec to remove
-    #[serde(default)]
-    pub remove_run_spec_id: Option<String>,
-    #[serde(default)]
-    pub active: Option<bool>,
-}
-
-impl UpdateDeployRevisionBody {
-    pub fn to_update_doc(&self) -> ServerResult<(Document, Option<Document>)> {
-        let mut which = 0;
-        if self.revision.is_some() {
-            which += 1;
-        }
-        if self.add_run_spec.is_some() {
-            which += 1;
-        }
-        if self.update_run_spec.is_some() {
-            which += 1;
-        }
-        if self.remove_run_spec_id.is_some() {
-            which += 1;
-        }
-        if self.active.is_some() {
-            which += 1;
-        }
-
-        if which == 0 {
-            return Err(ServerError::bad_request("Missing fields"));
-        }
-        if which > 1 {
-            return Err(ServerError::bad_request(
-                "only one field may be set per update",
-            ));
-        }
-
-        // 1) replace whole revision
-        if let Some(yaml) = &self.revision {
-            let rev: DeploymentRevision = serde_yaml::from_str(yaml).map_err(|e| {
-                ServerError::bad_request(&format!("invalid YAML in `revision`: {}", e))
-            })?;
-            return Ok((
-                doc! { "$set": { "revision": to_bson(&rev).map_err(|e| ServerError::bad_request(&format!("revision -> bson failed: {}", e)))? } },
-                None,
-            ));
-        }
-
-        // 2) add one RunSpec
-        if let Some(yaml) = &self.add_run_spec {
-            let rs: RunSpec = serde_yaml::from_str(yaml).map_err(|e| {
-                ServerError::bad_request(&format!("invalid YAML in `add_run_spec`: {}", e))
-            })?;
-            return Ok((
-                doc! { "$push": { "revision.units": to_bson(&rs).map_err(|e| ServerError::bad_request(&format!("RunSpec -> bson failed: {}", e)))? } },
-                None,
-            ));
-        }
-
-        // 3) update/replace one RunSpec by id (positional `$`)
-        if let Some(yaml) = &self.update_run_spec {
-            let rs: RunSpec = serde_yaml::from_str(yaml).map_err(|e| {
-                ServerError::bad_request(&format!("invalid YAML in `update_run_spec`: {}", e))
-            })?;
-            let id = rs.id.as_deref().ok_or_else(|| {
-                ServerError::bad_request("`update_run_spec` RunSpec missing `id`")
-            })?;
-            return Ok((
-                doc! { "$set": { "revision.units.$": to_bson(&rs).map_err(|e| ServerError::bad_request(&format!("RunSpec -> bson failed: {}", e)))? } },
-                Some(doc! { "revision.units.id": id }),
-            ));
-        }
-
-        // 4) remove one RunSpec by id
-        if let Some(id) = &self.remove_run_spec_id {
-            return Ok((doc! { "$pull": { "revision.units": { "id": id } } }, None));
-        }
-
-        // 5) set active
-        if let Some(active) = self.active {
-            return Ok((doc! { "$set": { "active": active } }, None));
-        }
-
-        Err(ServerError::internal_error("This should be unreachable"))
+pub fn to_update_doc(
+    body: &UpdateDeployRevisionBody,
+) -> ServerResult<(Document, Option<Document>)> {
+    let mut which = 0;
+    if body.revision.is_some() {
+        which += 1;
     }
+    if body.add_run_spec.is_some() {
+        which += 1;
+    }
+    if body.update_run_spec.is_some() {
+        which += 1;
+    }
+    if body.remove_run_spec_id.is_some() {
+        which += 1;
+    }
+    if body.active.is_some() {
+        which += 1;
+    }
+
+    if which == 0 {
+        return Err(ServerError::bad_request("Missing fields"));
+    }
+    if which > 1 {
+        return Err(ServerError::bad_request(
+            "only one field may be set per update",
+        ));
+    }
+
+    if let Some(yaml) = &body.revision {
+        // DeploymentRevision::from_yaml ensures id is set on the server side
+        let rev: DeploymentRevision = DeploymentRevision::from_yaml(yaml)
+            .map_err(|e| ServerError::bad_request(&format!("invalid YAML in `revision`: {}", e)))?;
+        return Ok((
+            doc! { "$set": { "revision": to_bson(&rev).map_err(|e| ServerError::bad_request(&format!("revision -> bson failed: {}", e)))? } },
+            None,
+        ));
+    }
+
+    if let Some(yaml) = &body.add_run_spec {
+        let rs: RunSpec = serde_yaml::from_str(yaml).map_err(|e| {
+            ServerError::bad_request(&format!("invalid YAML in `add_run_spec`: {}", e))
+        })?;
+        return Ok((
+            doc! { "$push": { "revision.jobs": to_bson(&rs).map_err(|e| ServerError::bad_request(&format!("RunSpec -> bson failed: {}", e)))? } },
+            None,
+        ));
+    }
+
+    if let Some(yaml) = &body.update_run_spec {
+        let rs: RunSpec = serde_yaml::from_str(yaml).map_err(|e| {
+            ServerError::bad_request(&format!("invalid YAML in `update_run_spec`: {}", e))
+        })?;
+        return Ok((
+            doc! { "$set": { "revision.jobs.$": to_bson(&rs).map_err(|e| ServerError::bad_request(&format!("RunSpec -> bson failed: {}", e)))? } },
+            Some(doc! { "revision.jobs.id": &rs.id }),
+        ));
+    }
+
+    if let Some(id) = &body.remove_run_spec_id {
+        return Ok((doc! { "$pull": { "revision.jobs": { "id": id } } }, None));
+    }
+
+    if let Some(active) = body.active {
+        return Ok((doc! { "$set": { "active": active } }, None));
+    }
+
+    Err(ServerError::internal_error("This should be unreachable"))
 }
 
 impl DeployRevisionDoc {
@@ -191,15 +170,15 @@ impl DeployRevisionDoc {
     pub async fn get_active_device_deployment(
         db: &Arc<Mongo>,
         device_id: ObjectId,
-    ) -> ServerResult<Self> {
+    ) -> ServerResult<Option<Self>> {
         let doc_opt = db
             .deploy_revisions()
             .find_one(doc! { "device_id": device_id, "active": true })
             .await?;
 
         match doc_opt {
-            Some(d) => Ok(d),
-            None => Err(ServerError::bad_request("Failed to find active deployment")),
+            Some(d) => Ok(Some(d)),
+            None => Ok(None),
         }
     }
 
@@ -236,11 +215,6 @@ impl DeployRevisionDoc {
             .await?;
         doc.ok_or(ServerError::not_found("Deploy revision not found"))
     }
-}
-
-fn parse_yaml_revision(yaml: &str) -> ServerResult<DeploymentRevision> {
-    serde_yaml::from_str(yaml)
-        .map_err(|e| ServerError::bad_request(&format!("Failed to parse YAML: {}", e)))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,46 +293,121 @@ impl DeployReportDoc {
         Ok(doc! { "$and": [base, f] })
     }
 
+    pub async fn get_device_observations_since(
+        db: &Arc<Mongo>,
+        revision_id: &str,
+        device_id: &ObjectId,
+        since: u32,
+    ) -> ServerResult<Vec<ObserveStatus>> {
+        let filter = doc! {
+            "device_id": device_id,
+            "revision_id": revision_id,
+            // "kind.type": "RunState",
+            // greater than since its both u64. convert to long
+            // "kind.data.report_time": doc! {"$gt": since}
+        };
+
+        let mut cursor = db.deploy_reports().find(filter).await?;
+        let mut observations: BTreeMap<String, ObserveStatus> = BTreeMap::new();
+        let mut latest_alive: BTreeMap<String, u32> = BTreeMap::new();
+        let mut latest_healthy: BTreeMap<String, u32> = BTreeMap::new();
+        //
+        while let Some(res) = cursor.next().await {
+            if let Ok(doc) = res {
+                // get kind for each RunState. for each run id create a new Observe status.
+                // Use the latest time to set the current health and alive value and count total unhealthy and livelyness false
+                //
+                if let DeployReportKind::RunState(state) = doc.kind {
+                    let run_id = state.run_id;
+                    let report_time = state.report_time;
+
+                    if !observations.contains_key(&run_id) {
+                        observations.insert(
+                            run_id.clone(),
+                            ObserveStatus {
+                                name: run_id.clone(),
+                                alive: false,
+                                healthy: false,
+                                crashes: 0,
+                                unhealthy_checks: 0,
+                            },
+                        );
+                    }
+
+                    let status = observations.get_mut(&run_id).unwrap();
+                    match state.healthy {
+                        Some(val) => {
+                            if !val {
+                                status.unhealthy_checks += 1;
+                            }
+                            // check if latest health by report time in latest_healthy
+                            if let Some(latest_health) = latest_healthy.get(&run_id) {
+                                if latest_health > &report_time {
+                                    status.healthy = val;
+                                    // update latest_healthy
+                                    latest_healthy.insert(run_id.clone(), report_time);
+                                }
+                            } else {
+                                // update latest_healthy
+                                latest_healthy.insert(run_id.clone(), report_time);
+                                status.healthy = val;
+                            }
+                        }
+                        None => {}
+                    }
+                    // same for alive
+                    if let Some(alive) = state.alive {
+                        if !alive {
+                            status.crashes += 1;
+                        }
+                        // check if latest health by report time in latest_healthy
+                        if let Some(latest_l) = latest_alive.get(&run_id) {
+                            if latest_l > &report_time {
+                                status.alive = alive;
+                                // update latest_alive
+                                latest_alive.insert(run_id.clone(), report_time);
+                            }
+                        } else {
+                            // update latest_healthy
+                            latest_alive.insert(run_id.clone(), report_time);
+                            status.alive = alive;
+                        }
+                    }
+                }
+            } else if let Err(e) = res {
+                tracing::error!("Failed to create or update deploy report: {:?}", e);
+            }
+        }
+
+        let obs_list: Vec<ObserveStatus> = observations.into_values().collect();
+        Ok(obs_list)
+    }
+
     pub async fn create_or_update(
         db: &Arc<Mongo>,
         body: CreateDeployReportBody,
     ) -> ServerResult<Self> {
-        let filter = Self::upsert_filter(&body)?;
+        // let filter = Self::upsert_filter(&body)?;
 
         let now = BsonDateTime::now();
-        let kind_bson = to_bson(&body.kind)
-            .map_err(|_| ServerError::internal_error("Failed to serialize deploy report kind"))?;
+        // let kind_bson = to_bson(&body.kind)
+        //     .map_err(|_| ServerError::internal_error("Failed to serialize deploy report kind"))?;
 
         // Overwrite the report doc (except _id) on every update.
         // created_at becomes "received_at" semantics (latest receive time).
-        let update = doc! {
-            "$set": {
-                "device_id": &body.device_id,
-                "revision_id": &body.revision_id,
-                "kind": kind_bson,
-                "expires_at": body.expires_at,
-                "created_at": now,
-            },
-            // Ensures the fields exist on insert even if you later change $set semantics.
-            "$setOnInsert": {
-                "device_id": &body.device_id,
-                "revision_id": &body.revision_id,
-            }
+        //
+        let mut doc = Self {
+            id: None,
+            device_id: body.device_id,
+            revision_id: body.revision_id,
+            kind: body.kind,
+            expires_at: body.expires_at,
+            created_at: now,
         };
-
-        let opts = FindOneAndUpdateOptions::builder()
-            .upsert(true)
-            .return_document(ReturnDocument::After)
-            .build();
-
-        let doc = db
-            .deploy_reports()
-            .find_one_and_update(filter, update)
-            .with_options(opts)
-            .await
-            .map_err(|_| ServerError::internal_error("Failed to upsert deploy report"))?
-            .ok_or_else(|| ServerError::internal_error("Upsert returned no document"))?;
-
+        let res = db.deploy_reports().insert_one(&doc).await.map_err(|e| {
+            ServerError::internal_error(&format!("Failed to create deploy report: {:?}", e))
+        })?;
+        doc.id = res.inserted_id.as_object_id();
         Ok(doc)
     }
 

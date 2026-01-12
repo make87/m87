@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use anyhow::{Result, anyhow};
-use m87_shared::device::PublicDevice;
+use m87_shared::device::{DeviceStatus, PublicDevice};
 use tracing::warn;
 
 use crate::util::device_cache;
@@ -105,6 +105,7 @@ pub struct ResolvedDevice {
     pub short_id: String,
     pub host: String,
     pub url: String,
+    pub id: String,
 }
 
 pub fn select_from_cache(
@@ -135,5 +136,18 @@ pub fn to_resolved(d: &device_cache::CachedDevice) -> ResolvedDevice {
             .trim_start_matches("https://")
             .trim_start_matches("http://")
             .to_string(),
+        id: d.id.clone(),
     }
+}
+
+pub async fn get_device_status(name: &str, since: Option<u32>) -> Result<DeviceStatus> {
+    let resolved = resolve_device_short_id_cached(name).await?;
+
+    let token = AuthManager::get_cli_token().await?;
+    let config = Config::load()?;
+    let trust = config.trust_invalid_server_cert;
+    let status =
+        server::get_device_status(&resolved.url, &token, &resolved.id, trust, since).await?;
+
+    Ok(status)
 }

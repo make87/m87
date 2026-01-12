@@ -9,7 +9,7 @@ use std::process::Command;
 use std::{path::Path, sync::Arc};
 
 use crate::{auth::register_device, util::tls::set_tls_provider};
-use crate::{config::Config, device::unit_manager::UnitManager};
+use crate::{config::Config, device::deployment_manager::UnitManager};
 
 use crate::device::control_tunnel;
 use crate::util::shutdown::SHUTDOWN;

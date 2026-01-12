@@ -2,7 +2,6 @@ use anyhow::{Context, Result, anyhow};
 use m87_shared::deploy_spec::CommandSpec;
 use std::env;
 use std::fs;
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::{collections::BTreeMap, fmt};
@@ -69,7 +68,7 @@ pub fn build_command(cmd: &CommandSpec) -> Result<Command> {
 
 #[derive(Debug)]
 pub struct CommandFailed {
-    pub unit_id: String,
+    pub run_id: String,
     pub exit_code: Option<i32>, // None => killed by signal on unix or unknown
     pub timed_out: bool,
     pub stdout_tail: String,
@@ -85,9 +84,9 @@ impl fmt::Display for CommandFailed {
             .map(|c| c.to_string())
             .unwrap_or_else(|| "unknown".into());
         if self.timed_out {
-            write!(f, "unit {}/command timed out (exit={})", self.unit_id, code)?;
+            write!(f, "unit {}/command timed out (exit={})", self.run_id, code)?;
         } else {
-            write!(f, "unit {}/command failed (exit={})", self.unit_id, code)?;
+            write!(f, "unit {}/command failed (exit={})", self.run_id, code)?;
         }
 
         // Keep this short-ish; the full tails are still accessible via Debug.
@@ -157,7 +156,7 @@ async fn read_to_tail<R: AsyncRead + Unpin>(
 }
 
 pub async fn run_command(
-    unit_id: &str,
+    run_id: &str,
     wd: &Path,
     env: &BTreeMap<String, String>,
     cmd: &CommandSpec,
@@ -175,7 +174,7 @@ pub async fn run_command(
 
     let mut child: Child = c
         .spawn()
-        .with_context(|| format!("spawn failed for unit {unit_id}"))
+        .with_context(|| format!("spawn failed for unit {run_id}"))
         .map_err(RunCommandError::Other)?;
 
     let stdout = child
@@ -197,7 +196,7 @@ pub async fn run_command(
         child
             .wait()
             .await
-            .with_context(|| format!("wait failed for unit {unit_id}"))
+            .with_context(|| format!("wait failed for unit {run_id}"))
     };
 
     // On timeout we kill + reap and treat as failure with exit_code = None.
@@ -284,7 +283,7 @@ pub async fn run_command(
     };
 
     Err(RunCommandError::Failed(CommandFailed {
-        unit_id: unit_id.to_string(),
+        run_id: run_id.to_string(),
         exit_code,
         timed_out,
         stdout_tail: stdout_tail_s,

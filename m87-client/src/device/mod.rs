@@ -3,11 +3,11 @@
 pub mod agent;
 
 #[cfg(feature = "agent")]
+pub mod deployment_manager;
+#[cfg(feature = "agent")]
 pub mod log_manager;
 #[cfg(feature = "agent")]
 pub mod system_metrics;
-#[cfg(feature = "agent")]
-pub mod unit_manager;
 
 pub mod docker;
 pub mod fs;
@@ -19,3 +19,5 @@ mod control_tunnel;
 #[cfg(unix)] // won't compile on Windows because no PTY
 pub mod serial;
 pub mod ssh;
+
+pub mod deploy;

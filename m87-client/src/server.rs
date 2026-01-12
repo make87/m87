@@ -1,5 +1,8 @@
 use anyhow::{Result, anyhow};
-use m87_shared::device::UpdateDeviceBody;
+use m87_shared::deploy_spec::{
+    CreateDeployRevisionBody, DeploymentRevision, UpdateDeployRevisionBody,
+};
+use m87_shared::device::{DeviceStatus, UpdateDeviceBody};
 use reqwest::Client;
 
 use tracing::error;
@@ -55,10 +58,10 @@ pub async fn get_server_url_and_owner_reference(
     if owner_reference.is_none() {
         // we only need the user to interact if we are missing a assigned owner. If we know the owner server can be aut oassigned
         let browser_url = format!("{}/devices/login/{}", make87_app_url, id);
-        eprintln!("No server configured.");
-        eprintln!("Open this link in your browser to log in:");
-        eprintln!("{}", browser_url);
-        eprintln!("Waiting for authentication...");
+        tracing::error!("No server configured.");
+        tracing::error!("Open this link in your browser to log in:");
+        tracing::error!("{}", browser_url);
+        tracing::error!("Waiting for authentication...");
     }
 
     let get_url = format!("{}/v1/device/login/{}", make87_api_url, id);
@@ -90,7 +93,7 @@ pub async fn get_server_url_and_owner_reference(
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         wait_time += 2;
         if wait_time >= 120 {
-            eprintln!("Timeout waiting 120s for authentication");
+            tracing::error!("Timeout waiting 120s for authentication");
             return Err(anyhow::anyhow!("Timeout waiting for authentication"));
         }
     }
@@ -272,14 +275,190 @@ pub async fn update_device(
         client.post(&url).bearer_auth(token).json(&body).send()
     );
     if let Err(e) = res {
-        eprintln!("[Device] Error reporting device details: {}", e);
+        tracing::error!("Error reporting device details: {}", e);
         return Err(anyhow!(e));
     }
     match res.unwrap().error_for_status() {
         Ok(_) => Ok(()),
         Err(e) => {
-            eprintln!("[Device] Error reporting device details: {}", e);
+            tracing::error!("Error reporting device details: {}", e);
             Err(anyhow!(e))
         }
+    }
+}
+
+pub async fn get_device_status(
+    api_url: &str,
+    token: &str,
+    device_id: &str,
+    trust_invalid_server_cert: bool,
+    since: Option<u32>,
+) -> Result<DeviceStatus> {
+    let client = get_client(trust_invalid_server_cert)?;
+
+    let url = format!("{}/device/{}/status", api_url, device_id);
+
+    let res = retry_async!(
+        3,
+        3,
+        client
+            .get(&url)
+            .bearer_auth(token)
+            // .query(&[("since", since)])
+            .send()
+    );
+    if let Err(e) = res {
+        tracing::error!("Error getting device status: {}", e);
+        return Err(anyhow!(e));
+    }
+    match res.unwrap().error_for_status() {
+        Ok(r) => {
+            let status = r.json().await?;
+            Ok(status)
+        }
+        Err(e) => {
+            tracing::error!("Error getting device status: {}", e);
+            Err(anyhow!(e))
+        }
+    }
+}
+
+// ------------------------- Deployment -------------------------
+
+pub async fn get_deployments(
+    api_url: &str,
+    token: &str,
+    trust_invalid_server_cert: bool,
+    device_id: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+) -> Result<Vec<DeploymentRevision>> {
+    let mut url = format!("{}/device/{}/revisions", api_url, device_id);
+
+    if offset.is_some() || limit.is_some() {
+        let mut params = vec![];
+        if let Some(o) = offset {
+            params.push(format!("offset={}", o));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={}", l));
+        }
+        url = format!("{}?{}", url, params.join("&"));
+    }
+
+    let client = get_client(trust_invalid_server_cert)?;
+
+    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+
+    match res.error_for_status() {
+        Ok(r) => {
+            let deployments: Vec<DeploymentRevision> = r.json().await?;
+            Ok(deployments)
+        }
+        Err(e) => Err(anyhow!(e)),
+    }
+}
+
+pub async fn get_deployment(
+    api_url: &str,
+    token: &str,
+    trust_invalid_server_cert: bool,
+    device_id: &str,
+    revision_id: &str,
+) -> Result<DeploymentRevision> {
+    let url = format!("{}/device/{}/revisions/{}", api_url, device_id, revision_id);
+    let client = get_client(trust_invalid_server_cert)?;
+
+    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+
+    match res.error_for_status() {
+        Ok(r) => {
+            let revision: DeploymentRevision = r.json().await?;
+            Ok(revision)
+        }
+        Err(e) => Err(anyhow!(e)),
+    }
+}
+
+pub async fn create_deployment(
+    api_url: &str,
+    token: &str,
+    trust_invalid_server_cert: bool,
+    device_id: &str,
+    body: CreateDeployRevisionBody,
+) -> Result<DeploymentRevision> {
+    let url = format!("{}/device/{}/revisions", api_url, device_id);
+    let client = get_client(trust_invalid_server_cert)?;
+
+    let res = retry_async!(
+        3,
+        3,
+        client.post(&url).bearer_auth(token).json(&body).send()
+    )?;
+
+    match res.error_for_status() {
+        Ok(r) => {
+            let revision: DeploymentRevision = r.json().await?;
+            Ok(revision)
+        }
+        Err(e) => Err(anyhow!(e)),
+    }
+}
+
+pub async fn update_deployment(
+    api_url: &str,
+    token: &str,
+    trust_invalid_server_cert: bool,
+    device_id: &str,
+    revision_id: &str,
+    body: UpdateDeployRevisionBody,
+) -> Result<()> {
+    let url = format!("{}/device/{}/revisions/{}", api_url, device_id, revision_id);
+    let client = get_client(trust_invalid_server_cert)?;
+
+    let res = retry_async!(
+        3,
+        3,
+        client.post(&url).bearer_auth(token).json(&body).send()
+    )?;
+
+    match res.error_for_status() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(anyhow!(e)),
+    }
+}
+
+pub async fn delete_deployment(
+    api_url: &str,
+    token: &str,
+    trust_invalid_server_cert: bool,
+    device_id: &str,
+    revision_id: &str,
+) -> Result<()> {
+    let url = format!("{}/device/{}/revisions/{}", api_url, device_id, revision_id);
+    let client = get_client(trust_invalid_server_cert)?;
+
+    let res = retry_async!(3, 3, client.delete(&url).bearer_auth(token).send())?;
+
+    match res.error_for_status() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(anyhow!(e)),
+    }
+}
+
+pub async fn get_active_deployment_id(
+    api_url: &str,
+    token: &str,
+    trust_invalid_server_cert: bool,
+    device_id: &str,
+) -> Result<Option<String>> {
+    let url = format!("{}/device/{}/revisions/active", api_url, device_id);
+    let client = get_client(trust_invalid_server_cert)?;
+
+    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+
+    match res.error_for_status() {
+        Ok(r) => Ok(r.json().await?),
+        Err(e) => Err(anyhow!(e)),
     }
 }

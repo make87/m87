@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::{
     models::{
         api_key::ApiKeyDoc,
+        audit_logs::AuditLogDoc,
         deploy_spec::{DeployReportDoc, DeployRevisionDoc},
         device::DeviceDoc,
         device_auth_request::DeviceAuthRequestDoc,
@@ -61,6 +62,10 @@ impl Mongo {
 
     pub fn deploy_reports(&self) -> Collection<DeployReportDoc> {
         self.col("deploy_reports")
+    }
+
+    pub fn audit_logs(&self) -> Collection<AuditLogDoc> {
+        self.col("audit_logs")
     }
 
     pub async fn ensure_indexes(&self) -> ServerResult<()> {
@@ -194,6 +199,25 @@ impl Mongo {
                     .keys(doc! { "device_id": 1, "revision_id": 1 })
                     .build(),
             )
+            .await?;
+
+        self.audit_logs()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "expires_at": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .name(Some("ttl_audit_logs_expires_at".to_string()))
+                            .expire_after(Some(Duration::from_secs(0)))
+                            .partial_filter_expression(doc! { "expires_at": { "$exists": true } })
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+
+        self.audit_logs()
+            .create_index(IndexModel::builder().keys(doc! { "device_id": 1 }).build())
             .await?;
 
         Ok(())

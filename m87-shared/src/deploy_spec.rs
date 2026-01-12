@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime};
+use std::fmt::Display;
+use std::time::Duration;
 
 fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(bytes.as_ref()))
@@ -17,67 +18,75 @@ pub struct DeploymentRevision {
     // sha2 hash of the deployment revision
     #[serde(default)]
     pub id: Option<String>,
-    pub units: Vec<RunSpec>,
+    pub jobs: Vec<RunSpec>,
     #[serde(default)]
     pub rollback: Option<RollbackPolicy>,
 }
 
 impl DeploymentRevision {
     pub fn new(units: Vec<RunSpec>, rollback: Option<RollbackPolicy>) -> Self {
-        let mut rev = Self {
-            id: None,
-            units,
+        let rev = Self {
+            id: Some(uuid::Uuid::new_v4().to_string()),
+            jobs: units,
             rollback,
         };
-        rev.ensure_ids();
         rev
     }
 
-    pub fn get_id(&self) -> String {
-        match &self.id {
-            Some(id) => id.clone(),
-            None => {
-                let mut spec = self.clone();
-                spec.ensure_ids();
-                spec.id.unwrap()
-            }
+    pub fn empty() -> Self {
+        Self {
+            id: Some(uuid::Uuid::new_v4().to_string()),
+            jobs: Vec::new(),
+            rollback: None,
         }
     }
 
-    pub fn get_unit_map(&self) -> BTreeMap<String, RunSpec> {
-        self.units.iter().map(|u| (u.get_id(), u.clone())).collect()
+    pub fn clone_with_new_id(&self) -> Self {
+        let mut clone = self.clone();
+        clone.id = Some(uuid::Uuid::new_v4().to_string());
+        clone
     }
 
-    pub fn get_run(&self, run_id: &str) -> Option<RunSpec> {
-        let res = self.units.iter().find(|u| u.get_id() == run_id);
+    pub fn get_hash(&self) -> String {
+        let mut hasher = Sha256::new();
+        for u in &self.jobs {
+            hasher.update(u.get_hash().as_bytes());
+        }
+        if let Some(r) = &self.rollback {
+            let data = serde_json::to_vec(&(
+                &r.on_health_failure,
+                &r.on_liveness_failure,
+                r.stabilization_period_secs,
+            ))
+            .expect("This should be serializable");
+            hasher.update(data);
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    pub fn get_job_map(&self) -> BTreeMap<String, RunSpec> {
+        self.jobs
+            .iter()
+            .filter(|u| u.enabled)
+            .map(|u| (u.get_hash(), u.clone()))
+            .collect()
+    }
+
+    pub fn get_job(&self, run_id: &str) -> Option<RunSpec> {
+        let res = self.jobs.iter().find(|u| u.get_hash() == run_id);
         res.cloned()
-    }
-
-    pub fn ensure_ids(&mut self) {
-        // 1) ensure children ids exist
-        for u in &mut self.units {
-            u.ensure_id();
-        }
-        if let Some(r) = &mut self.rollback {
-            r.ensure_id();
-        }
-
-        // 2) compute revision id only from child ids
-        if self.id.is_none() {
-            let mut hasher = Sha256::new();
-            for u in &self.units {
-                hasher.update(u.id.as_deref().expect("ensure_id set").as_bytes());
-            }
-            if let Some(r) = &self.rollback {
-                hasher.update(r.id.as_deref().expect("ensure_id set").as_bytes());
-            }
-            self.id = Some(format!("{:x}", hasher.finalize()));
-        }
     }
 
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
         let mut rev: Self = serde_yaml::from_str(yaml)?;
-        rev.ensure_ids();
+        // if id is none create uuid with hash as seed
+        if rev.id.is_none() {
+            let seed = rev.get_hash().parse::<u128>().unwrap();
+            let id = uuid::Uuid::from_u128(
+                seed & 0xFFFFFFFFFFFF4FFFBFFFFFFFFFFFFFFF | 0x40008000000000000000,
+            );
+            rev.id = Some(id.to_string());
+        }
         Ok(rev)
     }
 
@@ -86,11 +95,33 @@ impl DeploymentRevision {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateDeployRevisionBody {
+    /// YAML string for DeploymentRevision.
+    pub revision: String,
+    #[serde(default)]
+    pub active: Option<bool>,
+}
+
+#[derive(Deserialize, Serialize, Default)]
+pub struct UpdateDeployRevisionBody {
+    #[serde(default)]
+    pub revision: Option<String>,
+    // yaml of the new run spec
+    #[serde(default)]
+    pub add_run_spec: Option<String>,
+    // yaml of the updated run spec
+    #[serde(default)]
+    pub update_run_spec: Option<String>,
+    // id of the run spec to remove
+    #[serde(default)]
+    pub remove_run_spec_id: Option<String>,
+    #[serde(default)]
+    pub active: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RollbackPolicy {
-    // sha2 hash of the rollback policy
-    #[serde(default)]
-    pub id: Option<String>,
     /// Automatically rollback if health checks fail
     #[serde(default)]
     pub on_health_failure: RollbackTrigger,
@@ -108,26 +139,10 @@ impl RollbackPolicy {
         on_liveness_failure: RollbackTrigger,
         stabilization_period_secs: u64,
     ) -> Self {
-        let mut p = Self {
-            id: None,
+        Self {
             on_health_failure,
             on_liveness_failure,
             stabilization_period_secs,
-        };
-        p.ensure_id();
-        p
-    }
-
-    pub fn ensure_id(&mut self) {
-        if self.id.is_none() {
-            // hash policy content (excluding id)
-            let data = serde_json::to_vec(&(
-                &self.on_health_failure,
-                &self.on_liveness_failure,
-                self.stabilization_period_secs,
-            ))
-            .expect("serialize");
-            self.id = Some(format!("{:x}", Sha256::digest(data)));
         }
     }
 }
@@ -152,8 +167,7 @@ pub enum RollbackTrigger {
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct RunSpec {
-    #[serde(default)]
-    pub id: Option<String>,
+    pub id: String,
     #[serde(rename = "type")]
     pub run_type: RunType,
     pub enabled: bool,
@@ -165,8 +179,6 @@ pub struct RunSpec {
     pub files: BTreeMap<String, String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub run_once: Option<RunOnce>,
 
     #[serde(default)]
     pub steps: Vec<Step>,
@@ -183,88 +195,48 @@ pub struct RunSpec {
 
 impl RunSpec {
     pub fn new(
+        id: String,
         run_type: RunType,
         enabled: bool,
         workdir: Option<Workdir>,
         files: BTreeMap<String, String>,
         env: BTreeMap<String, String>,
-        run_once: Option<RunOnce>,
         steps: Vec<Step>,
         on_failure: Option<OnFailure>,
         stop: Option<StopSpec>,
         reboot: RebootMode,
         observe: Option<ObserveSpec>,
     ) -> Self {
-        let mut s = Self {
-            id: None,
+        Self {
+            id,
             run_type,
             enabled,
             workdir,
             files,
             env,
-            run_once,
             steps,
             on_failure,
             stop,
             reboot,
             observe,
-        };
-        s.ensure_id();
-        s
-    }
-
-    pub fn get_id(&self) -> String {
-        match &self.id {
-            Some(id) => id.clone(),
-            None => {
-                let mut spec = self.clone();
-                spec.ensure_id();
-                spec.id.unwrap()
-            }
         }
     }
 
-    pub fn ensure_id(&mut self) {
-        if self.id.is_none() {
-            // You can decide what constitutes identity.
-            // This hashes everything except id itself.
-            #[derive(Serialize)]
-            struct RunSpecHashView<'a> {
-                run_type: &'a RunType,
-                enabled: bool,
-                workdir: &'a Option<Workdir>,
-                files: &'a BTreeMap<String, String>,
-                env: &'a BTreeMap<String, String>,
-                run_once: &'a Option<RunOnce>,
-                steps: &'a [Step],
-                on_failure: &'a Option<OnFailure>,
-                stop: &'a Option<StopSpec>,
-                reboot: &'a RebootMode,
-                observe: &'a Option<ObserveSpec>,
-            }
-
-            let view = RunSpecHashView {
-                run_type: &self.run_type,
-                enabled: self.enabled,
-                workdir: &self.workdir,
-                files: &self.files,
-                env: &self.env,
-                run_once: &self.run_once,
-                steps: &self.steps,
-                on_failure: &self.on_failure,
-                stop: &self.stop,
-                reboot: &self.reboot,
-                observe: &self.observe,
-            };
-
-            self.id = Some(hash_json(&view));
-        }
+    pub fn get_hash(&self) -> String {
+        hash_json(&self)
     }
 
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
-        let mut rev: Self = serde_yaml::from_str(yaml)?;
-        rev.ensure_id();
+        let rev: Self = serde_yaml::from_str(yaml)?;
         Ok(rev)
+    }
+
+    pub fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
+        serde_yaml::to_string(self)
+    }
+
+    pub fn enable(&mut self, enabled: bool) {
+        self.enabled = enabled;
     }
 }
 
@@ -339,21 +311,18 @@ pub enum CommandSpec {
     Argv(Vec<String>),
 }
 
+impl Display for CommandSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommandSpec::Sh(cmd) => write!(f, "sh -lc {}", cmd),
+            CommandSpec::Argv(args) => write!(f, "{}", args.join(" ")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StopSpec {
     pub steps: Vec<Step>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunOnce {
-    pub key: RunOnceKey,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RunOnceKey {
-    Auto(bool), // hash-based
-    Explicit(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -470,6 +439,10 @@ pub struct StepReport {
     /// Whether the step ultimately succeeded.
     pub success: bool,
 
+    #[serde(default)]
+    /// Whether the step is an undo step.
+    pub is_undo: bool,
+
     /// If it failed, short error text.
     #[serde(default)]
     pub error: Option<String>,
@@ -503,7 +476,7 @@ pub struct RunState {
     pub revision_id: String,
     pub healthy: Option<bool>,
     pub alive: Option<bool>,
-    pub report_time: u64,
+    pub report_time: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

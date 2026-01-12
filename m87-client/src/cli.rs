@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::Context;
 use anyhow::bail;
 use clap::{CommandFactory, Parser, Subcommand};
@@ -5,6 +7,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use crate::auth;
 use crate::config::Config;
 use crate::device;
+use crate::device::deploy::DeploymentUpdateArgs;
+use crate::device::deploy::SpecType;
 use crate::device::serial;
 use crate::device::tunnel;
 use crate::devices;
@@ -236,6 +240,85 @@ pub enum DeviceCommand {
         /// Optional baud rate (defaults to 115200)
         baud: Option<u32>,
     },
+
+    Status,
+
+    /// Add a run spec to a deployment (defaults to active deployment)
+    Deploy(DeployArgs),
+
+    /// Remove a run spec from a deployment (defaults to active deployment)
+    Undeploy(DeployArgs),
+
+    /// Manage deployments on the device
+    #[command(subcommand)]
+    Deployment(DeploymentCommand),
+}
+
+#[derive(Parser, Debug)]
+pub struct DeployArgs {
+    /// File to add (docker-compose.yml or run spec yaml)
+    pub file: PathBuf,
+
+    /// Spec type (auto detects by default)
+    #[arg(long, value_enum, default_value_t = SpecType::Auto)]
+    pub r#type: SpecType,
+
+    /// Optional display name for the run spec
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Add to a specific deployment (otherwise active deployment)
+    #[arg(long)]
+    pub deployment: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DeploymentCommand {
+    /// List deployments for this device
+    List,
+
+    /// Create a new deployment
+    New {
+        /// Make this deployment active immediately
+        #[arg(long)]
+        active: bool,
+    },
+
+    /// Show details for a deployment (includes run specs)
+    Show {
+        deployment_id: String,
+
+        /// Output YAML (optional)
+        #[arg(long)]
+        yaml: bool,
+    },
+
+    /// Remove a deployment
+    Rm {
+        deployment_id: String,
+
+        /// Do not prompt (if you later add prompts)
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Print the currently active deployment
+    Active,
+
+    /// Set the active deployment
+    Activate { deployment_id: String },
+
+    /// Clone an existing deployment into a new one
+    Clone {
+        deployment_id: String,
+
+        /// Make the cloned deployment active immediately
+        #[arg(long)]
+        active: bool,
+    },
+
+    /// Update a deployment (remove/replace/move/rename specs; change name)
+    Update(DeploymentUpdateArgs),
 }
 
 #[cfg(feature = "agent")]
@@ -656,5 +739,140 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             serial::open_serial(&device, &path, baud).await?;
             Ok(())
         }
+
+        DeviceCommand::Status => {
+            let status = devices::get_device_status(&device, None).await?;
+            tui::devices::print_device_status(&device, &status);
+            Ok(())
+        }
+
+        DeviceCommand::Deploy(args) => {
+            let _ = device::deploy::deploy_file(
+                &device,
+                args.file,
+                args.r#type,
+                args.name,
+                args.deployment,
+            )
+            .await?;
+
+            tracing::info!("[done] Added job spec to deployment");
+            Ok(())
+        }
+
+        DeviceCommand::Undeploy(args) => {
+            let _ = device::deploy::undeploy_file(
+                &device,
+                args.file,
+                args.r#type,
+                args.name,
+                args.deployment,
+            )
+            .await?;
+
+            tracing::info!("[done] Added job spec to deployment");
+            Ok(())
+        }
+
+        DeviceCommand::Deployment(cmd) => match cmd {
+            DeploymentCommand::List => {
+                let deployments = device::deploy::get_deployments(&device).await?;
+
+                tracing::info!("[done] Loaded deployments");
+                tui::deploy::print_revision_list_short(&deployments);
+                Ok(())
+            }
+
+            DeploymentCommand::New { active } => {
+                let _active = active;
+
+                let deployment = device::deploy::create_deployment(&device, active).await?;
+
+                tracing::info!("[done] Created deployment");
+                tui::deploy::print_revision_verbose(&deployment);
+                Ok(())
+            }
+
+            DeploymentCommand::Show {
+                deployment_id,
+                yaml,
+            } => {
+                let deployment = device::deploy::get_deployment(&device, deployment_id).await?;
+                tracing::info!("[done] Loaded deployment");
+                match yaml {
+                    true => tui::deploy::print_revision_verbose(&deployment),
+                    false => {
+                        tui::deploy::print_revision_short_detail(&deployment);
+                    }
+                }
+                Ok(())
+            }
+
+            DeploymentCommand::Rm {
+                deployment_id,
+                force,
+            } => {
+                if !force {
+                    println!(
+                        "Are you sure you want to remove deployment {}?",
+                        deployment_id
+                    );
+                    println!("This action cannot be undone.");
+                    println!("Type 'y' to confirm:");
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input).unwrap();
+                    if input.trim() != "y" {
+                        println!("Aborted.");
+                        return Ok(());
+                    }
+                }
+                let _ = device::deploy::remove_deployment(&device, deployment_id).await?;
+                tracing::info!("[done] Successfully removed deployment");
+                Ok(())
+            }
+
+            DeploymentCommand::Active => {
+                let deployment_id = device::deploy::get_active_deployment(&device).await?;
+                match deployment_id {
+                    Some(id) => tracing::info!("[done] Active deployment ID: {}", id),
+                    None => tracing::info!("[done] No active deployment"),
+                }
+                Ok(())
+            }
+
+            DeploymentCommand::Activate { deployment_id } => {
+                let _ = device::deploy::deployment_active_set(&device, deployment_id).await?;
+                tracing::info!("[done] Successfully activated deployment");
+
+                Ok(())
+            }
+
+            DeploymentCommand::Clone {
+                deployment_id,
+                active,
+            } => {
+                let deployment =
+                    device::deploy::clone_deployment(&device, deployment_id, active).await?;
+                tracing::info!(
+                    "[done] Successfully cloned deployment. New ID {}",
+                    deployment.id.clone().unwrap()
+                );
+                tui::deploy::print_revision_short(&deployment);
+                Ok(())
+            }
+
+            DeploymentCommand::Update(args) => {
+                // Validate intent: require at least one operation flag
+                //
+
+                let deployment = device::deploy::deployment_update(&device, args).await?;
+                tracing::info!(
+                    "[done] Successfully updated deployment. New ID {}",
+                    deployment.id.clone().unwrap()
+                );
+                tui::deploy::print_revision_short_detail(&deployment);
+                Ok(())
+            }
+        },
     }
 }

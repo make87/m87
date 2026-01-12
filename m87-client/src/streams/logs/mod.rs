@@ -3,7 +3,9 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 use crate::util::format;
-use crate::{device::unit_manager::UnitManager, streams::quic::QuicIo, util::logging::get_log_rx};
+use crate::{
+    device::deployment_manager::UnitManager, streams::quic::QuicIo, util::logging::get_log_rx,
+};
 
 pub async fn handle_logs_io(io: &mut QuicIo, unit_manager: Arc<UnitManager>) -> Result<()> {
     let _ = unit_manager.start_log_follow().await?;
@@ -21,8 +23,12 @@ pub async fn handle_logs_io(io: &mut QuicIo, unit_manager: Arc<UnitManager>) -> 
                 let Some(line) = line.as_line() else {
                     continue;
                 };
+                // only format if line does not start with [
+                let formatted_msg = match line.trim().starts_with("[observe]") {
+                    true => line.to_string().replace("[observe]", ""),
+                    false => format::format_log("m87", &line, true),
+                };
 
-                let formatted_msg = format::format_log("m87", &line, true);
                 if io.write_all(formatted_msg.as_bytes()).await.is_err() {
                     break;
                 }
@@ -32,7 +38,7 @@ pub async fn handle_logs_io(io: &mut QuicIo, unit_manager: Arc<UnitManager>) -> 
             }
         }
     }
-    let _ = unit_manager.stop_log_follow()?;
+    let _ = unit_manager.stop_log_follow().await?;
 
     Ok(())
 }

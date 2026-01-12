@@ -1,4 +1,4 @@
-use std::hash::Hash;
+use std::{collections::BTreeMap, hash::Hash};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -78,6 +78,34 @@ pub struct UpdateDeviceBody {
 }
 
 #[derive(Deserialize, Serialize, Default)]
+pub struct ObserveStatus {
+    pub name: String,
+    pub alive: bool,
+    pub healthy: bool,
+    pub crashes: u32,
+    pub unhealthy_checks: u32,
+}
+
+#[derive(Deserialize, Serialize, Default)]
+pub struct IncidentInfo {
+    pub id: String,
+    pub start_time: String,
+    pub end_time: String,
+}
+
+#[derive(Deserialize, Serialize, Default)]
 pub struct DeviceStatus {
-    pub run_states: Vec<RunState>,
+    // current livelyness status
+    pub observations: Vec<ObserveStatus>,
+
+    // incidents
+    pub incidents: Vec<IncidentInfo>,
+}
+
+#[derive(Deserialize, Serialize, Default)]
+pub struct AuditLog {
+    pub user_name: String,
+    pub timestamp: String,
+    pub action: String,
+    pub details: String,
 }
