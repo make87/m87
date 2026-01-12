@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::devices;
 use crate::streams::quic::connect_quic_only;
 use crate::streams::quic::open_quic_stream;
-use crate::streams::stream_type::{SocketTarget, TcpTarget, TunnelTarget, UdpTarget};
+use crate::streams::stream_type::{ForwardTarget, SocketTarget, TcpTarget, UdpTarget};
 use crate::util::shutdown::SHUTDOWN;
 use crate::util::udp::decode_socket_addr;
 use crate::util::udp::encode_socket_addr;
@@ -17,23 +17,23 @@ use tokio::net::UdpSocket;
 use tokio::net::UnixListener;
 use tracing::{debug, error, info, warn};
 
-pub async fn open_local_tunnel(device_name: &str, tunnel_specs: Vec<String>) -> Result<()> {
+pub async fn open_local_forward(device_name: &str, forward_specs: Vec<String>) -> Result<()> {
     let config = Config::load()?;
     let resolved = devices::resolve_device_short_id_cached(device_name).await?;
     let token = AuthManager::get_cli_token().await?;
     let trust = config.trust_invalid_server_cert;
 
-    let tunnels: Vec<TunnelTarget> = TunnelTarget::from_list(tunnel_specs)?;
+    let forwards: Vec<ForwardTarget> = ForwardTarget::from_list(forward_specs)?;
 
-    // spawn each tunnel as a background task
-    for t in tunnels {
+    // spawn each forward as a background task
+    for t in forwards {
         let token = token.clone();
         let resolved = resolved.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                tunnel_device_port(&resolved.host, &token, &resolved.short_id, t, trust).await
+                forward_device_port(&resolved.host, &token, &resolved.short_id, t, trust).await
             {
-                error!("Tunnel exited with error: {}", e);
+                error!("Forward exited with error: {}", e);
                 SHUTDOWN.cancel();
             }
         });
@@ -41,20 +41,20 @@ pub async fn open_local_tunnel(device_name: &str, tunnel_specs: Vec<String>) -> 
 
     // Wait for Ctrl-C shutdown
     SHUTDOWN.cancelled().await;
-    info!("SIGINT: shutting down all tunnels");
+    info!("SIGINT: shutting down all forwards");
     Ok(())
 }
 
-pub async fn tunnel_device_port(
+pub async fn forward_device_port(
     host_name: &str,
     token: &str,
     device_short_id: &str,
-    tunnel_target: TunnelTarget,
+    forward_target: ForwardTarget,
     trust_invalid_server_cert: bool,
 ) -> Result<()> {
-    match &tunnel_target {
-        TunnelTarget::Tcp(target) => {
-            tunnel_device_port_tcp(
+    match &forward_target {
+        ForwardTarget::Tcp(target) => {
+            forward_device_port_tcp(
                 host_name,
                 token,
                 device_short_id,
@@ -63,8 +63,8 @@ pub async fn tunnel_device_port(
             )
             .await
         }
-        TunnelTarget::Udp(target) => {
-            tunnel_device_port_udp(
+        ForwardTarget::Udp(target) => {
+            forward_device_port_udp(
                 host_name,
                 token,
                 device_short_id,
@@ -73,8 +73,8 @@ pub async fn tunnel_device_port(
             )
             .await
         }
-        TunnelTarget::Socket(target) => {
-            tunnel_device_socket(
+        ForwardTarget::Socket(target) => {
+            forward_device_socket(
                 host_name,
                 token,
                 device_short_id,
@@ -83,26 +83,26 @@ pub async fn tunnel_device_port(
             )
             .await
         }
-        TunnelTarget::Vpn(_target) => {
+        ForwardTarget::Vpn(_target) => {
             info!("COMING SOON");
             Ok(())
         }
     }
 }
 
-async fn tunnel_device_port_tcp(
+async fn forward_device_port_tcp(
     host_name: &str,
     token: &str,
     device_short_id: &str,
-    tunnel_spec: &TcpTarget,
+    forward_spec: &TcpTarget,
     trust_invalid_server_cert: bool,
 ) -> Result<()> {
     debug!(
         "Binding TCP listener on 127.0.0.1:{}",
-        tunnel_spec.local_port
+        forward_spec.local_port
     );
-    let listener = TcpListener::bind(("127.0.0.1", tunnel_spec.local_port)).await?;
-    let remote_host = tunnel_spec.remote_host.clone();
+    let listener = TcpListener::bind(("127.0.0.1", forward_spec.local_port)).await?;
+    let remote_host = forward_spec.remote_host.clone();
 
     debug!("Connecting to QUIC server...");
     let (_endpoint, conn) =
@@ -111,14 +111,14 @@ async fn tunnel_device_port_tcp(
 
     info!(
         "[done] TCP forward: 127.0.0.1:{} → {}/{}:{}",
-        &tunnel_spec.local_port, device_short_id, remote_host, &tunnel_spec.remote_port
+        &forward_spec.local_port, device_short_id, remote_host, &forward_spec.remote_port
     );
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
                 let (mut local_stream, addr) = accept_result?;
                 info!("New local TCP connection from {addr}");
-                let stream_type = tunnel_spec.to_stream_type(token);
+                let stream_type = forward_spec.to_stream_type(token);
                 let mut quic_io = open_quic_stream(
                     &conn,
                     stream_type,
@@ -152,18 +152,18 @@ async fn tunnel_device_port_tcp(
     Ok(())
 }
 
-async fn tunnel_device_port_udp(
+async fn forward_device_port_udp(
     host_name: &str,
     token: &str,
     device_short_id: &str,
-    tunnel_spec: &UdpTarget,
+    forward_spec: &UdpTarget,
     trust_invalid_server_cert: bool,
 ) -> Result<()> {
     let (_endpoint, conn) =
         connect_quic_only(host_name, token, device_short_id, trust_invalid_server_cert).await?;
 
-    // Send StreamType::Tunnel over a QUIC stream
-    let stream_type = tunnel_spec.to_stream_type(token);
+    // Send StreamType::Forward over a QUIC stream
+    let stream_type = forward_spec.to_stream_type(token);
     let mut quic_io = open_quic_stream(&conn, stream_type).await?;
 
     // === Read channel_id assigned by the runtime ===
@@ -171,21 +171,21 @@ async fn tunnel_device_port_udp(
     quic_io.recv.read_exact(&mut id_buf).await?;
     let channel_id = u32::from_be_bytes(id_buf);
 
-    debug!("Opened UDP tunnel with channel ID {}", channel_id);
+    debug!("Opened UDP forward with channel ID {}", channel_id);
 
     // Close the control stream – we're done with it
     quic_io.send.finish()?;
 
     info!(
         "[done] UDP forward: 127.0.0.1:{} → {} {}:{}",
-        &tunnel_spec.local_port,
+        &forward_spec.local_port,
         device_short_id,
-        &tunnel_spec.remote_host,
-        &tunnel_spec.remote_port
+        &forward_spec.remote_host,
+        &forward_spec.remote_port
     );
 
     // Now switch to datagram forwarding
-    udp_local_datagram_forward(tunnel_spec.local_port, channel_id, conn.clone()).await
+    udp_local_datagram_forward(forward_spec.local_port, channel_id, conn.clone()).await
 }
 
 pub async fn udp_local_datagram_forward(
@@ -288,7 +288,7 @@ pub async fn udp_local_datagram_forward(
     Ok(())
 }
 
-async fn tunnel_device_socket(
+async fn forward_device_socket(
     host_name: &str,
     token: &str,
     device_short_id: &str,

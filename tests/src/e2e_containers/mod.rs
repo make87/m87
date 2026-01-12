@@ -13,7 +13,7 @@ mod ls;
 mod misc;
 mod monitoring;
 pub mod setup;
-mod tunnel;
+mod forward;
 
 // Re-export commonly used items
 pub use containers::E2EInfra;

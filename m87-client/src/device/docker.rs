@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::time::UNIX_EPOCH;
 use tokio::time::Duration;
 
-use crate::device::tunnel::open_local_tunnel;
+use crate::device::forward::open_local_forward;
 use crate::util::subprocess::SubprocessBuilder;
 
 /// docker -H <socket> … → forwarded via QUIC
@@ -13,7 +13,7 @@ pub async fn run_docker_command(device: &str, args: Vec<String>) -> Result<()> {
 
     let endpoint = generate_local_socket_path(device);
 
-    spawn_socket_tunnel(device, &endpoint).await?;
+    spawn_socket_forward(device, &endpoint).await?;
     wait_for_socket_ready(&endpoint).await?;
     tracing::info!("[done] Connected");
 
@@ -72,11 +72,11 @@ fn docker_host_uri(p: &PathBuf) -> String {
 
 //
 // ─────────────────────────────────────────────────────────────
-//  Spawning the QUIC socket tunnel
+//  Spawning the QUIC socket forward
 // ─────────────────────────────────────────────────────────────
 //
 
-async fn spawn_socket_tunnel(device: &str, endpoint: &PathBuf) -> Result<()> {
+async fn spawn_socket_forward(device: &str, endpoint: &PathBuf) -> Result<()> {
     let local = endpoint.display().to_string();
     let remote = "/var/run/docker.sock".to_string(); // robot docker sock
 
@@ -84,8 +84,8 @@ async fn spawn_socket_tunnel(device: &str, endpoint: &PathBuf) -> Result<()> {
 
     let device = device.to_string();
     tokio::spawn(async move {
-        if let Err(e) = open_local_tunnel(&device, vec![spec]).await {
-            eprintln!("Docker socket tunnel exited with error: {e}");
+        if let Err(e) = open_local_forward(&device, vec![spec]).await {
+            eprintln!("Docker socket forward exited with error: {e}");
         }
     });
 

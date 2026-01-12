@@ -10,9 +10,9 @@ pub struct UdpTarget {
 
 impl UdpTarget {
     pub fn to_stream_type(&self, token: &str) -> StreamType {
-        StreamType::Tunnel {
+        StreamType::Forward {
             token: token.to_string(),
-            target: TunnelTarget::Udp(self.clone()),
+            target: ForwardTarget::Udp(self.clone()),
         }
     }
 }
@@ -26,9 +26,9 @@ pub struct TcpTarget {
 
 impl TcpTarget {
     pub fn to_stream_type(&self, token: &str) -> StreamType {
-        StreamType::Tunnel {
+        StreamType::Forward {
             token: token.to_string(),
-            target: TunnelTarget::Tcp(self.clone()),
+            target: ForwardTarget::Tcp(self.clone()),
         }
     }
 }
@@ -41,9 +41,9 @@ pub struct SocketTarget {
 
 impl SocketTarget {
     pub fn to_stream_type(&self, token: &str) -> StreamType {
-        StreamType::Tunnel {
+        StreamType::Forward {
             token: token.to_string(),
-            target: TunnelTarget::Socket(self.clone()),
+            target: ForwardTarget::Socket(self.clone()),
         }
     }
 }
@@ -56,15 +56,15 @@ pub struct VpnTarget {
 
 impl VpnTarget {
     pub fn to_stream_type(&self, token: &str) -> StreamType {
-        StreamType::Tunnel {
+        StreamType::Forward {
             token: token.to_string(),
-            target: TunnelTarget::Vpn(self.clone()),
+            target: ForwardTarget::Vpn(self.clone()),
         }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum TunnelTarget {
+pub enum ForwardTarget {
     Tcp(TcpTarget),
     Udp(UdpTarget),
     Socket(SocketTarget),
@@ -72,40 +72,40 @@ pub enum TunnelTarget {
 }
 
 #[derive(Debug)]
-pub enum TunnelParseError {
+pub enum ForwardParseError {
     InvalidProtocol(String),
     InvalidSyntax(String),
     InvalidPort(ParseIntError),
     InvalidRange(String),
 }
 
-impl fmt::Display for TunnelParseError {
+impl fmt::Display for ForwardParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TunnelParseError::InvalidProtocol(p) => write!(f, "invalid protocol '{}'", p),
-            TunnelParseError::InvalidSyntax(s) => write!(f, "invalid tunnel spec '{}'", s),
-            TunnelParseError::InvalidPort(e) => write!(f, "invalid number: {}", e),
-            TunnelParseError::InvalidRange(r) => write!(f, "invalid port range: {}", r),
+            ForwardParseError::InvalidProtocol(p) => write!(f, "invalid protocol '{}'", p),
+            ForwardParseError::InvalidSyntax(s) => write!(f, "invalid forward spec '{}'", s),
+            ForwardParseError::InvalidPort(e) => write!(f, "invalid number: {}", e),
+            ForwardParseError::InvalidRange(r) => write!(f, "invalid port range: {}", r),
         }
     }
 }
 
-impl std::error::Error for TunnelParseError {}
+impl std::error::Error for ForwardParseError {}
 
-impl From<ParseIntError> for TunnelParseError {
+impl From<ParseIntError> for ForwardParseError {
     fn from(e: ParseIntError) -> Self {
-        TunnelParseError::InvalidPort(e)
+        ForwardParseError::InvalidPort(e)
     }
 }
 
 /// Parse a port spec that may be a single port or a range (e.g., "8080" or "8080-8090")
 /// Returns (start, end) where start == end for single ports
-fn parse_port_spec(s: &str) -> Result<(u16, u16), TunnelParseError> {
+fn parse_port_spec(s: &str) -> Result<(u16, u16), ForwardParseError> {
     if let Some((start_str, end_str)) = s.split_once('-') {
         let start: u16 = start_str.parse()?;
         let end: u16 = end_str.parse()?;
         if end < start {
-            return Err(TunnelParseError::InvalidRange(format!(
+            return Err(ForwardParseError::InvalidRange(format!(
                 "end port {} is less than start port {}",
                 end, start
             )));
@@ -129,11 +129,11 @@ fn parse_port_spec(s: &str) -> Result<(u16, u16), TunnelParseError> {
 // "8080-8090:192.168.0.101:9080-9090/tcp" -> TCP range to specific host with offset
 // /var/run/jtop.sock             -> forward local jtop socket to remote jtop socket
 // /var/run/jtop.sock:/var/run/remote.sock -> forward local jtop socket to remote jtop socket
-impl TunnelTarget {
-    pub fn from_list(specs: Vec<String>) -> Result<Vec<Self>, TunnelParseError> {
+impl ForwardTarget {
+    pub fn from_list(specs: Vec<String>) -> Result<Vec<Self>, ForwardParseError> {
         // CASE 1: empty input → default to VPN
         if specs.is_empty() {
-            return Ok(vec![TunnelTarget::Vpn(VpnTarget {
+            return Ok(vec![ForwardTarget::Vpn(VpnTarget {
                 cidr: None,
                 mtu: None,
             })]);
@@ -144,7 +144,7 @@ impl TunnelTarget {
         for token in specs {
             // CASE 2: explicit "vpn"
             if token.eq_ignore_ascii_case("vpn") {
-                out.push(TunnelTarget::Vpn(VpnTarget {
+                out.push(ForwardTarget::Vpn(VpnTarget {
                     cidr: None,
                     mtu: None,
                 }));
@@ -163,7 +163,7 @@ impl TunnelTarget {
                     }
                 };
 
-                out.push(TunnelTarget::Socket(SocketTarget {
+                out.push(ForwardTarget::Socket(SocketTarget {
                     local_path: local,
                     remote_path: remote,
                 }));
@@ -182,7 +182,7 @@ impl TunnelTarget {
                 Some("tcp") => Some("tcp"),
                 Some("udp") => Some("udp"),
                 Some(other) => {
-                    return Err(TunnelParseError::InvalidProtocol(other.to_string()));
+                    return Err(ForwardParseError::InvalidProtocol(other.to_string()));
                 }
                 None => None,
             };
@@ -207,7 +207,7 @@ impl TunnelTarget {
                         let l_size = l_end - l_start;
                         let r_size = r_end - r_start;
                         if l_size != r_size {
-                            return Err(TunnelParseError::InvalidRange(format!(
+                            return Err(ForwardParseError::InvalidRange(format!(
                                 "local range size ({}) does not match remote range size ({})",
                                 l_size + 1,
                                 r_size + 1
@@ -226,7 +226,7 @@ impl TunnelTarget {
                         let l_size = l_end - l_start;
                         let r_size = r_end - r_start;
                         if l_size != r_size {
-                            return Err(TunnelParseError::InvalidRange(format!(
+                            return Err(ForwardParseError::InvalidRange(format!(
                                 "local range size ({}) does not match remote range size ({})",
                                 l_size + 1,
                                 r_size + 1
@@ -237,7 +237,7 @@ impl TunnelTarget {
                     }
 
                     _ => {
-                        return Err(TunnelParseError::InvalidSyntax(body.to_string()));
+                        return Err(ForwardParseError::InvalidSyntax(body.to_string()));
                     }
                 };
 
@@ -248,17 +248,17 @@ impl TunnelTarget {
                 let remote_port = remote_start + offset;
 
                 match protocol {
-                    Some("tcp") => out.push(TunnelTarget::Tcp(TcpTarget {
+                    Some("tcp") => out.push(ForwardTarget::Tcp(TcpTarget {
                         local_port,
                         remote_host: remote_host.clone(),
                         remote_port,
                     })),
-                    Some("udp") => out.push(TunnelTarget::Udp(UdpTarget {
+                    Some("udp") => out.push(ForwardTarget::Udp(UdpTarget {
                         local_port,
                         remote_host: remote_host.clone(),
                         remote_port,
                     })),
-                    None => out.push(TunnelTarget::Tcp(TcpTarget {
+                    None => out.push(ForwardTarget::Tcp(TcpTarget {
                         local_port,
                         remote_host: remote_host.clone(),
                         remote_port,
@@ -272,7 +272,7 @@ impl TunnelTarget {
     }
 
     pub fn to_stream_type(&self, token: &str) -> StreamType {
-        StreamType::Tunnel {
+        StreamType::Forward {
             token: token.to_string(),
             target: self.clone(),
         }
@@ -292,9 +292,9 @@ pub enum StreamType {
     Logs {
         token: String,
     },
-    Tunnel {
+    Forward {
         token: String,
-        target: TunnelTarget,
+        target: ForwardTarget,
     },
     Serial {
         token: String,
@@ -318,7 +318,7 @@ impl StreamType {
             StreamType::Terminal { .. } => "Terminal",
             StreamType::Exec { .. } => "Exec",
             StreamType::Logs { .. } => "Logs",
-            StreamType::Tunnel { .. } => "Tunnel",
+            StreamType::Forward { .. } => "Forward",
             StreamType::Serial { .. } => "Serial",
             StreamType::Metrics { .. } => "Metrics",
             StreamType::Docker { .. } => "Docker",
@@ -331,7 +331,7 @@ impl StreamType {
             StreamType::Terminal { token, .. } => token,
             StreamType::Exec { token, .. } => token,
             StreamType::Logs { token, .. } => token,
-            StreamType::Tunnel { token, .. } => token,
+            StreamType::Forward { token, .. } => token,
             StreamType::Serial { token, .. } => token,
             StreamType::Metrics { token } => token,
             StreamType::Docker { token } => token,
@@ -361,10 +361,10 @@ mod tests {
 
     #[test]
     fn test_parse_single_port() {
-        let targets = TunnelTarget::from_list(vec!["8080".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["8080".to_string()]).unwrap();
         assert_eq!(targets.len(), 1);
         match &targets[0] {
-            TunnelTarget::Tcp(t) => {
+            ForwardTarget::Tcp(t) => {
                 assert_eq!(t.local_port, 8080);
                 assert_eq!(t.remote_port, 8080);
                 assert_eq!(t.remote_host, "127.0.0.1");
@@ -375,12 +375,12 @@ mod tests {
 
     #[test]
     fn test_parse_port_range_same() {
-        let targets = TunnelTarget::from_list(vec!["8080-8082".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["8080-8082".to_string()]).unwrap();
         assert_eq!(targets.len(), 3);
 
         for (i, target) in targets.iter().enumerate() {
             match target {
-                TunnelTarget::Tcp(t) => {
+                ForwardTarget::Tcp(t) => {
                     assert_eq!(t.local_port, 8080 + i as u16);
                     assert_eq!(t.remote_port, 8080 + i as u16);
                     assert_eq!(t.remote_host, "127.0.0.1");
@@ -392,12 +392,12 @@ mod tests {
 
     #[test]
     fn test_parse_port_range_offset() {
-        let targets = TunnelTarget::from_list(vec!["8080-8082:9080-9082".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["8080-8082:9080-9082".to_string()]).unwrap();
         assert_eq!(targets.len(), 3);
 
         for (i, target) in targets.iter().enumerate() {
             match target {
-                TunnelTarget::Tcp(t) => {
+                ForwardTarget::Tcp(t) => {
                     assert_eq!(t.local_port, 8080 + i as u16);
                     assert_eq!(t.remote_port, 9080 + i as u16);
                     assert_eq!(t.remote_host, "127.0.0.1");
@@ -410,12 +410,12 @@ mod tests {
     #[test]
     fn test_parse_port_range_with_host() {
         let targets =
-            TunnelTarget::from_list(vec!["8080-8082:192.168.1.50:9080-9082".to_string()]).unwrap();
+            ForwardTarget::from_list(vec!["8080-8082:192.168.1.50:9080-9082".to_string()]).unwrap();
         assert_eq!(targets.len(), 3);
 
         for (i, target) in targets.iter().enumerate() {
             match target {
-                TunnelTarget::Tcp(t) => {
+                ForwardTarget::Tcp(t) => {
                     assert_eq!(t.local_port, 8080 + i as u16);
                     assert_eq!(t.remote_port, 9080 + i as u16);
                     assert_eq!(t.remote_host, "192.168.1.50");
@@ -427,12 +427,12 @@ mod tests {
 
     #[test]
     fn test_parse_port_range_udp() {
-        let targets = TunnelTarget::from_list(vec!["8080-8082/udp".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["8080-8082/udp".to_string()]).unwrap();
         assert_eq!(targets.len(), 3);
 
         for (i, target) in targets.iter().enumerate() {
             match target {
-                TunnelTarget::Udp(t) => {
+                ForwardTarget::Udp(t) => {
                     assert_eq!(t.local_port, 8080 + i as u16);
                     assert_eq!(t.remote_port, 8080 + i as u16);
                 }
@@ -443,10 +443,10 @@ mod tests {
 
     #[test]
     fn test_parse_port_range_mismatch() {
-        let result = TunnelTarget::from_list(vec!["8080-8082:9080-9085".to_string()]);
+        let result = ForwardTarget::from_list(vec!["8080-8082:9080-9085".to_string()]);
         assert!(result.is_err());
         match result {
-            Err(TunnelParseError::InvalidRange(msg)) => {
+            Err(ForwardParseError::InvalidRange(msg)) => {
                 assert!(msg.contains("does not match"));
             }
             _ => panic!("Expected InvalidRange error"),
@@ -455,10 +455,10 @@ mod tests {
 
     #[test]
     fn test_parse_port_range_invalid_order() {
-        let result = TunnelTarget::from_list(vec!["8090-8080".to_string()]);
+        let result = ForwardTarget::from_list(vec!["8090-8080".to_string()]);
         assert!(result.is_err());
         match result {
-            Err(TunnelParseError::InvalidRange(msg)) => {
+            Err(ForwardParseError::InvalidRange(msg)) => {
                 assert!(msg.contains("less than"));
             }
             _ => panic!("Expected InvalidRange error"),
@@ -468,11 +468,11 @@ mod tests {
     #[test]
     fn test_parse_mixed_single_and_range() {
         let targets =
-            TunnelTarget::from_list(vec!["8080".to_string(), "3000-3002".to_string()]).unwrap();
+            ForwardTarget::from_list(vec!["8080".to_string(), "3000-3002".to_string()]).unwrap();
         assert_eq!(targets.len(), 4); // 1 + 3
 
         match &targets[0] {
-            TunnelTarget::Tcp(t) => {
+            ForwardTarget::Tcp(t) => {
                 assert_eq!(t.local_port, 8080);
             }
             _ => panic!("Expected TcpTarget"),
@@ -480,7 +480,7 @@ mod tests {
 
         for (i, target) in targets[1..].iter().enumerate() {
             match target {
-                TunnelTarget::Tcp(t) => {
+                ForwardTarget::Tcp(t) => {
                     assert_eq!(t.local_port, 3000 + i as u16);
                 }
                 _ => panic!("Expected TcpTarget"),
@@ -491,10 +491,10 @@ mod tests {
     #[test]
     fn test_existing_single_port_with_remote() {
         // Ensure existing functionality still works
-        let targets = TunnelTarget::from_list(vec!["8080:9090".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["8080:9090".to_string()]).unwrap();
         assert_eq!(targets.len(), 1);
         match &targets[0] {
-            TunnelTarget::Tcp(t) => {
+            ForwardTarget::Tcp(t) => {
                 assert_eq!(t.local_port, 8080);
                 assert_eq!(t.remote_port, 9090);
             }
@@ -506,10 +506,10 @@ mod tests {
     fn test_existing_single_port_with_host() {
         // Ensure existing functionality still works
         let targets =
-            TunnelTarget::from_list(vec!["8080:192.168.1.50:9090".to_string()]).unwrap();
+            ForwardTarget::from_list(vec!["8080:192.168.1.50:9090".to_string()]).unwrap();
         assert_eq!(targets.len(), 1);
         match &targets[0] {
-            TunnelTarget::Tcp(t) => {
+            ForwardTarget::Tcp(t) => {
                 assert_eq!(t.local_port, 8080);
                 assert_eq!(t.remote_port, 9090);
                 assert_eq!(t.remote_host, "192.168.1.50");
@@ -547,16 +547,16 @@ mod tests {
             "Logs"
         );
         assert_eq!(
-            StreamType::Tunnel {
+            StreamType::Forward {
                 token: token.clone(),
-                target: TunnelTarget::Tcp(TcpTarget {
+                target: ForwardTarget::Tcp(TcpTarget {
                     remote_host: "127.0.0.1".to_string(),
                     remote_port: 80,
                     local_port: 80
                 })
             }
             .variant_name(),
-            "Tunnel"
+            "Forward"
         );
         assert_eq!(
             StreamType::Serial {
@@ -627,38 +627,38 @@ mod tests {
         assert_eq!(StreamType::Ssh { token }.get_token(), "my-unique-token");
     }
 
-    // --- TunnelParseError Display tests ---
+    // --- ForwardParseError Display tests ---
 
     #[test]
-    fn test_tunnel_parse_error_display_protocol() {
-        let err = TunnelParseError::InvalidProtocol("xyz".to_string());
+    fn test_forward_parse_error_display_protocol() {
+        let err = ForwardParseError::InvalidProtocol("xyz".to_string());
         assert_eq!(format!("{}", err), "invalid protocol 'xyz'");
     }
 
     #[test]
-    fn test_tunnel_parse_error_display_syntax() {
-        let err = TunnelParseError::InvalidSyntax("a:b:c:d:e".to_string());
-        assert_eq!(format!("{}", err), "invalid tunnel spec 'a:b:c:d:e'");
+    fn test_forward_parse_error_display_syntax() {
+        let err = ForwardParseError::InvalidSyntax("a:b:c:d:e".to_string());
+        assert_eq!(format!("{}", err), "invalid forward spec 'a:b:c:d:e'");
     }
 
     #[test]
-    fn test_tunnel_parse_error_display_range() {
-        let err = TunnelParseError::InvalidRange("end < start".to_string());
+    fn test_forward_parse_error_display_range() {
+        let err = ForwardParseError::InvalidRange("end < start".to_string());
         assert_eq!(format!("{}", err), "invalid port range: end < start");
     }
 
     #[test]
-    fn test_tunnel_parse_error_from_parse_int() {
+    fn test_forward_parse_error_from_parse_int() {
         let parse_err: Result<u16, _> = "not_a_number".parse();
-        let tunnel_err: TunnelParseError = parse_err.unwrap_err().into();
-        let display = format!("{}", tunnel_err);
+        let forward_err: ForwardParseError = parse_err.unwrap_err().into();
+        let display = format!("{}", forward_err);
         assert!(display.starts_with("invalid number:"));
     }
 
     #[test]
-    fn test_tunnel_parse_error_is_std_error() {
+    fn test_forward_parse_error_is_std_error() {
         let err: Box<dyn std::error::Error> =
-            Box::new(TunnelParseError::InvalidProtocol("test".to_string()));
+            Box::new(ForwardParseError::InvalidProtocol("test".to_string()));
         // Just verify it implements std::error::Error
         assert!(!err.to_string().is_empty());
     }
@@ -667,10 +667,10 @@ mod tests {
 
     #[test]
     fn test_empty_specs_defaults_to_vpn() {
-        let targets = TunnelTarget::from_list(vec![]).unwrap();
+        let targets = ForwardTarget::from_list(vec![]).unwrap();
         assert_eq!(targets.len(), 1);
         match &targets[0] {
-            TunnelTarget::Vpn(v) => {
+            ForwardTarget::Vpn(v) => {
                 assert!(v.cidr.is_none());
                 assert!(v.mtu.is_none());
             }
@@ -680,28 +680,28 @@ mod tests {
 
     #[test]
     fn test_explicit_vpn_keyword() {
-        let targets = TunnelTarget::from_list(vec!["vpn".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["vpn".to_string()]).unwrap();
         assert_eq!(targets.len(), 1);
-        matches!(&targets[0], TunnelTarget::Vpn(_));
+        matches!(&targets[0], ForwardTarget::Vpn(_));
     }
 
     #[test]
     fn test_vpn_keyword_case_insensitive() {
-        let targets = TunnelTarget::from_list(vec!["VPN".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["VPN".to_string()]).unwrap();
         assert_eq!(targets.len(), 1);
-        matches!(&targets[0], TunnelTarget::Vpn(_));
+        matches!(&targets[0], ForwardTarget::Vpn(_));
 
-        let targets = TunnelTarget::from_list(vec!["Vpn".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["Vpn".to_string()]).unwrap();
         assert_eq!(targets.len(), 1);
-        matches!(&targets[0], TunnelTarget::Vpn(_));
+        matches!(&targets[0], ForwardTarget::Vpn(_));
     }
 
     #[test]
     fn test_socket_path_simple() {
-        let targets = TunnelTarget::from_list(vec!["/var/run/test.sock".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["/var/run/test.sock".to_string()]).unwrap();
         assert_eq!(targets.len(), 1);
         match &targets[0] {
-            TunnelTarget::Socket(s) => {
+            ForwardTarget::Socket(s) => {
                 assert_eq!(s.local_path, "/var/run/test.sock");
                 assert_eq!(s.remote_path, "/var/run/test.sock");
             }
@@ -712,11 +712,11 @@ mod tests {
     #[test]
     fn test_socket_path_with_remote() {
         let targets =
-            TunnelTarget::from_list(vec!["/local/path.sock:/remote/path.sock".to_string()])
+            ForwardTarget::from_list(vec!["/local/path.sock:/remote/path.sock".to_string()])
                 .unwrap();
         assert_eq!(targets.len(), 1);
         match &targets[0] {
-            TunnelTarget::Socket(s) => {
+            ForwardTarget::Socket(s) => {
                 assert_eq!(s.local_path, "/local/path.sock");
                 assert_eq!(s.remote_path, "/remote/path.sock");
             }
@@ -726,10 +726,10 @@ mod tests {
 
     #[test]
     fn test_port_boundary_min() {
-        let targets = TunnelTarget::from_list(vec!["1".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["1".to_string()]).unwrap();
         assert_eq!(targets.len(), 1);
         match &targets[0] {
-            TunnelTarget::Tcp(t) => {
+            ForwardTarget::Tcp(t) => {
                 assert_eq!(t.local_port, 1);
                 assert_eq!(t.remote_port, 1);
             }
@@ -739,10 +739,10 @@ mod tests {
 
     #[test]
     fn test_port_boundary_max() {
-        let targets = TunnelTarget::from_list(vec!["65535".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["65535".to_string()]).unwrap();
         assert_eq!(targets.len(), 1);
         match &targets[0] {
-            TunnelTarget::Tcp(t) => {
+            ForwardTarget::Tcp(t) => {
                 assert_eq!(t.local_port, 65535);
                 assert_eq!(t.remote_port, 65535);
             }
@@ -752,25 +752,25 @@ mod tests {
 
     #[test]
     fn test_port_overflow() {
-        let result = TunnelTarget::from_list(vec!["65536".to_string()]);
+        let result = ForwardTarget::from_list(vec!["65536".to_string()]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_invalid_protocol() {
-        let result = TunnelTarget::from_list(vec!["8080/xyz".to_string()]);
+        let result = ForwardTarget::from_list(vec!["8080/xyz".to_string()]);
         assert!(result.is_err());
         match result {
-            Err(TunnelParseError::InvalidProtocol(p)) => assert_eq!(p, "xyz"),
+            Err(ForwardParseError::InvalidProtocol(p)) => assert_eq!(p, "xyz"),
             _ => panic!("Expected InvalidProtocol error"),
         }
     }
 
     #[test]
     fn test_tcp_protocol_explicit() {
-        let targets = TunnelTarget::from_list(vec!["8080/tcp".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["8080/tcp".to_string()]).unwrap();
         assert_eq!(targets.len(), 1);
-        matches!(&targets[0], TunnelTarget::Tcp(_));
+        matches!(&targets[0], ForwardTarget::Tcp(_));
     }
 
     #[test]
@@ -782,7 +782,7 @@ mod tests {
         };
         let stream = tcp.to_stream_type("token123");
         assert_eq!(stream.get_token(), "token123");
-        assert_eq!(stream.variant_name(), "Tunnel");
+        assert_eq!(stream.variant_name(), "Forward");
 
         let udp = UdpTarget {
             remote_host: "localhost".to_string(),
@@ -808,18 +808,18 @@ mod tests {
     }
 
     #[test]
-    fn test_tunnel_target_to_stream_type() {
-        let target = TunnelTarget::Tcp(TcpTarget {
+    fn test_forward_target_to_stream_type() {
+        let target = ForwardTarget::Tcp(TcpTarget {
             remote_host: "example.com".to_string(),
             remote_port: 443,
             local_port: 8443,
         });
         let stream = target.to_stream_type("mytoken");
         match stream {
-            StreamType::Tunnel { token, target: _ } => {
+            StreamType::Forward { token, target: _ } => {
                 assert_eq!(token, "mytoken");
             }
-            _ => panic!("Expected Tunnel variant"),
+            _ => panic!("Expected Forward variant"),
         }
     }
 }

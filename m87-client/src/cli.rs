@@ -6,7 +6,7 @@ use crate::auth;
 use crate::config::Config;
 use crate::device;
 use crate::device::serial;
-use crate::device::tunnel;
+use crate::device::forward;
 use crate::devices;
 use crate::tui;
 use crate::update;
@@ -50,7 +50,7 @@ fn print_help_with_device_commands() {
          {}\n\n  \
          Examples:\n    \
          m87 my-device shell\n    \
-         m87 my-device tunnel 8080\n    \
+         m87 my-device forward 8080\n    \
          m87 my-device docker ps\n    \
          m87 my-device exec -- ls -la",
         subcommands.join("\n")
@@ -199,7 +199,7 @@ pub enum DeviceCommand {
     /// Open interactive shell on the device
     Shell,
     /// Forward remote port(s) to localhost
-    Tunnel {
+    Forward {
         /// Port forwarding target(s). Supports single ports and ranges.
         /// Examples:
         ///   8080                    - forward single port
@@ -711,8 +711,8 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             Ok(())
         }
 
-        DeviceCommand::Tunnel { targets } => {
-            tunnel::open_local_tunnel(&device, targets).await?;
+        DeviceCommand::Forward { targets } => {
+            forward::open_local_forward(&device, targets).await?;
             Ok(())
         }
 

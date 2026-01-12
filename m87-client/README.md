@@ -32,7 +32,7 @@ Or download from [releases](https://github.com/make87/make87/releases).
 m87 login                      # authenticate via browser
 m87 devices list               # list accessible devices
 m87 <device> shell             # open shell on device
-m87 <device> tunnel 8080       # forward port 8080
+m87 <device> forward 8080      # forward port 8080
 ```
 
 ## Commands
@@ -42,7 +42,7 @@ m87 <device> tunnel 8080       # forward port 8080
 ```
 m87 <device> shell             # interactive shell
 m87 <device> exec -- <cmd>     # run command
-m87 <device> tunnel <ports>    # port forwarding (see below)
+m87 <device> forward <ports>   # port forwarding (see below)
 m87 <device> docker <args>     # docker passthrough
 m87 <device> logs              # logs from the runtime and observed containers
 m87 <device> stats             # system metrics
@@ -110,14 +110,14 @@ The CLI automatically handles privilege escalation invoking `sudo`. The runtime 
 Format: `[local:]remote[/protocol]`
 
 ```sh
-m87 <device> tunnel 8080              # localhost:8080 → device:8080
-m87 <device> tunnel 3000:8080         # localhost:3000 → device:8080
-m87 <device> tunnel 192.168.1.5:80    # forward to host on device's LAN
-m87 <device> tunnel 8080/udp          # UDP (default: tcp)
-m87 <device> tunnel 8080 9090 3000    # multiple ports
+m87 <device> forward 8080              # localhost:8080 → device:8080
+m87 <device> forward 3000:8080         # localhost:3000 → device:8080
+m87 <device> forward 192.168.1.5:80    # forward to host on device's LAN
+m87 <device> forward 8080/udp          # UDP (default: tcp)
+m87 <device> forward 8080 9090 3000    # multiple ports
 ```
 
-See [examples/features/tunnels](./examples/features/tunnels/) for more.
+See [examples/features/forward](./examples/features/forward/) for more.
 
 ## Building
 

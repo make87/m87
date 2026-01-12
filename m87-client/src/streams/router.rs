@@ -7,9 +7,9 @@ use crate::streams::serial::handle_serial_io;
 use crate::streams::stream_type::StreamType;
 use crate::streams::udp_manager::UdpChannelManager;
 use crate::streams::{
-    docker::handle_docker_io, exec::handle_exec_io, logs::handle_logs_io,
-    metrics::handle_system_metrics_io, ssh::handle_ssh_io, terminal::handle_terminal_io,
-    tunnel::handle_port_forward_io,
+    docker::handle_docker_io, exec::handle_exec_io, forward::handle_port_forward_io,
+    logs::handle_logs_io, metrics::handle_system_metrics_io, ssh::handle_ssh_io,
+    terminal::handle_terminal_io,
 };
 
 pub async fn handle_incoming_stream(
@@ -47,7 +47,7 @@ pub async fn handle_incoming_stream(
             debug!("router: dispatching to logs handler");
             let _ = handle_logs_io(&mut io).await;
         }
-        StreamType::Tunnel { target, .. } => {
+        StreamType::Forward { target, .. } => {
             debug!("router: dispatching to port forward handler");
             handle_port_forward_io(target, io, manager, datagram_tx).await;
         }
