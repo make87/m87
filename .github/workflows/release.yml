@@ -184,9 +184,9 @@ jobs:
         if: ${{ !matrix.use_docker }}
         run: |
           if [ "${{ inputs.build_profile }}" = "release" ]; then
-            cargo build --release --package ${{ matrix.package }} --features manager
+            cargo build --release --package ${{ matrix.package }} --features cli
           else
-            cargo build --package ${{ matrix.package }} --features manager
+            cargo build --package ${{ matrix.package }} --features cli
           fi
 
           # Copy binary to artifacts
