@@ -12,6 +12,7 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::device::control_tunnel;
+use crate::util::command::current_exe_path;
 use crate::util::shutdown::SHUTDOWN;
 use crate::util::system_info::get_system_info;
 use crate::util::unix::{
@@ -197,7 +198,7 @@ async fn setup_service(enable: bool, enable_now: bool, restart_if_running: bool)
     let user_info =
         crate::util::unix::resolve_invoking_user().context("Failed to determine user identity")?;
 
-    let exe_path = std::env::current_exe().context("Failed to get current executable path")?;
+    let exe_path = current_exe_path()?;
 
     // Validate path early
     validate_exec_path(&exe_path)?;

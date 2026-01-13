@@ -1,10 +1,22 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::{process::Output, time::Duration};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration as TokioDuration};
+
+/// Get the canonicalized path to the current executable.
+///
+/// This resolves symlinks and returns the absolute path, useful for
+/// situations where we need to reference ourselves (e.g., systemd services,
+/// SSH ProxyCommand).
+pub fn current_exe_path() -> Result<PathBuf> {
+    std::env::current_exe()
+        .context("Failed to get current executable path")?
+        .canonicalize()
+        .context("Failed to canonicalize executable path")
+}
 
 pub async fn safe_run_command(mut cmd: Command, timeout_duration: Duration) -> Result<Output> {
     let timeout_duration = TokioDuration::from_secs(timeout_duration.as_secs());

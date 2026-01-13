@@ -10,6 +10,7 @@ use crate::{
     config::Config,
     devices,
     streams::{quic::open_quic_io, stream_type::StreamType},
+    util::command::current_exe_path,
 };
 
 // This function is an SSH ProxyCommand transport.
@@ -87,10 +88,19 @@ pub fn exec_ssh(target: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-const M87_SSH_BLOCK: &str = r#"
+fn m87_ssh_block() -> String {
+    let exe_path = current_exe_path()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "m87".to_string());
+
+    format!(
+        r#"
 Host *.m87
-    ProxyCommand m87 ssh %h %r --transport
-"#;
+    ProxyCommand {} ssh %h %r --transport
+"#,
+        exe_path
+    )
+}
 
 fn ssh_config_path() -> Result<PathBuf> {
     let home = env::var("HOME")
@@ -113,7 +123,7 @@ pub fn ssh_enable() -> Result<()> {
 
     let mut contents = fs::read_to_string(&path).unwrap_or_default();
 
-    if contents.contains("Host m87-*") {
+    if contents.contains("Host *.m87") {
         return Ok(()); // already enabled
     }
 
@@ -121,7 +131,7 @@ pub fn ssh_enable() -> Result<()> {
         contents.push('\n');
     }
 
-    contents.push_str(M87_SSH_BLOCK);
+    contents.push_str(&m87_ssh_block());
     fs::write(&path, contents).context("Failed to write SSH config")?;
 
     Ok(())
@@ -140,7 +150,7 @@ pub fn ssh_disable() -> Result<()> {
     let mut skip = false;
 
     while let Some(line) = lines.next() {
-        if line.trim() == "Host m87-*" {
+        if line.trim() == "Host *.m87" {
             skip = true;
             continue;
         }

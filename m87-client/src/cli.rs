@@ -456,7 +456,7 @@ pub async fn cli() -> anyhow::Result<()> {
                 tracing::info!("Enabling SSH...");
                 device::ssh::ssh_enable()?;
                 tracing::info!(
-                    "[done] SSH enabled successfully. You can now connect to device via ssh m87-<device_name>"
+                    "[done] SSH enabled successfully. You can now connect to device via ssh <device_name>.m87"
                 );
             }
             SshCommands::Disable => {
