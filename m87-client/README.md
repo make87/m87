@@ -85,12 +85,31 @@ ssh <device>.m87               # now you can use ssh like you would normally
 ### Device Management
 
 ```
-m87 login
-m87 logout
-m87 devices list
-m87 devices approve <device>
-m87 update
+m87 login                       # authenticate via browser
+m87 logout                      # clear local credentials
+m87 devices list                # list accessible devices
+m87 devices approve <device>    # approve a pending device registration
 ```
+
+### Updating
+
+```sh
+m87 update                      # download and install the latest m87 binary
+```
+
+After updating, restart the runtime to use the new version:
+
+```sh
+m87 runtime restart             # restart the runtime service
+```
+
+**Note:** If you're running `m87 runtime restart` from within a device shell (e.g., via `m87 <device> shell`), the command will fail because the shell is a subprocess of the runtime being restarted. Use `systemd-run` to run the restart in an independent scope:
+
+```sh
+sudo -v && systemd-run --scope m87 runtime restart
+```
+
+The `sudo -v` prompts for your password upfront, then `systemd-run --scope` creates a transient scope outside the runtime's cgroup, allowing the restart to complete successfully.
 
 ### Running as Runtime (Linux)
 
@@ -105,13 +124,24 @@ Then approve the device from your workstation with `m87 devices approve <request
 #### Systemd Service
 
 ```sh
-m87 runtime enable --now    # install, enable and start (prompts for sudo)
+m87 runtime start           # enable at boot and start immediately
+m87 runtime stop            # stop the service (keeps enabled at boot)
+m87 runtime restart         # restart the service (starts if stopped)
 m87 runtime status          # show service status
-m87 runtime stop            # stop the service
-m87 runtime disable --now   # disable and stop
+m87 runtime enable          # enable at boot (without starting)
+m87 runtime enable --now    # enable at boot and start immediately
+m87 runtime disable         # disable at boot (keeps running)
+m87 runtime disable --now   # disable at boot and stop
 ```
 
-The CLI automatically handles privilege escalation invoking `sudo`. The runtime service runs as your user, not root.
+The CLI automatically handles privilege escalation by invoking `sudo`. The runtime service runs as your user, not root.
+
+**Command behavior:**
+- `start` / `enable --now`: Installs the service file, enables it to start on boot, and starts it immediately
+- `stop`: Stops the running service but keeps it enabled for next boot
+- `restart`: Matches systemd behavior — restarts if running, starts if stopped
+- `enable`: Only enables the service to start on boot (doesn't start it now)
+- `disable`: Only disables the service from starting on boot (doesn't stop it now)
 
 ## Port Forwarding
 

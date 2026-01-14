@@ -155,13 +155,10 @@ pub async fn internal_setup_privileged(
         // enable without --now: just enable at boot
         run_systemctl_checked(&["enable", SERVICE_NAME])?;
         info!("Enabled m87-runtime service (starts on boot)");
-    } else if restart_if_running && file_changed {
-        // Check if service is active and restart if so
-        let status = run_systemctl(&["is-active", "--quiet", SERVICE_NAME])?;
-        if status.success() {
-            run_systemctl_checked(&["restart", SERVICE_NAME])?;
-            info!("Restarted m87-runtime service");
-        }
+    } else if restart_if_running {
+        // Match systemd behavior: restart if running, start if stopped
+        run_systemctl_checked(&["restart", SERVICE_NAME])?;
+        info!("Restarted m87-runtime service");
     }
 
     Ok(())
@@ -267,9 +264,9 @@ pub async fn start() -> Result<()> {
 }
 
 /// CLI: m87 runtime restart
-/// Restarts the runtime service (auto-installs/updates service file)
+/// Restarts the runtime service (starts if stopped, matches systemd behavior)
 pub async fn restart() -> Result<()> {
-    // restart: just restart if running (don't enable if not already enabled)
+    // restart: matches systemd behavior (starts if stopped, restarts if running)
     setup_service(false, false, true).await
 }
 
