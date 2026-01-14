@@ -29,14 +29,14 @@ curl -fsSL https://get.make87.com | sh
 
 **From releases**
 
-Download a pre-built binary from the [releases page](https://github.com/make87/make87/releases) and place it in your `$PATH` (e.g., `$HOME/.local/bin` or `/usr/local/bin`).
+Download a pre-built binary from the [releases page](https://github.com/make87/m87/releases) and place it in your `$PATH` (e.g., `$HOME/.local/bin` or `/usr/local/bin`).
 
 **From source**
 
 Build the binary and move it to a location in your `$PATH`:
 
 ```bash
-git clone https://github.com/make87/make87.git
+git clone https://github.com/make87/m87.git
 cd make87
 cargo build --release
 cp target/release/m87 $HOME/.local/bin/
@@ -142,7 +142,7 @@ Requires:
 * Git
 
 ```bash
-git clone https://github.com/make87/make87.git
+git clone https://github.com/make87/m87.git
 cd make87
 cargo build --release
 ```

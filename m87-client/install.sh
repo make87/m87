@@ -6,7 +6,7 @@ set -e
 # This script installs the m87 client binary to ~/.local/bin (no sudo required)
 #
 # Usage:
-#   curl -fsSL https://github.com/make87/make87/releases/latest/download/install-client.sh | sh
+#   curl -fsSL https://github.com/make87/m87/releases/latest/download/install-client.sh | sh
 #   curl -fsSL get.make87.com | sh
 #
 # What it does:
@@ -32,7 +32,7 @@ NC='\033[0m' # No Color
 # Installation configuration
 INSTALL_DIR="$HOME/.local/bin"
 BINARY_NAME="m87"
-GITHUB_REPO="make87/make87"
+GITHUB_REPO="make87/m87"
 # This version is set during release - do not change manually
 VERSION="${M87_VERSION:-__VERSION__}"
 # Allow custom download URL for testing (e.g., M87_DOWNLOAD_URL=http://localhost:8000)

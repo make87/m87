@@ -18,12 +18,12 @@ Can be self-hosted for on-premise deployments or used with the make87 platform.
 With Docker Compose:
 
 ```sh
-git clone https://github.com/make87/make87
+git clone https://github.com/make87/m87
 cd make87/m87-server
 docker compose up -d
 ```
 
-Or download binaries from [releases](https://github.com/make87/make87/releases) and run with your own MongoDB.
+Or download binaries from [releases](https://github.com/make87/m87/releases) and run with your own MongoDB.
 
 ## Configuration
 
