@@ -194,7 +194,7 @@ pub async fn undeploy_file(
     deployment_update(
         device_name,
         DeploymentUpdateArgs {
-            deployment_id: target_dep_id,
+            deployment_id: Some(target_dep_id),
             rm: vec![job_id],
             ..Default::default()
         },
@@ -243,14 +243,11 @@ pub async fn deployment_active_set(device_name: &str, deployment_id: String) -> 
     Ok(())
 }
 
-pub async fn get_deployment(
-    device_name: &str,
-    deployment_id: String,
-) -> Result<DeploymentRevision> {
+pub async fn get_deployment(device_name: &str, deployment_id: &str) -> Result<DeploymentRevision> {
     let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
 
     let deployment =
-        server::get_deployment(&api_url, &token, trust_invalid, &device_id, &deployment_id)
+        server::get_deployment(&api_url, &token, trust_invalid, &device_id, deployment_id)
             .await
             .context("failed to get deployment")?;
     Ok(deployment)
@@ -324,7 +321,7 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 pub struct DeploymentUpdateArgs {
-    pub deployment_id: String,
+    pub deployment_id: Option<String>,
 
     /// Remove one or more jobs: --rm <job_id> (optional <job_id2>)
     #[arg(long, action = clap::ArgAction::Append)]
@@ -356,7 +353,7 @@ pub struct DeploymentUpdateArgs {
 impl Default for DeploymentUpdateArgs {
     fn default() -> Self {
         Self {
-            deployment_id: String::new(),
+            deployment_id: None,
             rm: Vec::new(),
             replace: Vec::new(),
             rename: Vec::new(),
@@ -373,6 +370,23 @@ pub async fn deployment_update(
 ) -> Result<DeploymentRevision> {
     let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
 
+    let deployment_id = match args.deployment_id {
+        Some(d) => d,
+        None => match get_active_deployment_id(device_name).await? {
+            Some(id) => id,
+            None => {
+                tracing::error!(
+                    "No active deployment found for device {}. Specify a deployment id or create a active deployment",
+                    device_name
+                );
+                return Err(anyhow!(
+                    "No active deployment found for device {}",
+                    device_name
+                ));
+            }
+        },
+    };
+
     let needs_full_revision_patch =
         !args.rename.is_empty() || !args.enable.is_empty() || !args.disable.is_empty();
 
@@ -383,7 +397,7 @@ pub async fn deployment_update(
                 &token,
                 trust_invalid,
                 &device_id,
-                &args.deployment_id,
+                &deployment_id,
                 UpdateDeployRevisionBody {
                     remove_run_spec_id: Some(id.clone()),
                     ..Default::default()
@@ -405,7 +419,7 @@ pub async fn deployment_update(
                 &token,
                 trust_invalid,
                 &device_id,
-                &args.deployment_id,
+                &deployment_id,
                 UpdateDeployRevisionBody {
                     update_run_spec: Some(yml),
                     ..Default::default()
@@ -415,27 +429,17 @@ pub async fn deployment_update(
             .with_context(|| format!("failed to update run spec {spec_id}"))?;
         }
 
-        let revision = server::get_deployment(
-            &api_url,
-            &token,
-            trust_invalid,
-            &device_id,
-            &args.deployment_id,
-        )
-        .await
-        .context("failed to fetch updated deployment")?;
+        let revision =
+            server::get_deployment(&api_url, &token, trust_invalid, &device_id, &deployment_id)
+                .await
+                .context("failed to fetch updated deployment")?;
         return Ok(revision);
     }
 
-    let mut dep = server::get_deployment(
-        &api_url,
-        &token,
-        trust_invalid,
-        &device_id,
-        &args.deployment_id,
-    )
-    .await
-    .context("failed to fetch deployment")?;
+    let mut dep =
+        server::get_deployment(&api_url, &token, trust_invalid, &device_id, &deployment_id)
+            .await
+            .context("failed to fetch deployment")?;
 
     for id in &args.rm {
         dep.jobs.retain(|s| s.id != *id);
@@ -488,7 +492,7 @@ pub async fn deployment_update(
         &token,
         trust_invalid,
         &device_id,
-        &args.deployment_id,
+        &deployment_id,
         UpdateDeployRevisionBody {
             revision: Some(dep.to_yaml()?),
             ..Default::default()
@@ -497,15 +501,9 @@ pub async fn deployment_update(
     .await
     .context("failed to update deployment")?;
 
-    server::get_deployment(
-        &api_url,
-        &token,
-        trust_invalid,
-        &device_id,
-        &args.deployment_id,
-    )
-    .await
-    .context("failed to fetch updated deployment")
+    server::get_deployment(&api_url, &token, trust_invalid, &device_id, &deployment_id)
+        .await
+        .context("failed to fetch updated deployment")
 }
 
 fn parse_kv_eq(s: &str) -> Result<(String, String)> {
@@ -622,10 +620,10 @@ pub async fn compose_file_to_runspec_yaml(file: &Path, name: Option<&str>) -> Re
             ))),
         }),
         liveness: Some(ObserveHooks {
-            every: Duration::from_secs(10),
+            every: Duration::from_secs(5),
             observe: CommandSpec::Sh(format!(
-                r#"docker compose -f "{file}" ps --status exited --status restarting --status dead --status paused --status removing --status created >/dev/null 2>&1 || exit 0; exit 1"#,
-                file = file_name
+                r#"docker compose -f {} ps --status exited --status restarting --status dead --status paused --status removing --status created | sed '1d' | grep -q . && exit 1 || exit 0"#,
+                file_name
             )),
             record: Some(CommandSpec::Sh(format!(
                 "docker compose -f {} logs --timestamps --tail 200",
@@ -636,8 +634,8 @@ pub async fn compose_file_to_runspec_yaml(file: &Path, name: Option<&str>) -> Re
         health: Some(ObserveHooks {
             every: Duration::from_secs(10),
             observe: CommandSpec::Sh(format!(
-                r#"docker compose -f "{file}" ps --status exited --status restarting --status dead --status paused --status removing --status created >/dev/null 2>&1 || exit 0; exit 1"#,
-                file = file_name
+                r#"docker compose -f {} logs --no-color --tail=200 | grep -Ei 'error|panic|fatal|crash' && exit 1 || exit 0"#,
+                file_name
             )),
             record: Some(CommandSpec::Sh(format!(
                 "docker compose -f {} logs --timestamps --tail 200",

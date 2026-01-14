@@ -585,3 +585,166 @@ where
     writer.flush().await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- LocalOrRemotePath::parse tests ---
+
+    #[test]
+    fn test_local_or_remote_path_parse_local() {
+        let path = LocalOrRemotePath::parse("foo/bar/baz");
+        match path {
+            LocalOrRemotePath::Local(p) => {
+                assert_eq!(p, PathBuf::from("foo/bar/baz"));
+            }
+            _ => panic!("Expected Local variant"),
+        }
+    }
+
+    #[test]
+    fn test_local_or_remote_path_parse_remote() {
+        let path = LocalOrRemotePath::parse("mydevice:/home/user/file.txt");
+        match path {
+            LocalOrRemotePath::Remote { device, path } => {
+                assert_eq!(device, "mydevice");
+                assert_eq!(path, "/home/user/file.txt");
+            }
+            _ => panic!("Expected Remote variant"),
+        }
+    }
+
+    #[test]
+    fn test_local_or_remote_path_parse_empty() {
+        let path = LocalOrRemotePath::parse("");
+        match path {
+            LocalOrRemotePath::Local(p) => {
+                assert_eq!(p, PathBuf::from(""));
+            }
+            _ => panic!("Expected Local variant"),
+        }
+    }
+
+    #[test]
+    fn test_local_or_remote_path_parse_remote_empty_path() {
+        let path = LocalOrRemotePath::parse("device:");
+        match path {
+            LocalOrRemotePath::Remote { device, path } => {
+                assert_eq!(device, "device");
+                assert_eq!(path, "");
+            }
+            _ => panic!("Expected Remote variant"),
+        }
+    }
+
+    // --- LocalOrRemotePath::from_path tests ---
+
+    #[test]
+    fn test_local_or_remote_path_from_path_local() {
+        let base = LocalOrRemotePath::Local(PathBuf::from("/base"));
+        let full = Path::new("/base/subdir/file.txt");
+
+        let result = LocalOrRemotePath::from_path(&base, full);
+        match result {
+            LocalOrRemotePath::Local(p) => {
+                assert_eq!(p, PathBuf::from("/base/subdir/file.txt"));
+            }
+            _ => panic!("Expected Local variant"),
+        }
+    }
+
+    #[test]
+    fn test_local_or_remote_path_from_path_remote() {
+        let base = LocalOrRemotePath::Remote {
+            device: "mydevice".to_string(),
+            path: "/base".to_string(),
+        };
+        let full = Path::new("/base/subdir/file.txt");
+
+        let result = LocalOrRemotePath::from_path(&base, full);
+        match result {
+            LocalOrRemotePath::Remote { device, path } => {
+                assert_eq!(device, "mydevice");
+                assert_eq!(path, "/base/subdir/file.txt");
+            }
+            _ => panic!("Expected Remote variant"),
+        }
+    }
+
+    // --- fingerprint tests ---
+
+    #[test]
+    fn test_fingerprint_basic() {
+        let mtime = Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1700000000));
+        let fp = fingerprint(12345, mtime);
+        assert_eq!(fp, "12345:1700000000");
+    }
+
+    #[test]
+    fn test_fingerprint_no_mtime() {
+        let fp = fingerprint(999, None);
+        assert_eq!(fp, "999:0");
+    }
+
+    #[test]
+    fn test_fingerprint_zero_size() {
+        let mtime = Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100));
+        let fp = fingerprint(0, mtime);
+        assert_eq!(fp, "0:100");
+    }
+
+    // --- matches_exclude tests ---
+
+    #[test]
+    fn test_matches_exclude_exact_name() {
+        let excludes = vec!["node_modules".to_string()];
+        assert!(matches_exclude("node_modules", &excludes));
+        assert!(matches_exclude("src/node_modules/foo", &excludes));
+        assert!(!matches_exclude("node_modules_backup", &excludes));
+    }
+
+    #[test]
+    fn test_matches_exclude_glob_suffix() {
+        let excludes = vec!["*.log".to_string()];
+        assert!(matches_exclude("app.log", &excludes));
+        assert!(matches_exclude("debug.log", &excludes));
+        assert!(!matches_exclude("log.txt", &excludes));
+    }
+
+    #[test]
+    fn test_matches_exclude_glob_prefix() {
+        let excludes = vec!["test_*".to_string()];
+        assert!(matches_exclude("test_file.rs", &excludes));
+        assert!(matches_exclude("test_", &excludes));
+        assert!(!matches_exclude("my_test", &excludes));
+    }
+
+    #[test]
+    fn test_matches_exclude_nested_component() {
+        let excludes = vec!["build".to_string()];
+        assert!(matches_exclude("build", &excludes));
+        assert!(matches_exclude("src/build/output", &excludes));
+        assert!(matches_exclude("project/build", &excludes));
+    }
+
+    #[test]
+    fn test_matches_exclude_empty_list() {
+        let excludes: Vec<String> = vec![];
+        assert!(!matches_exclude("anything", &excludes));
+        assert!(!matches_exclude("node_modules", &excludes));
+    }
+
+    #[test]
+    fn test_matches_exclude_multiple_patterns() {
+        let excludes = vec![
+            "node_modules".to_string(),
+            "*.log".to_string(),
+            ".git".to_string(),
+        ];
+        assert!(matches_exclude("node_modules", &excludes));
+        assert!(matches_exclude("app.log", &excludes));
+        assert!(matches_exclude(".git", &excludes));
+        assert!(!matches_exclude("src/main.rs", &excludes));
+    }
+}

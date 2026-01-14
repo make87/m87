@@ -247,3 +247,64 @@ impl SendUserAuthRequestHandler for PrintUserAuthRequestHandler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_oauth2_token_is_valid_not_expired() {
+        // Token expires far in the future
+        let token = OAuth2Token {
+            access_token: "test_access_token".to_string(),
+            refresh_token: Some("test_refresh_token".to_string()),
+            expires_at: u64::MAX, // Never expires (practically)
+        };
+        assert!(token.is_valid());
+    }
+
+    #[test]
+    fn test_oauth2_token_is_valid_expired() {
+        // Token expired in the past
+        let token = OAuth2Token {
+            access_token: "test_access_token".to_string(),
+            refresh_token: Some("test_refresh_token".to_string()),
+            expires_at: 0, // Expired at Unix epoch
+        };
+        assert!(!token.is_valid());
+    }
+
+    #[test]
+    fn test_oauth2_token_serialization() {
+        let token = OAuth2Token {
+            access_token: "my_access_token".to_string(),
+            refresh_token: Some("my_refresh_token".to_string()),
+            expires_at: 1700000000,
+        };
+
+        let json = serde_json::to_string(&token).unwrap();
+        let deserialized: OAuth2Token = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.access_token, "my_access_token");
+        assert_eq!(
+            deserialized.refresh_token,
+            Some("my_refresh_token".to_string())
+        );
+        assert_eq!(deserialized.expires_at, 1700000000);
+    }
+
+    #[test]
+    fn test_oauth2_token_serialization_no_refresh() {
+        let token = OAuth2Token {
+            access_token: "access_only".to_string(),
+            refresh_token: None,
+            expires_at: 1234567890,
+        };
+
+        let json = serde_json::to_string(&token).unwrap();
+        let deserialized: OAuth2Token = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.access_token, "access_only");
+        assert!(deserialized.refresh_token.is_none());
+    }
+}

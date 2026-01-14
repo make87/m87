@@ -59,3 +59,38 @@ pub fn set_tls_provider() {
             .expect("failed to install ring crypto provider");
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::client::danger::ServerCertVerifier;
+
+    #[test]
+    fn test_no_verify_server_cert() {
+        let verifier = NoVerify;
+        let cert = CertificateDer::from(vec![0u8; 32]);
+        let server_name = ServerName::try_from("example.com").unwrap();
+        let now = UnixTime::now();
+
+        let result = verifier.verify_server_cert(&cert, &[], &server_name, &[], now);
+        assert!(result.is_ok());
+    }
+
+    // Note: verify_tls12_signature and verify_tls13_signature tests are omitted
+    // because DigitallySignedStruct::new is private in rustls
+
+    #[test]
+    fn test_no_verify_supported_schemes() {
+        let verifier = NoVerify;
+        let schemes = verifier.supported_verify_schemes();
+        assert_eq!(schemes.len(), 5);
+    }
+
+    #[test]
+    fn test_no_verify_supported_schemes_contains_ed25519() {
+        let verifier = NoVerify;
+        let schemes = verifier.supported_verify_schemes();
+        assert!(schemes.contains(&SignatureScheme::ED25519));
+        assert!(schemes.contains(&SignatureScheme::ECDSA_NISTP256_SHA256));
+    }
+}

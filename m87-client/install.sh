@@ -303,9 +303,9 @@ main() {
     echo "  $BINARY_NAME login                # Authenticate with make87"
     if [ "$OS" = "linux" ]; then
         echo ""
-        echo "Agent mode (Linux only):"
-        echo "  $BINARY_NAME agent login          # Authenticate agent"
-        echo "  $BINARY_NAME agent enable --now   # Install as system service"
+        echo "Runtime mode (Linux only):"
+        echo "  $BINARY_NAME runtime login          # Authenticate runtime"
+        echo "  $BINARY_NAME runtime enable --now   # Install as system service"
     fi
     echo ""
 }

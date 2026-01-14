@@ -544,3 +544,110 @@ fn apply_mtime(path: &Path, attrs: &FileAttributes) -> std::io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs as stdfs;
+
+    fn setup_test_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique_id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let test_dir =
+            std::env::temp_dir().join(format!("m87_test_{}_{}", std::process::id(), unique_id));
+        let _ = stdfs::remove_dir_all(&test_dir);
+        stdfs::create_dir_all(&test_dir).unwrap();
+        test_dir
+    }
+
+    fn cleanup_test_dir(path: &Path) {
+        let _ = stdfs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn test_resolve_path_absolute() {
+        let test_dir = setup_test_dir();
+        let subdir = test_dir.join("subdir");
+        stdfs::create_dir_all(&subdir).unwrap();
+
+        let handler = M87SftpHandler::new(test_dir.clone());
+        let abs_path = subdir.to_string_lossy().to_string();
+
+        let resolved = handler.resolve_path(&abs_path).unwrap();
+        assert_eq!(resolved, subdir);
+
+        cleanup_test_dir(&test_dir);
+    }
+
+    #[test]
+    fn test_resolve_path_traversal_blocked() {
+        let test_dir = setup_test_dir();
+        let subdir = test_dir.join("subdir");
+        stdfs::create_dir_all(&subdir).unwrap();
+
+        // Handler root is subdir, so trying to access parent should fail
+        let handler = M87SftpHandler::new(subdir.clone());
+
+        // Try to escape via ..
+        let result = handler.resolve_path("../");
+        assert!(
+            result.is_err(),
+            "Path traversal should be blocked, got: {:?}",
+            result
+        );
+
+        cleanup_test_dir(&test_dir);
+    }
+
+    #[test]
+    fn test_resolve_path_dot_components() {
+        let test_dir = setup_test_dir();
+        let subdir = test_dir.join("a").join("b");
+        stdfs::create_dir_all(&subdir).unwrap();
+
+        let handler = M87SftpHandler::new(test_dir.clone());
+
+        // Path with . and .. that resolves within root
+        let path_with_dots = format!("{}/a/./b/../b", test_dir.display());
+        let resolved = handler.resolve_path(&path_with_dots).unwrap();
+
+        // Should resolve to test_dir/a/b
+        assert_eq!(resolved, subdir);
+
+        cleanup_test_dir(&test_dir);
+    }
+
+    #[test]
+    fn test_resolve_path_nonexistent_file_in_existing_dir() {
+        let test_dir = setup_test_dir();
+        stdfs::create_dir_all(&test_dir).unwrap();
+
+        let handler = M87SftpHandler::new(test_dir.clone());
+
+        // File doesn't exist but parent does - should succeed for file creation
+        let new_file_path = format!("{}/newfile.txt", test_dir.display());
+        let resolved = handler.resolve_path(&new_file_path).unwrap();
+
+        assert_eq!(resolved, test_dir.join("newfile.txt"));
+
+        cleanup_test_dir(&test_dir);
+    }
+
+    #[test]
+    fn test_next_handle_uniqueness() {
+        let h1 = M87SftpHandler::next_handle();
+        let h2 = M87SftpHandler::next_handle();
+        let h3 = M87SftpHandler::next_handle();
+
+        assert_ne!(h1, h2);
+        assert_ne!(h2, h3);
+        assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_handler_default() {
+        let handler = M87SftpHandler::default();
+        assert_eq!(handler.root, PathBuf::from("/"));
+    }
+}

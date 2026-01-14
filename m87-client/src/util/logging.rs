@@ -112,7 +112,7 @@ pub fn init_tracing_with_log_layer(
 
     match (cli_mode, verbose) {
         (_, true) => {
-            // Agent / daemon normal mode
+            // Runtime / daemon normal mode
             tracing_subscriber::registry()
                 .with(filter)
                 .with(tracing_fmt::layer())
@@ -127,7 +127,7 @@ pub fn init_tracing_with_log_layer(
                 .init();
         }
         (false, false) => {
-            // Agent / daemon normal mode
+            // Runtime / daemon normal mode
             tracing_subscriber::registry()
                 .with(filter)
                 .with(tracing_fmt::layer())
@@ -177,5 +177,92 @@ pub fn send_log_event(event: UiEvent) {
         if let Err(err) = tx.send(event) {
             eprintln!("Failed to send log event: {}", err);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_human_time_zero() {
+        assert_eq!(human_time(0), "00:00:00");
+    }
+
+    #[test]
+    fn test_human_time_full_day() {
+        // 23:59:59 = 23*3600 + 59*60 + 59 = 86399
+        assert_eq!(human_time(86399), "23:59:59");
+    }
+
+    #[test]
+    fn test_human_time_wraps_at_day() {
+        // 86400 seconds = 1 day, should wrap to 00:00:00
+        assert_eq!(human_time(86400), "00:00:00");
+    }
+
+    #[test]
+    fn test_human_time_hours_minutes_seconds() {
+        // 1 hour + 1 minute + 1 second = 3661
+        assert_eq!(human_time(3661), "01:01:01");
+    }
+
+    #[test]
+    fn test_human_time_only_seconds() {
+        assert_eq!(human_time(45), "00:00:45");
+    }
+
+    #[test]
+    fn test_human_time_only_minutes() {
+        assert_eq!(human_time(300), "00:05:00");
+    }
+
+    #[test]
+    fn test_timestamp_hms_format() {
+        let ts = timestamp_hms();
+        // Should match HH:MM:SS format
+        assert_eq!(ts.len(), 8);
+        assert_eq!(&ts[2..3], ":");
+        assert_eq!(&ts[5..6], ":");
+    }
+
+    #[test]
+    fn test_is_loading_exact() {
+        assert!(LogBroadcastLayer::is_loading("[loading]"));
+    }
+
+    #[test]
+    fn test_is_loading_with_whitespace() {
+        assert!(LogBroadcastLayer::is_loading("  [loading]  "));
+    }
+
+    #[test]
+    fn test_is_loading_false_without_brackets() {
+        assert!(!LogBroadcastLayer::is_loading("loading"));
+        assert!(!LogBroadcastLayer::is_loading("[load]"));
+        assert!(!LogBroadcastLayer::is_loading(""));
+    }
+
+    #[test]
+    fn test_is_done_extracts_text() {
+        assert_eq!(
+            LogBroadcastLayer::is_done("[done] success"),
+            Some("success")
+        );
+    }
+
+    #[test]
+    fn test_is_done_with_whitespace() {
+        assert_eq!(
+            LogBroadcastLayer::is_done("  [done]  text here  "),
+            Some("text here")
+        );
+    }
+
+    #[test]
+    fn test_is_done_returns_none() {
+        assert_eq!(LogBroadcastLayer::is_done("[loading]"), None);
+        assert_eq!(LogBroadcastLayer::is_done("done"), None);
+        assert_eq!(LogBroadcastLayer::is_done(""), None);
     }
 }

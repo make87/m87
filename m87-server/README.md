@@ -4,7 +4,7 @@ Backend server for [make87](https://make87.com).
 
 ## Overview
 
-m87-server handles device registration, authentication, and tunnel relay. It connects m87 agents on edge devices to m87 CLI users.
+m87-server handles device registration, authentication, and tunnel relay. It connects m87 runtimes on edge devices to m87 CLI users.
 
 Can be self-hosted for on-premise deployments or used with the make87 platform.
 
@@ -36,12 +36,12 @@ Environment variables (see `docker-compose.yml`):
 | `OAUTH_ISSUER`   | `https://auth.make87.com/` | OAuth provider URL                    |
 | `OAUTH_AUDIENCE` | `https://auth.make87.com`  | OAuth audience                        |
 | `FORWARD_SECRET` | —                          | Secret for signing tunnel tokens      |
-| `UNIFIED_PORT`   | `8084`                     | Agent/tunnel port (expose as 443)     |
+| `UNIFIED_PORT`   | `8084`                     | Runtime/tunnel port (expose as 443)   |
 | `ADMIN_EMAILS`   | —                          | Comma-separated admin email addresses |
 
 ## Ports
 
-- **443 → 8084**: Agent connections and tunnel traffic (TLS)
+- **443 → 8084**: Runtime connections and tunnel traffic (TLS)
 - **8085**: REST API
 
 ## Building

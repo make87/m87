@@ -35,6 +35,41 @@ impl UiEvent {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_as_line_from_line() {
+        let event = UiEvent::Line("hello world".to_string());
+        assert_eq!(event.as_line(), Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_as_line_from_done_ok() {
+        let event = UiEvent::Done {
+            ok: true,
+            text: "success".to_string(),
+        };
+        assert_eq!(event.as_line(), Some("✓ success".to_string()));
+    }
+
+    #[test]
+    fn test_as_line_from_done_error() {
+        let event = UiEvent::Done {
+            ok: false,
+            text: "failed".to_string(),
+        };
+        assert_eq!(event.as_line(), Some("✗ failed".to_string()));
+    }
+
+    #[test]
+    fn test_as_line_from_loading_start() {
+        let event = UiEvent::LoadingStart;
+        assert_eq!(event.as_line(), None);
+    }
+}
+
 pub async fn run_renderer(mut rx: broadcast::Receiver<UiEvent>) {
     let mut loading = false;
     let mut current = String::new();

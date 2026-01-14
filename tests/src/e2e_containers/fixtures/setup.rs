@@ -9,7 +9,7 @@
 use crate::e2e_containers::containers::E2EInfra;
 use crate::e2e_containers::helpers::{exec_shell, E2EError, SniSetup};
 
-use super::{AgentRunner, DeviceRegistration, RegisteredDevice};
+use super::{RuntimeRunner, DeviceRegistration, RegisteredDevice};
 
 /// Standard test setup with registered device and running agent
 ///
@@ -43,13 +43,13 @@ impl TestSetup {
         // 3. Setup SNI tunneling
         tracing::info!("Setting up SNI...");
         let sni = SniSetup::from_cli(&infra.cli).await?;
-        sni.setup_both(&infra.agent, &infra.cli, &device.short_id)
+        sni.setup_both(&infra.runtime, &infra.cli, &device.short_id)
             .await?;
 
         // 4. Start agent with control tunnel
         tracing::info!("Starting agent run...");
-        let agent = AgentRunner::new(&infra);
-        agent.start_with_tunnel().await?;
+        let runtime = RuntimeRunner::new(&infra);
+        runtime.start_with_tunnel().await?;
 
         // 5. Wait for SSH/SFTP to be ready
         tracing::info!("Waiting for agent SSH server to be ready...");
@@ -80,7 +80,7 @@ impl TestSetup {
     /// Create a file on the agent with given content
     pub async fn create_agent_file(&self, path: &str, content: &str) -> Result<(), E2EError> {
         exec_shell(
-            &self.infra.agent,
+            &self.infra.runtime,
             &format!("echo '{}' > {}", content, path),
         )
         .await?;
@@ -89,13 +89,13 @@ impl TestSetup {
 
     /// Read a file from the agent
     pub async fn read_agent_file(&self, path: &str) -> Result<String, E2EError> {
-        exec_shell(&self.infra.agent, &format!("cat {}", path)).await
+        exec_shell(&self.infra.runtime, &format!("cat {}", path)).await
     }
 
     /// Check if a file exists on the agent
     pub async fn agent_file_exists(&self, path: &str) -> Result<bool, E2EError> {
         let result = exec_shell(
-            &self.infra.agent,
+            &self.infra.runtime,
             &format!("test -f {} && echo exists || echo missing", path),
         )
         .await?;
@@ -104,17 +104,17 @@ impl TestSetup {
 
     /// Create a directory on the agent
     pub async fn create_agent_dir(&self, path: &str) -> Result<(), E2EError> {
-        exec_shell(&self.infra.agent, &format!("mkdir -p {}", path)).await?;
+        exec_shell(&self.infra.runtime, &format!("mkdir -p {}", path)).await?;
         Ok(())
     }
 
     /// List files in an agent directory
     pub async fn list_agent_dir(&self, path: &str) -> Result<String, E2EError> {
-        exec_shell(&self.infra.agent, &format!("ls -la {}", path)).await
+        exec_shell(&self.infra.runtime, &format!("ls -la {}", path)).await
     }
 
     /// Get agent run log
     pub async fn get_agent_log(&self) -> Result<String, E2EError> {
-        exec_shell(&self.infra.agent, "cat /tmp/agent-run.log 2>/dev/null || echo 'No log file'").await
+        exec_shell(&self.infra.runtime, "cat /tmp/agent-run.log 2>/dev/null || echo 'No log file'").await
     }
 }

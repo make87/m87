@@ -1,16 +1,16 @@
 use anyhow::{Context, Result, anyhow};
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use m87_shared::device::DeviceSystemInfo;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use std::time::Duration;
 use tracing::info;
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 mod device;
 mod oauth;
 
@@ -184,8 +184,8 @@ impl AuthManager {
         Ok(())
     }
 
-    // Agent-specific: Device registration
-    #[cfg(feature = "agent")]
+    // Runtime-specific: Device registration
+    #[cfg(feature = "runtime")]
     pub async fn login_device(
         auth_handler: &mut device::DeviceAuthRequestHandler,
         timeout: Duration,
@@ -243,7 +243,7 @@ impl AuthManager {
     }
 }
 
-// Manager-specific: OAuth2 login for device management
+// m87 command line: OAuth2 login for device management
 pub async fn login_cli() -> Result<()> {
     if AuthManager::has_cli_credentials()? {
         info!("Already logged in");
@@ -268,8 +268,8 @@ async fn update_server_urls() -> Result<()> {
     Ok(())
 }
 
-// Agent-specific: Device registration for agents
-#[cfg(feature = "agent")]
+// Runtime-specific: Device registration for runtimes
+#[cfg(feature = "runtime")]
 pub async fn register_device(
     owner_scope: Option<String>,
     device_system_info: DeviceSystemInfo,
@@ -291,7 +291,7 @@ pub async fn register_device(
         })
         .or_else(|| std::env::var(OWNER_REFERENCE_ENV_VAR).ok());
 
-    let mut api_url = config.agent_server_url.clone();
+    let mut api_url = config.runtime_server_url.clone();
 
     // ------------------------------------------------------------
     // If either value is missing → call registration
@@ -308,8 +308,8 @@ pub async fn register_device(
         api_url = Some(resolved_api.clone());
         owner_scope = Some(resolved_owner.clone());
 
-        if config.agent_server_url.is_none() {
-            config.agent_server_url = Some(resolved_api);
+        if config.runtime_server_url.is_none() {
+            config.runtime_server_url = Some(resolved_api);
         }
         if config.owner_reference.is_none() {
             config.owner_reference = Some(resolved_owner);
@@ -359,13 +359,13 @@ pub async fn status() -> Result<()> {
     Ok(())
 }
 
-// Manager-specific: Logout from CLI
+// m87 command line: Logout
 pub async fn logout_cli() -> Result<()> {
     AuthManager::delete_cli_credentials().await
 }
 
-// Agent-specific: Logout device credentials
-#[cfg(feature = "agent")]
+// Runtime-specific: Logout device credentials
+#[cfg(feature = "runtime")]
 pub async fn logout_device() -> Result<()> {
     AuthManager::delete_device_credentials().await
 }
@@ -441,8 +441,56 @@ async fn resolve_request_server(request_id: &str) -> Result<(String, server::Dev
 
     found.ok_or_else(|| {
         anyhow::anyhow!(
-            "Auth request '{}' not found on any manager server",
+            "Auth request '{}' not found on any server",
             request_id
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_api_config_default_credentials_path() {
+        let path = APIConfig::default_credentials_path().unwrap();
+        let path_str = path.to_string_lossy();
+        assert!(path_str.ends_with("m87/credentials.json"));
+    }
+
+    #[test]
+    fn test_api_key_serialization() {
+        let api_key = APIKey {
+            api_key: "test_api_key_12345".to_string(),
+        };
+
+        let json = serde_json::to_string(&api_key).unwrap();
+        let deserialized: APIKey = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.api_key, "test_api_key_12345");
+    }
+
+    #[test]
+    fn test_credentials_api_key_variant() {
+        let credentials = Credentials::APIKey(APIKey {
+            api_key: "my_secret_key".to_string(),
+        });
+
+        let json = serde_json::to_string(&credentials).unwrap();
+        let deserialized: Credentials = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            Credentials::APIKey(key) => {
+                assert_eq!(key.api_key, "my_secret_key");
+            }
+            _ => panic!("Expected APIKey variant"),
+        }
+    }
+
+    #[test]
+    fn test_api_config_default() {
+        let config = APIConfig::default();
+        assert!(config.credentials.is_none());
+        assert!(config.device_credentials.is_none());
+    }
 }

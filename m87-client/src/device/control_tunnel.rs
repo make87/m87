@@ -1,19 +1,19 @@
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use std::sync::Arc;
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use anyhow::Context;
 use anyhow::Result;
 
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::error;
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use tracing::{debug, warn};
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use crate::{auth::AuthManager, config::Config, device::deployment_manager::DeploymentManager};
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 pub use m87_shared::heartbeat::{HeartbeatRequest, HeartbeatResponse};
 
 use crate::util::system_info::get_system_info;
@@ -24,15 +24,17 @@ pub struct HeartbeatState {
     first_heartbeat: bool,
 }
 
-// Agent-specific: Maintain persistent control tunnel connection
-#[cfg(feature = "agent")]
+// Runtime-specific: Maintain persistent control tunnel connection
+#[cfg(feature = "runtime")]
 pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Result<()> {
     use std::sync::Arc;
 
     use crate::streams::quic::get_quic_connection;
     use crate::streams::udp_manager::UdpChannelManager;
     use bytes::{BufMut, Bytes, BytesMut};
-    use m87_shared::device::short_device_id;
+    use m87_shared::{
+        config::DeviceClientConfig, deploy_spec::build_instruction_hash, device::short_device_id,
+    };
     use quinn::Connection;
     use tokio::sync::watch;
 
@@ -43,7 +45,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
     let control_host = format!(
         "control-{}.{}",
         short_id,
-        config.get_agent_server_hostname()
+        config.get_runtime_server_hostname()
     );
     debug!("Connecting QUIC control tunnel to {}", control_host);
 
@@ -65,9 +67,17 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
     let (mut send, mut recv) = quic_conn.open_bi().await?;
     send.write_all(&[0x01]).await?; // send to make sure the server does not timeout waiting
     // let mut recv = quic_conn.accept_uni().await?;
+    //
+    let current_deploy_hash = DeploymentManager::get_current_deploy_hash();
+    let config_hash = DeviceClientConfig {
+        heartbeat_interval_secs: Some(config.heartbeat_interval_secs as u32),
+    }
+    .get_hash()
+    .to_string();
+    let last_deploy_hash = build_instruction_hash(&current_deploy_hash, &config_hash);
 
     let state = Arc::new(tokio::sync::Mutex::new(HeartbeatState {
-        last_instruction_hash: "".to_string(),
+        last_instruction_hash: last_deploy_hash,
         heartbeat_interval: config.heartbeat_interval_secs,
         first_heartbeat: true,
     }));

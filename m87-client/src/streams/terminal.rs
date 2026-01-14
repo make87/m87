@@ -237,3 +237,103 @@ fn detect_shell() -> String {
     }
     "/bin/sh".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_shell_returns_valid_path() {
+        let shell = detect_shell();
+        assert!(!shell.is_empty());
+
+        #[cfg(unix)]
+        {
+            // On Unix, should be an absolute path
+            assert!(shell.starts_with('/'));
+            // Should point to a real shell
+            assert!(Path::new(&shell).exists());
+        }
+
+        #[cfg(windows)]
+        {
+            assert_eq!(shell, "powershell.exe");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_detect_shell_fallback_exists() {
+        // At least /bin/sh should exist on all Unix systems
+        let shell = detect_shell();
+        assert!(Path::new(&shell).exists());
+    }
+
+    #[test]
+    fn test_detect_shell_common_shells() {
+        let shell = detect_shell();
+        // Should be one of the common shells
+        let common_shells = [
+            "/bin/bash",
+            "/bin/zsh",
+            "/usr/bin/fish",
+            "/bin/sh",
+            "powershell.exe",
+        ];
+
+        // Either from env var or one of the common shells
+        let is_common = common_shells.iter().any(|s| shell.ends_with(s) || *s == shell);
+        let from_env = std::env::var("SHELL").is_ok();
+
+        assert!(is_common || from_env);
+    }
+
+    #[test]
+    fn test_pty_size_parsing() {
+        // Test the PTY size parsing logic used in handle_terminal_io
+        // Frame format: [0xFF, rows_high, rows_low, cols_high, cols_low]
+        let buf: [u8; 5] = [0xFF, 0x00, 0x18, 0x00, 0x50]; // 24 rows, 80 cols
+
+        let (rows, cols) = if buf[0] == 0xFF {
+            (
+                u16::from_be_bytes([buf[1], buf[2]]),
+                u16::from_be_bytes([buf[3], buf[4]]),
+            )
+        } else {
+            (24, 80)
+        };
+
+        assert_eq!(rows, 24);
+        assert_eq!(cols, 80);
+    }
+
+    #[test]
+    fn test_pty_size_parsing_large_terminal() {
+        // Test larger terminal size
+        let buf: [u8; 5] = [0xFF, 0x00, 0x64, 0x01, 0x00]; // 100 rows, 256 cols
+
+        let rows = u16::from_be_bytes([buf[1], buf[2]]);
+        let cols = u16::from_be_bytes([buf[3], buf[4]]);
+
+        assert_eq!(rows, 100);
+        assert_eq!(cols, 256);
+    }
+
+    #[test]
+    fn test_pty_size_parsing_default_on_invalid() {
+        // If first byte is not 0xFF, use defaults
+        let buf: [u8; 5] = [0x00, 0x00, 0x00, 0x00, 0x00];
+
+        let (rows, cols) = if buf[0] == 0xFF {
+            (
+                u16::from_be_bytes([buf[1], buf[2]]),
+                u16::from_be_bytes([buf[3], buf[4]]),
+            )
+        } else {
+            (24, 80)
+        };
+
+        assert_eq!(rows, 24);
+        assert_eq!(cols, 80);
+    }
+}

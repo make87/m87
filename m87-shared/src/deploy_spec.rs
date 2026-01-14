@@ -79,8 +79,13 @@ impl DeploymentRevision {
             .collect()
     }
 
-    pub fn get_job(&self, run_id: &str) -> Option<RunSpec> {
-        let res = self.jobs.iter().find(|u| u.get_hash() == run_id);
+    pub fn get_job_by_hash(&self, run_hash: &str) -> Option<RunSpec> {
+        let res = self.jobs.iter().find(|u| u.get_hash() == run_hash);
+        res.cloned()
+    }
+
+    pub fn get_job_by_id(&self, run_id: &str) -> Option<RunSpec> {
+        let res = self.jobs.iter().find(|u| u.id == run_id);
         res.cloned()
     }
 
@@ -538,7 +543,7 @@ pub struct RunState {
     pub revision_id: String,
     pub healthy: Option<bool>,
     pub alive: Option<bool>,
-    pub report_time: u32,
+    pub report_time: u64,
     #[serde(default)]
     pub log_tail: Option<String>,
 }
@@ -666,4 +671,8 @@ pub mod option_duration_human {
     {
         Ok(Some(duration_human::deserialize(d)?))
     }
+}
+
+pub fn build_instruction_hash(deploy_hash: &str, config_hash: &str) -> String {
+    format!("{}-{}", deploy_hash, config_hash)
 }

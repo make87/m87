@@ -73,7 +73,7 @@ async fn test_devices_reject() -> Result<(), E2EError> {
 
     // Step 1: Start agent login to create a pending auth request
     infra
-        .start_agent_login()
+        .start_runtime_login()
         .await
         .map_err(|e| E2EError::Exec(e.to_string()))?;
     tracing::info!("Agent login started");

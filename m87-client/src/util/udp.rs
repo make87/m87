@@ -56,3 +56,74 @@ pub fn decode_socket_addr(buf: &[u8]) -> Option<(SocketAddr, usize)> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ipv4_roundtrip() {
+        let addr: SocketAddr = "192.168.1.100:8080".parse().unwrap();
+        let mut buf = BytesMut::new();
+        encode_socket_addr(&mut buf, addr);
+
+        let (decoded, len) = decode_socket_addr(&buf).unwrap();
+        assert_eq!(decoded, addr);
+        assert_eq!(len, 7); // 1 (family) + 2 (port) + 4 (IPv4)
+    }
+
+    #[test]
+    fn test_ipv4_localhost() {
+        let addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let mut buf = BytesMut::new();
+        encode_socket_addr(&mut buf, addr);
+
+        let (decoded, _) = decode_socket_addr(&buf).unwrap();
+        assert_eq!(decoded, addr);
+    }
+
+    #[test]
+    fn test_ipv6_roundtrip() {
+        let addr: SocketAddr = "[2001:db8::1]:9000".parse().unwrap();
+        let mut buf = BytesMut::new();
+        encode_socket_addr(&mut buf, addr);
+
+        let (decoded, len) = decode_socket_addr(&buf).unwrap();
+        assert_eq!(decoded, addr);
+        assert_eq!(len, 19); // 1 (family) + 2 (port) + 16 (IPv6)
+    }
+
+    #[test]
+    fn test_ipv6_localhost() {
+        let addr: SocketAddr = "[::1]:80".parse().unwrap();
+        let mut buf = BytesMut::new();
+        encode_socket_addr(&mut buf, addr);
+
+        let (decoded, _) = decode_socket_addr(&buf).unwrap();
+        assert_eq!(decoded, addr);
+    }
+
+    #[test]
+    fn test_decode_truncated_buffer() {
+        // Too short for header
+        assert!(decode_socket_addr(&[]).is_none());
+        assert!(decode_socket_addr(&[4]).is_none());
+        assert!(decode_socket_addr(&[4, 0]).is_none());
+
+        // IPv4 header but missing IP bytes
+        assert!(decode_socket_addr(&[4, 0, 80, 127]).is_none());
+
+        // IPv6 header but missing IP bytes
+        assert!(decode_socket_addr(&[6, 0, 80, 0, 0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn test_decode_invalid_family() {
+        // Family byte is neither 4 nor 6
+        let buf = [0, 0, 80, 127, 0, 0, 1];
+        assert!(decode_socket_addr(&buf).is_none());
+
+        let buf = [5, 0, 80, 127, 0, 0, 1];
+        assert!(decode_socket_addr(&buf).is_none());
+    }
+}

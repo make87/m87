@@ -106,3 +106,71 @@ pub async fn acquire_metrics_task(name: &str) -> (Arc<SharedTask>, SharedReceive
     let rx = SharedReceiver::new(task.clone(), task.tx.subscribe());
     (task.clone(), rx)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn make_task() -> (Arc<SharedTask>, watch::Receiver<bool>) {
+        let (tx, _) = broadcast::channel::<String>(16);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = Arc::new(SharedTask::new("test".to_string(), tx, shutdown_tx));
+        (task, shutdown_rx)
+    }
+
+    #[test]
+    fn test_shared_task_inc() {
+        let (task, _shutdown_rx) = make_task();
+
+        assert_eq!(task.ref_count.load(Ordering::SeqCst), 0);
+        task.inc();
+        assert_eq!(task.ref_count.load(Ordering::SeqCst), 1);
+        task.inc();
+        assert_eq!(task.ref_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_shared_task_dec_not_zero() {
+        let (task, shutdown_rx) = make_task();
+
+        task.inc();
+        task.inc();
+        assert_eq!(task.ref_count.load(Ordering::SeqCst), 2);
+
+        task.dec_or_shutdown();
+        assert_eq!(task.ref_count.load(Ordering::SeqCst), 1);
+
+        // Shutdown should NOT have been sent
+        assert!(!*shutdown_rx.borrow());
+    }
+
+    #[test]
+    fn test_shared_task_dec_to_zero_sends_shutdown() {
+        let (task, shutdown_rx) = make_task();
+
+        task.inc();
+        assert_eq!(task.ref_count.load(Ordering::SeqCst), 1);
+
+        // Decrement to 0 should trigger shutdown
+        task.dec_or_shutdown();
+        assert_eq!(task.ref_count.load(Ordering::SeqCst), 0);
+
+        // Shutdown should have been sent
+        assert!(*shutdown_rx.borrow());
+    }
+
+    #[test]
+    fn test_shared_receiver_inner_mut() {
+        let (tx, _) = broadcast::channel::<String>(16);
+        let (shutdown_tx, _) = watch::channel(false);
+        let task = Arc::new(SharedTask::new("test".to_string(), tx.clone(), shutdown_tx));
+        task.inc();
+
+        let rx = tx.subscribe();
+        let mut receiver = SharedReceiver::new(task, rx);
+
+        // Just verify we can access the inner receiver
+        let _inner = receiver.inner_mut();
+    }
+}

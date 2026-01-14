@@ -1,10 +1,10 @@
 # Log Streaming
 
-Stream m87 agent logs from remote devices.
+Stream m87 runtime logs from remote devices.
 
 ## Overview
 
-`m87 <device> logs` streams logs from the m87 agent running on the remote device. This shows agent activity and diagnostics, not general system logs.
+`m87 <device> logs` streams logs from the m87 runtime running on the remote device. This shows runtime activity and diagnostics, not general system logs.
 
 ## Basic Usage
 
@@ -45,26 +45,26 @@ m87 rpi logs -f
 # Press Ctrl+C to stop
 ```
 
-### Debug Agent Issues
+### Debug Runtime Issues
 ```bash
-# Follow agent logs while troubleshooting
+# Follow runtime logs while troubleshooting
 m87 rpi logs -f
 
-# Check for recent agent errors
+# Check for recent runtime errors
 m87 rpi logs --tail 200 | grep -i error
 ```
 
 ## Use Cases
 
-### Monitor Agent Activity
+### Monitor Runtime Activity
 ```bash
-# Watch agent startup and connections
+# Watch runtime startup and connections
 m87 rpi logs -f --tail 50
 ```
 
 ### Diagnose Connection Problems
 ```bash
-# Check agent logs for connectivity issues
+# Check runtime logs for connectivity issues
 m87 rpi logs --tail 100
 ```
 

@@ -2,7 +2,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use m87_shared::deploy_spec::DeploymentRevision;
+use m87_shared::deploy_spec::{DeploymentRevision, build_instruction_hash};
 use m87_shared::device::DeviceStatus;
 use mongodb::bson::{DateTime, Document, doc, oid::ObjectId};
 
@@ -247,7 +247,8 @@ impl DeviceDoc {
             }
         }
 
-        let target_hash = format!("{}-{}", self.last_deployment_hash, self.last_config_hash);
+        let target_hash =
+            build_instruction_hash(&self.last_deployment_hash, &self.last_config_hash);
         if payload.last_instruction_hash == target_hash {
             return Ok(HeartbeatResponse {
                 up_to_date: true,
@@ -288,7 +289,7 @@ impl DeviceDoc {
         let resp = HeartbeatResponse {
             up_to_date: false,
             config: Some(self.config.clone()),
-            instruction_hash: format!("{}-{}", new_deployment_hash, config_hash,),
+            instruction_hash: build_instruction_hash(&new_deployment_hash, &config_hash),
             target_revision,
         };
         Ok(resp)

@@ -6,14 +6,14 @@ CLI for [make87](https://make87.com).
 
 m87 connects edge devices to the make87 platform and provides remote access to them.
 
-**On edge devices**: Run the m87 agent to register the device and accept incoming connections.
+**On edge devices**: Run the m87 runtime to register the device and accept incoming connections.
 
 **From your workstation**: Use m87 to access registered devices — shell, port forwarding, file transfer, container
 management.
 
 ## Requirements
 
-- Linux (amd64, arm64) — CLI and agent
+- Linux (amd64, arm64) — CLI and runtime
 - macOS (amd64, arm64) — CLI only
 
 ## Install
@@ -32,7 +32,7 @@ Or download from [releases](https://github.com/make87/make87/releases).
 m87 login                      # authenticate via browser
 m87 devices list               # list accessible devices
 m87 <device> shell             # open shell on device
-m87 <device> tunnel 8080       # forward port 8080
+m87 <device> forward 8080      # forward port 8080
 ```
 
 ## Commands
@@ -40,22 +40,30 @@ m87 <device> tunnel 8080       # forward port 8080
 ### Remote Device Access
 
 ```
+m87 <device> status            # status of the device (crashes, health and incidents)
 m87 <device> shell             # interactive shell
 m87 <device> exec -- <cmd>     # run command
-m87 <device> tunnel <ports>    # port forwarding (see below)
+m87 <device> forward <ports>   # port forwarding (see below)
 m87 <device> docker <args>     # docker passthrough
-m87 <device> logs              # logs from the agent and observed containers
+m87 <device> logs              # logs from the runtime and observed containers
 m87 <device> stats             # system metrics
 m87 <device> serial <name>     # serial mount forwarding
+m87 <device> audit --details   # audit logs on who interacted with the device
 ```
 
-### Remote Device Logs
+### Async Deployment
+
+In case your devices are not always online, you can register jobs
+to be executed when the device comes online.
+With this you can deploy arbitrary runtimes like docker systemd servers etc
+or observe services and get notified upon events.
 
 ```
-m87 <device> observe docker <container_name>             # make the agent observe the container logs
-m87 <device> logs                                        # logs will now also show <container_name>
-m87 <device> observe docker <container_name> -r          # remove the container from the list of observed containers
-
+m87 <device> deploy ./my-compose.yml             # register a docker compsoe file to be run and observed (Auto converted by our cli)
+m87 <device> undeploy my-compose                 # remove the compose spec fomr the current deployment
+m87 <device> deploy ./custom_run_spec.yml        # register a custom run spec. See docs for schema
+m87 <device> deployment status --logs            # get the status and logs of the currently active deployment
+m87 <device> deployment show --yaml              # show the yaml spec of the currently active deployment
 ```
 
 ### File Transfer
@@ -84,38 +92,40 @@ m87 devices approve <device>
 m87 update
 ```
 
-### Running as Agent (Linux)
+### Running as Runtime (Linux)
 
 To make a device remotely accessible:
 
-```
-m87 agent login           # register device with make87
-m87 agent run             # run agent (blocking)
-```
-
-Or use systemd:
-
-```
-sudo m87 agent enable --now    # install and start service
-sudo m87 agent status
-sudo m87 agent stop
+```sh
+m87 runtime run --email you@example.com   # register and run runtime (waits for approval)
 ```
 
-`sudo` is required to manage systemd services. The agent itself runs as your user, not root.
+Then approve the device from your workstation with `m87 devices approve <request-id>`.
+
+#### Systemd Service
+
+```sh
+m87 runtime enable --now    # install, enable and start (prompts for sudo)
+m87 runtime status          # show service status
+m87 runtime stop            # stop the service
+m87 runtime disable --now   # disable and stop
+```
+
+The CLI automatically handles privilege escalation invoking `sudo`. The runtime service runs as your user, not root.
 
 ## Port Forwarding
 
 Format: `[local:]remote[/protocol]`
 
 ```sh
-m87 <device> tunnel 8080              # localhost:8080 → device:8080
-m87 <device> tunnel 3000:8080         # localhost:3000 → device:8080
-m87 <device> tunnel 192.168.1.5:80    # forward to host on device's LAN
-m87 <device> tunnel 8080/udp          # UDP (default: tcp)
-m87 <device> tunnel 8080 9090 3000    # multiple ports
+m87 <device> forward 8080              # localhost:8080 → device:8080
+m87 <device> forward 3000:8080         # localhost:3000 → device:8080
+m87 <device> forward 192.168.1.5:80    # forward to host on device's LAN
+m87 <device> forward 8080/udp          # UDP (default: tcp)
+m87 <device> forward 8080 9090 3000    # multiple ports
 ```
 
-See [examples/features/tunnels](./examples/features/tunnels/) for more.
+See [examples/features/forward](./examples/features/forward/) for more.
 
 ## Building
 
@@ -131,7 +141,7 @@ Binary: `target/release/m87`
 
 Build configuration is auto-detected by OS:
 
-- Linux: full functionality (CLI + agent)
+- Linux: full functionality (CLI + runtime)
 - macOS: CLI only
 
 ## Documentation

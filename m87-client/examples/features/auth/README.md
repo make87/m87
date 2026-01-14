@@ -5,36 +5,36 @@ Authenticate with the make87 platform.
 ## Overview
 
 m87 supports two authentication modes:
-- **Manager login** (default): OAuth2 browser flow for managing devices from your computer
-- **Agent registration** (Linux only): Headless device registration for autonomous agents
+- **Login** (default): OAuth2 browser flow for managing devices from your computer
+- **Runtime registration** (Linux only): Headless device registration for autonomous runtimes
 
-Nothing prevents you from running an agent and a manager on the same device.
+Nothing prevents you from running a runtime and using m87 command line on the same device.
 
-## Manager Login
+## Login
 
 ```bash
 # Opens browser for OAuth2 authentication
 m87 login
 ```
 
-After authentication, your CLI is authorized to manage devices across your organization.
+After authentication, m87 command line is authorized to manage devices across your organization.
 
-## Agent Registration (Linux)
+## Runtime Registration (Linux)
 
-Register a device as an agent to enable remote management:
+Register a device as a runtime to enable remote management:
 
 ```bash
-# Register under your account (prompts for org selection)
-m87 login --agent
+# Register and run the runtime (prompts for org selection)
+m87 runtime run
 
 # Register under specific organization
-m87 login --agent --org-id <org-id>
+m87 runtime run --org-id <org-id>
 
 # Register under specific user email
-m87 login --agent --email admin@example.com
+m87 runtime run --email admin@example.com
 ```
 
-After registration, the device appears in `m87 devices list` with status "pending" until approved by a manager.
+After registration, the device appears in `m87 devices list` with status "pending" until approved.
 
 ## Logout
 
@@ -43,30 +43,29 @@ After registration, the device appears in `m87 devices list` with status "pendin
 m87 logout
 ```
 
-This clears both manager and agent credentials from the device.
+This clears all credentials from the device.
 
 ## Flags
 
 | Flag | Description |
 |------|-------------|
-| `--agent` | Register device as agent (Linux only) |
-| `--org-id <id>` | Organization ID for agent registration |
-| `--email <email>` | User email for agent registration |
+| `--org-id <id>` | Organization ID for runtime registration |
+| `--email <email>` | User email for runtime registration |
 
 ## Workflow
 
-### Manager Setup
+### Workstation Setup
 ```bash
-m87 login                    # Authenticate as manager
+m87 login                    # Authenticate
 m87 devices list             # View all devices
-m87 devices approve rpi      # Approve pending agent
+m87 devices approve rpi      # Approve pending runtime
 ```
 
-### Agent Setup (on the device)
+### Runtime Setup (on the device)
 ```bash
-m87 login --agent            # Register this device
-# Wait for manager approval
-m87 agent enable --now       # Start agent service and persist after boot
+m87 runtime run              # Register and run this device
+# Wait for approval
+m87 runtime enable --now     # Install, enable and start service (prompts for sudo)
 ```
 
 ## See Also

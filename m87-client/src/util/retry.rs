@@ -41,3 +41,40 @@ macro_rules! retry_async {
         result
     }};
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    #[test]
+    fn test_retry_immediate_success() {
+        let result: Result<i32, &str> = retry!(3, 1, Ok(42));
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn test_retry_succeeds_after_failure() {
+        let counter = Cell::new(0);
+        let result: Result<i32, &str> = retry!(3, 1, {
+            counter.set(counter.get() + 1);
+            if counter.get() < 2 {
+                Err("not yet")
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(counter.get(), 2);
+    }
+
+    #[test]
+    fn test_retry_exhausts_attempts() {
+        let counter = Cell::new(0);
+        let result: Result<i32, &str> = retry!(3, 1, {
+            counter.set(counter.get() + 1);
+            Err("always fail")
+        });
+        assert!(result.is_err());
+        assert_eq!(counter.get(), 3);
+    }
+}

@@ -60,4 +60,79 @@ impl SubprocessBuilder {
 
         std::process::exit(status.code().unwrap_or(1));
     }
+
+    #[cfg(test)]
+    pub(crate) fn get_program(&self) -> &str {
+        &self.program
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_args(&self) -> &[String] {
+        &self.args
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_env(&self) -> &[(String, String)] {
+        &self.env
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_builder_new() {
+        let builder = SubprocessBuilder::new("my-program");
+        assert_eq!(builder.get_program(), "my-program");
+        assert!(builder.get_args().is_empty());
+        assert!(builder.get_env().is_empty());
+    }
+
+    #[test]
+    fn test_builder_new_from_string() {
+        let builder = SubprocessBuilder::new(String::from("another-program"));
+        assert_eq!(builder.get_program(), "another-program");
+    }
+
+    #[test]
+    fn test_builder_args() {
+        let builder = SubprocessBuilder::new("cmd").args(["--flag", "-v", "value"]);
+        assert_eq!(builder.get_args(), &["--flag", "-v", "value"]);
+    }
+
+    #[test]
+    fn test_builder_args_from_vec() {
+        let args = vec!["arg1".to_string(), "arg2".to_string()];
+        let builder = SubprocessBuilder::new("cmd").args(args);
+        assert_eq!(builder.get_args(), &["arg1", "arg2"]);
+    }
+
+    #[test]
+    fn test_builder_env_single() {
+        let builder = SubprocessBuilder::new("cmd").env("KEY", "VALUE");
+        assert_eq!(builder.get_env(), &[("KEY".to_string(), "VALUE".to_string())]);
+    }
+
+    #[test]
+    fn test_builder_env_multiple() {
+        let builder = SubprocessBuilder::new("cmd")
+            .env("KEY1", "VALUE1")
+            .env("KEY2", "VALUE2");
+        assert_eq!(builder.get_env().len(), 2);
+        assert_eq!(builder.get_env()[0], ("KEY1".to_string(), "VALUE1".to_string()));
+        assert_eq!(builder.get_env()[1], ("KEY2".to_string(), "VALUE2".to_string()));
+    }
+
+    #[test]
+    fn test_builder_fluent_chain() {
+        let builder = SubprocessBuilder::new("docker")
+            .args(["run", "-it", "ubuntu"])
+            .env("DOCKER_HOST", "tcp://localhost:2375")
+            .env("DEBUG", "1");
+
+        assert_eq!(builder.get_program(), "docker");
+        assert_eq!(builder.get_args(), &["run", "-it", "ubuntu"]);
+        assert_eq!(builder.get_env().len(), 2);
+    }
 }

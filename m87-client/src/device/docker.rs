@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::time::UNIX_EPOCH;
 use tokio::time::Duration;
 
-use crate::device::tunnel::open_local_tunnel;
+use crate::device::forward::open_local_forward;
 use crate::util::subprocess::SubprocessBuilder;
 
 /// docker -H <socket> … → forwarded via QUIC
@@ -13,7 +13,7 @@ pub async fn run_docker_command(device: &str, args: Vec<String>) -> Result<()> {
 
     let endpoint = generate_local_socket_path(device);
 
-    spawn_socket_tunnel(device, &endpoint).await?;
+    spawn_socket_forward(device, &endpoint).await?;
     wait_for_socket_ready(&endpoint).await?;
     tracing::info!("[done] Connected");
 
@@ -72,11 +72,11 @@ fn docker_host_uri(p: &PathBuf) -> String {
 
 //
 // ─────────────────────────────────────────────────────────────
-//  Spawning the QUIC socket tunnel
+//  Spawning the QUIC socket forward
 // ─────────────────────────────────────────────────────────────
 //
 
-async fn spawn_socket_tunnel(device: &str, endpoint: &PathBuf) -> Result<()> {
+async fn spawn_socket_forward(device: &str, endpoint: &PathBuf) -> Result<()> {
     let local = endpoint.display().to_string();
     let remote = "/var/run/docker.sock".to_string(); // robot docker sock
 
@@ -84,8 +84,8 @@ async fn spawn_socket_tunnel(device: &str, endpoint: &PathBuf) -> Result<()> {
 
     let device = device.to_string();
     tokio::spawn(async move {
-        if let Err(e) = open_local_tunnel(&device, vec![spec]).await {
-            eprintln!("Docker socket tunnel exited with error: {e}");
+        if let Err(e) = open_local_forward(&device, vec![spec]).await {
+            eprintln!("Docker socket forward exited with error: {e}");
         }
     });
 
@@ -175,4 +175,46 @@ fn check_docker_cli() -> Result<()> {
         .status()
         .context("Docker CLI not installed")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_docker_host_uri_format() {
+        let path = PathBuf::from("/tmp/test.sock");
+        let uri = docker_host_uri(&path);
+
+        #[cfg(unix)]
+        assert_eq!(uri, "unix:///tmp/test.sock");
+
+        #[cfg(windows)]
+        assert!(uri.starts_with("npipe://"));
+    }
+
+    #[test]
+    fn test_generate_local_socket_path_contains_device() {
+        let path = generate_local_socket_path("my-device");
+        let path_str = path.to_string_lossy();
+
+        assert!(path_str.contains("my-device"));
+        assert!(path_str.contains("m87-docker"));
+
+        #[cfg(unix)]
+        assert!(path_str.ends_with(".sock"));
+
+        #[cfg(windows)]
+        assert!(path_str.contains(r"\\.\pipe\"));
+    }
+
+    #[test]
+    fn test_generate_local_socket_path_unique() {
+        let path1 = generate_local_socket_path("device1");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let path2 = generate_local_socket_path("device1");
+
+        // Paths should be different due to timestamp
+        assert_ne!(path1, path2);
+    }
 }

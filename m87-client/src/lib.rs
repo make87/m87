@@ -3,6 +3,10 @@ pub mod config;
 pub mod device;
 pub mod devices;
 
+// Runtime module (Linux-only via build.rs)
+#[cfg(feature = "runtime")]
+pub mod runtime;
+
 pub mod streams;
 
 pub mod server;

@@ -9,18 +9,18 @@ use crate::config::Config;
 use crate::device;
 use crate::device::deploy::DeploymentUpdateArgs;
 use crate::device::deploy::SpecType;
+use crate::device::forward;
 use crate::device::serial;
-use crate::device::tunnel;
 use crate::devices;
 use crate::tui;
 use crate::update;
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 use crate::util;
 use crate::util::logging::init_logging;
 use crate::util::tls::set_tls_provider;
 
 /// Save owner_reference to config if org_id or email is provided
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 fn save_owner_if_provided(org_id: Option<String>, email: Option<String>) -> anyhow::Result<()> {
     if let Some(owner) = org_id.or(email) {
         let mut cfg = Config::load()?;
@@ -54,7 +54,7 @@ fn print_help_with_device_commands() {
          {}\n\n  \
          Examples:\n    \
          m87 my-device shell\n    \
-         m87 my-device tunnel 8080\n    \
+         m87 my-device forward 8080\n    \
          m87 my-device docker ps\n    \
          m87 my-device exec -- ls -la",
         subcommands.join("\n")
@@ -78,18 +78,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Authenticate with make87 (manager login via browser)
+    /// Authenticate with make87 via browser
     Login,
 
     /// Logout and deauthenticate this device
     Logout,
 
-    /// Manage local agent service (requires root privileges - use sudo)
-    #[cfg(feature = "agent")]
+    /// Manage local runtime service (requires root privileges - use sudo)
+    #[cfg(feature = "runtime")]
     #[command(subcommand)]
-    Agent(AgentCommands),
+    Runtime(RuntimeCommands),
 
-    /// Manage devices and groups (requires manager role)
+    /// Internal commands for privileged operations (hidden from help)
+    #[cfg(feature = "runtime")]
+    #[command(subcommand, hide = true)]
+    Internal(InternalCommands),
+
+    /// Manage devices and view pending registrations
     #[command(subcommand)]
     Devices(DevicesCommands),
 
@@ -156,7 +161,7 @@ enum ConfigCommands {
     Set {
         /// Override API URL (e.g. https://eu.public.make87.dev)
         #[arg(long)]
-        agent_server_url: Option<String>,
+        runtime_server_url: Option<String>,
 
         /// Set owner reference (email or org id)
         #[arg(long)]
@@ -198,7 +203,7 @@ pub enum DeviceCommand {
     /// Open interactive shell on the device
     Shell,
     /// Forward remote port(s) to localhost
-    Tunnel {
+    Forward {
         /// Port forwarding target(s). Supports single ports and ranges.
         /// Examples:
         ///   8080                    - forward single port
@@ -355,53 +360,53 @@ pub enum DeploymentCommand {
     Update(DeploymentUpdateArgs),
 }
 
-#[cfg(feature = "agent")]
+#[cfg(feature = "runtime")]
 #[derive(Subcommand)]
-enum AgentCommands {
-    /// Register this device as an agent (headless flow, requires approval)
+enum RuntimeCommands {
+    /// Register this device as a runtime (headless flow, requires approval)
     Login {
-        /// Organization ID to register agent under
+        /// Organization ID to register runtime under
         #[arg(long = "org-id", conflicts_with = "email")]
         org_id: Option<String>,
 
-        /// Email address to register agent under
+        /// Email address to register runtime under
         #[arg(long, conflicts_with = "org_id")]
         email: Option<String>,
     },
 
     Logout,
-    /// Run the agent daemon (blocking, used by systemd service)
+    /// Run the runtime daemon (blocking, used by systemd service)
     Run {
-        /// Organization ID to register agent under
+        /// Organization ID to register runtime under
         #[arg(long = "org-id", conflicts_with = "email")]
         org_id: Option<String>,
 
-        /// Email address to register agent under
+        /// Email address to register runtime under
         #[arg(long, conflicts_with = "org_id")]
         email: Option<String>,
     },
 
-    /// Start the agent service now (requires sudo)
+    /// Start the runtime service now (requires sudo)
     Start {
-        /// Organization ID to register agent under
+        /// Organization ID to register runtime under
         #[arg(long = "org-id", conflicts_with = "email")]
         org_id: Option<String>,
 
-        /// Email address to register agent under
+        /// Email address to register runtime under
         #[arg(long, conflicts_with = "org_id")]
         email: Option<String>,
     },
 
-    /// Stop the agent service now (requires sudo)
+    /// Stop the runtime service now (requires sudo)
     Stop,
 
-    /// Restart the agent service (requires sudo)
+    /// Restart the runtime service (requires sudo)
     Restart {
-        /// Organization ID to register agent under
+        /// Organization ID to register runtime under
         #[arg(long = "org-id", conflicts_with = "email")]
         org_id: Option<String>,
 
-        /// Email address to register agent under
+        /// Email address to register runtime under
         #[arg(long, conflicts_with = "org_id")]
         email: Option<String>,
     },
@@ -412,11 +417,11 @@ enum AgentCommands {
         #[arg(long)]
         now: bool,
 
-        /// Organization ID to register agent under
+        /// Organization ID to register runtime under
         #[arg(long = "org-id", conflicts_with = "email")]
         org_id: Option<String>,
 
-        /// Email address to register agent under
+        /// Email address to register runtime under
         #[arg(long, conflicts_with = "org_id")]
         email: Option<String>,
     },
@@ -428,8 +433,50 @@ enum AgentCommands {
         now: bool,
     },
 
-    /// Show local agent service status
+    /// Show local runtime service status
     Status,
+}
+
+/// Hidden internal commands for privileged operations (not shown in help)
+#[cfg(feature = "runtime")]
+#[derive(Subcommand)]
+enum InternalCommands {
+    /// Install/update runtime service file and optionally enable it (must be run as root)
+    RuntimeSetupPrivileged {
+        /// Username to run the service as
+        #[arg(long)]
+        user: String,
+
+        /// User's home directory
+        #[arg(long)]
+        home: String,
+
+        /// Path to the m87 executable
+        #[arg(long)]
+        exe_path: String,
+
+        /// Enable service to start on boot
+        #[arg(long)]
+        enable: bool,
+
+        /// Enable and start the service immediately
+        #[arg(long)]
+        enable_now: bool,
+
+        /// Only restart if service was already running
+        #[arg(long)]
+        restart_if_running: bool,
+    },
+
+    /// Stop the runtime service (must be run as root)
+    RuntimeStopPrivileged,
+
+    /// Disable the runtime service (must be run as root)
+    RuntimeDisablePrivileged {
+        /// Also stop the service immediately
+        #[arg(long)]
+        now: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -468,9 +515,9 @@ pub async fn cli() -> anyhow::Result<()> {
     let mut verbose = cli.verbose;
 
     let cli_mode = match &cli.command {
-        // Agent run must never be CLI mode
-        #[cfg(feature = "agent")]
-        Commands::Agent(AgentCommands::Run { .. }) => {
+        // Runtime run must never be CLI mode
+        #[cfg(feature = "runtime")]
+        Commands::Runtime(RuntimeCommands::Run { .. }) => {
             verbose = true;
             false
         }
@@ -495,9 +542,9 @@ pub async fn cli() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Login => {
-            tracing::info!("Logging in as manager...");
+            tracing::info!("Logging in...");
             auth::login_cli().await?;
-            tracing::info!("[done] Logged in as manager successfully");
+            tracing::info!("[done] Logged in successfully");
         }
 
         Commands::Logout => {
@@ -511,7 +558,7 @@ pub async fn cli() -> anyhow::Result<()> {
                 tracing::info!("Enabling SSH...");
                 device::ssh::ssh_enable()?;
                 tracing::info!(
-                    "[done] SSH enabled successfully. You can now connect to device via ssh m87-<device_name>"
+                    "[done] SSH enabled successfully. You can now connect to device via ssh <device_name>.m87"
                 );
             }
             SshCommands::Disable => {
@@ -552,43 +599,71 @@ pub async fn cli() -> anyhow::Result<()> {
             }
         },
 
-        #[cfg(feature = "agent")]
-        Commands::Agent(cmd) => match cmd {
-            AgentCommands::Login { org_id, email } => {
+        #[cfg(feature = "runtime")]
+        Commands::Runtime(cmd) => match cmd {
+            RuntimeCommands::Login { org_id, email } => {
                 let owner_scope = org_id.or(email);
-                tracing::info!("Registering device as agent...");
+                tracing::info!("Registering device as runtime...");
                 let sysinfo = util::system_info::get_system_info().await?;
                 auth::register_device(owner_scope, sysinfo).await?;
-                tracing::info!("[done] Device registered as agent successfully");
+                tracing::info!("[done] Device registered as runtime successfully");
             }
-            AgentCommands::Logout => {
+            RuntimeCommands::Logout => {
                 auth::logout_device().await?;
                 tracing::info!("[done] Logged out successfully");
             }
-            AgentCommands::Run { org_id, email } => {
+            RuntimeCommands::Run { org_id, email } => {
                 save_owner_if_provided(org_id, email)?;
-                device::agent::run().await?;
+                crate::runtime::run().await?;
             }
-            AgentCommands::Start { org_id, email } => {
+            RuntimeCommands::Start { org_id, email } => {
                 save_owner_if_provided(org_id, email)?;
-                device::agent::start().await?;
+                crate::runtime::start().await?;
             }
-            AgentCommands::Stop => {
-                device::agent::stop().await?;
+            RuntimeCommands::Stop => {
+                crate::runtime::stop().await?;
             }
-            AgentCommands::Restart { org_id, email } => {
+            RuntimeCommands::Restart { org_id, email } => {
                 save_owner_if_provided(org_id, email)?;
-                device::agent::restart().await?;
+                crate::runtime::restart().await?;
             }
-            AgentCommands::Enable { now, org_id, email } => {
+            RuntimeCommands::Enable { now, org_id, email } => {
                 save_owner_if_provided(org_id, email)?;
-                device::agent::enable(now).await?;
+                crate::runtime::enable(now).await?;
             }
-            AgentCommands::Disable { now } => {
-                device::agent::disable(now).await?;
+            RuntimeCommands::Disable { now } => {
+                crate::runtime::disable(now).await?;
             }
-            AgentCommands::Status => {
-                device::agent::status().await?;
+            RuntimeCommands::Status => {
+                crate::runtime::status().await?;
+            }
+        },
+
+        #[cfg(feature = "runtime")]
+        Commands::Internal(cmd) => match cmd {
+            InternalCommands::RuntimeSetupPrivileged {
+                user,
+                home,
+                exe_path,
+                enable,
+                enable_now,
+                restart_if_running,
+            } => {
+                crate::runtime::internal_setup_privileged(
+                    &user,
+                    &home,
+                    &exe_path,
+                    enable,
+                    enable_now,
+                    restart_if_running,
+                )
+                .await?;
+            }
+            InternalCommands::RuntimeStopPrivileged => {
+                crate::runtime::internal_stop_privileged().await?;
+            }
+            InternalCommands::RuntimeDisablePrivileged { now } => {
+                crate::runtime::internal_disable_privileged(now).await?;
             }
         },
 
@@ -682,7 +757,7 @@ pub async fn cli() -> anyhow::Result<()> {
 
         Commands::Config(cmd) => match cmd {
             ConfigCommands::Set {
-                agent_server_url: api_url,
+                runtime_server_url,
                 owner_reference,
                 make87_api_url,
                 make87_app_url,
@@ -690,8 +765,8 @@ pub async fn cli() -> anyhow::Result<()> {
             } => {
                 let mut cfg = Config::load().context("Failed to load config")?;
 
-                if let Some(url) = api_url {
-                    cfg.agent_server_url = Some(url);
+                if let Some(url) = runtime_server_url {
+                    cfg.runtime_server_url = Some(url);
                 }
 
                 if let Some(owner) = owner_reference {
@@ -738,8 +813,8 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             Ok(())
         }
 
-        DeviceCommand::Tunnel { targets } => {
-            tunnel::open_local_tunnel(&device, targets).await?;
+        DeviceCommand::Forward { targets } => {
+            forward::open_local_forward(&device, targets).await?;
             Ok(())
         }
 
@@ -854,10 +929,19 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
                 let reports =
                     device::deploy::get_deployment_reports(&device, &deployment_id).await?;
 
+                let deployment = match device::deploy::get_deployment(&device, &deployment_id).await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!("Failed to get deployment: {}", e);
+                        return Ok(());
+                    }
+                };
+                println!("len reports {}", reports.len());
                 tracing::info!("[done] Received deployment reports");
                 let mut config = tui::helper::RenderOpts::default();
                 config.show_logs_inline = logs;
-                tui::deploy::print_deployment_reports(&reports, &config);
+                tui::deploy::print_deployment_reports(&reports, &deployment, &config);
                 Ok(())
             }
 
@@ -878,7 +962,7 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
                         }
                     },
                 };
-                let deployment = device::deploy::get_deployment(&device, deployment_id).await?;
+                let deployment = device::deploy::get_deployment(&device, &deployment_id).await?;
                 tracing::info!("[done] Loaded deployment");
                 match yaml {
                     true => tui::deploy::print_revision_verbose(&deployment),

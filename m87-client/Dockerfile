@@ -24,11 +24,11 @@ COPY m87-client ./m87-client
 COPY m87-server ./m87-server
 COPY m87-shared ./m87-shared
 
-# Build the m87 client binary with both agent and manager features
+# Build the m87 binary with both runtime and command line features
 RUN if [ "$BUILD_PROFILE" = "release" ]; then \
-      cargo build --release --package m87-client --features agent,manager; \
+      cargo build --release --package m87-client --features runtime,cli; \
     else \
-      cargo build --package m87-client --features agent,manager; \
+      cargo build --package m87-client --features runtime,cli; \
     fi
 
 # ===========================

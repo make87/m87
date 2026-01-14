@@ -345,8 +345,8 @@ impl DeployReportDoc {
 
         let mut cursor = db.deploy_reports().find(filter).await?;
         let mut observations: BTreeMap<String, ObserveStatus> = BTreeMap::new();
-        let mut latest_alive: BTreeMap<String, u32> = BTreeMap::new();
-        let mut latest_healthy: BTreeMap<String, u32> = BTreeMap::new();
+        let mut latest_alive: BTreeMap<String, u64> = BTreeMap::new();
+        let mut latest_healthy: BTreeMap<String, u64> = BTreeMap::new();
         //
         while let Some(res) = cursor.next().await {
             if let Ok(doc) = res {
@@ -427,10 +427,11 @@ impl DeployReportDoc {
         // check if device id + revision + optional kind.data.run_id still exist. If not ignore
         let mut check_doc = doc! {
             "device_id": &body.device_id,
-            "revision_id": &body.revision_id,
+            "revision.id": &body.revision_id,
         };
         if let Some(run_id) = body.kind.get_run_id() {
-            check_doc.insert("kind.data.run_id", run_id);
+            // check if and revision.jobs lsit entry has id == run_id
+            check_doc.insert("revision.jobs.id", run_id);
         }
         let exists = db
             .deploy_revisions()
@@ -445,7 +446,12 @@ impl DeployReportDoc {
             .map(|doc| doc.is_some())
             .unwrap_or(false);
         if !exists {
-            return Err(ServerError::not_found("Deploy revision not found"));
+            return Err(ServerError::not_found(&format!(
+                "Deploy revision {} {} {} not found",
+                &body.device_id,
+                &body.revision_id,
+                &body.kind.get_run_id().unwrap_or_default(),
+            )));
         }
 
         let now = BsonDateTime::now();

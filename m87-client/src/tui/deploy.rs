@@ -61,7 +61,11 @@ struct RunAgg {
     last_time: u64,
 }
 
-pub fn print_deployment_reports(reports: &[DeployReport], opts: &helper::RenderOpts) {
+pub fn print_deployment_reports(
+    reports: &[DeployReport],
+    deployment: &DeploymentRevision,
+    opts: &helper::RenderOpts,
+) {
     let term_w = helper::terminal_width().unwrap_or(96).max(60);
 
     // Steps table: cap the NAME column so it can't eat everything.
@@ -261,9 +265,11 @@ pub fn print_deployment_reports(reports: &[DeployReport], opts: &helper::RenderO
         out.push('\n');
     }
 
-    out.push_str(&helper::separator_line(term_w, opts));
-    out.push('\n');
-    out.push('\n');
+    if !run_list.is_empty() {
+        out.push_str(&helper::separator_line(term_w, opts));
+        out.push('\n');
+        out.push('\n');
+    }
 
     // RUN blocks
     for ra in &run_list {
@@ -292,13 +298,24 @@ pub fn print_deployment_reports(reports: &[DeployReport], opts: &helper::RenderO
         };
         let status_colored = helper::colorize(opts.use_color, status, status_color(&outcome));
 
+        let enabled = match deployment.get_job_by_id(&ra.run_id) {
+            Some(job) => match job.enabled {
+                true => helper::colorize(opts.use_color, "✓ enabled", helper::AnsiColor::Green),
+                false => helper::colorize(opts.use_color, "✗ disabled", helper::AnsiColor::Red),
+            },
+            None => {
+                tracing::warn!("Job not found for run ID: {} in {}", ra.run_id, deployment);
+                continue;
+            }
+        };
+
         let last = helper::format_time(ra.last_time, opts.time_only);
         let (steps_ok, steps_total, retry_count, undo_count) = step_stats(&ra.steps);
 
         let mut run_info = format!(
             "{}  {}   last update {}   steps {}/{}  max retry {}  undone {}",
             &helper::bold(&ra.run_id),
-            status_colored,
+            enabled,
             last,
             steps_ok,
             steps_total,
@@ -325,7 +342,7 @@ pub fn print_deployment_reports(reports: &[DeployReport], opts: &helper::RenderO
                 opts,
                 "[health]",
                 &healthy_s,
-                s.report_time as u64,
+                s.report_time,
                 s.log_tail,
                 opts.show_logs_inline,
             );
@@ -337,12 +354,16 @@ pub fn print_deployment_reports(reports: &[DeployReport], opts: &helper::RenderO
                 opts,
                 "[alive]",
                 &alive_s,
-                s.report_time as u64,
+                s.report_time,
                 s.log_tail,
                 opts.show_logs_inline,
             );
         }
-        out.push_str(&format!("  {}", helper::gray("steps")));
+        out.push_str(&format!(
+            "  {}    {}",
+            helper::gray("steps"),
+            status_colored
+        ));
         out.push('\n');
 
         // Steps table
@@ -418,10 +439,9 @@ pub fn print_deployment_reports(reports: &[DeployReport], opts: &helper::RenderO
         out.push('\n');
     }
 
-    // Rollback section
-    rb_table.header(&mut out, opts);
-
     if let Some(rb) = rollback {
+        // Rollback section
+        rb_table.header(&mut out, opts);
         let st = if rb.success {
             "✓ success"
         } else {
@@ -450,8 +470,6 @@ pub fn print_deployment_reports(reports: &[DeployReport], opts: &helper::RenderO
         }
 
         rb_table.row(&mut out, &["rollback", &st, t, &info], opts);
-    } else {
-        rb_table.row(&mut out, &["(none)", "", "", ""], opts);
     }
 
     tracing::info!("{out}");
@@ -478,8 +496,8 @@ fn outcome_rank(o: Outcome) -> u8 {
 fn latest_alive_healthy(
     states: &[RunState],
 ) -> (Option<(RunState, bool)>, Option<(RunState, bool)>) {
-    let mut alive: Option<(u32, bool, RunState)> = None;
-    let mut healthy: Option<(u32, bool, RunState)> = None;
+    let mut alive: Option<(u64, bool, RunState)> = None;
+    let mut healthy: Option<(u64, bool, RunState)> = None;
 
     for s in states {
         if let Some(a) = s.alive {

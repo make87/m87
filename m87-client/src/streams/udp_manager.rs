@@ -91,4 +91,93 @@ impl UdpChannelManager {
         let mut g = self.inner.lock().await;
         g.channels.clear();
     }
+
+    #[cfg(test)]
+    pub fn new_without_cleanup() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(UdpChannelState {
+                next_id: 1,
+                channels: HashMap::new(),
+            })),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_target() -> UdpTarget {
+        UdpTarget {
+            remote_host: "127.0.0.1".to_string(),
+            remote_port: 8080,
+            local_port: 9090,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_udp_manager_alloc_increments_id() {
+        let mgr = UdpChannelManager::new_without_cleanup();
+
+        let (id1, _rx1) = mgr.alloc(make_target()).await;
+        let (id2, _rx2) = mgr.alloc(make_target()).await;
+        let (id3, _rx3) = mgr.alloc(make_target()).await;
+
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(id3, 3);
+    }
+
+    #[tokio::test]
+    async fn test_udp_manager_get_existing() {
+        let mgr = UdpChannelManager::new_without_cleanup();
+
+        let (id, _rx) = mgr.alloc(make_target()).await;
+        let channel = mgr.get(id).await;
+
+        assert!(channel.is_some());
+        let ch = channel.unwrap();
+        assert_eq!(ch.target.remote_port, 8080);
+        assert_eq!(ch.target.local_port, 9090);
+    }
+
+    #[tokio::test]
+    async fn test_udp_manager_get_nonexistent() {
+        let mgr = UdpChannelManager::new_without_cleanup();
+
+        let channel = mgr.get(999).await;
+        assert!(channel.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_udp_manager_remove_existing() {
+        let mgr = UdpChannelManager::new_without_cleanup();
+
+        let (id, _rx) = mgr.alloc(make_target()).await;
+        let removed = mgr.remove(id).await;
+
+        assert!(removed);
+        assert!(mgr.get(id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_udp_manager_remove_nonexistent() {
+        let mgr = UdpChannelManager::new_without_cleanup();
+
+        let removed = mgr.remove(999).await;
+        assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn test_udp_manager_remove_all() {
+        let mgr = UdpChannelManager::new_without_cleanup();
+
+        let (id1, _rx1) = mgr.alloc(make_target()).await;
+        let (id2, _rx2) = mgr.alloc(make_target()).await;
+
+        mgr.remove_all().await;
+
+        assert!(mgr.get(id1).await.is_none());
+        assert!(mgr.get(id2).await.is_none());
+    }
 }

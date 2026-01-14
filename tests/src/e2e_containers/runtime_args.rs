@@ -1,21 +1,21 @@
-//! Tests for agent command `--org-id` and `--email` arguments
+//! Tests for runtime command `--org-id` and `--email` arguments
 
 use super::containers::E2EInfra;
-use super::fixtures::{AgentRunner, DeviceRegistration};
+use super::fixtures::{RuntimeRunner, DeviceRegistration};
 use super::helpers::{
-    clear_owner_reference, exec_shell, read_agent_config, set_owner_reference, E2EError,
+    clear_owner_reference, exec_shell, read_runtime_config, set_owner_reference, E2EError,
 };
 
-/// Test that `m87 agent run --org-id <id>` saves to config and device registers
+/// Test that `m87 runtime run --org-id <id>` saves to config and device registers
 #[tokio::test]
-async fn test_agent_run_with_org_id() -> Result<(), E2EError> {
+async fn test_runtime_run_with_org_id() -> Result<(), E2EError> {
     let infra = E2EInfra::init().await?;
 
     // Clear existing owner_reference first
-    clear_owner_reference(&infra.agent).await?;
+    clear_owner_reference(&infra.runtime).await?;
 
     // Verify it was cleared
-    let config_before = read_agent_config(&infra.agent).await?;
+    let config_before = read_runtime_config(&infra.runtime).await?;
     tracing::info!("Config before: {}", config_before);
     assert!(
         config_before.contains("\"owner_reference\": null")
@@ -23,9 +23,9 @@ async fn test_agent_run_with_org_id() -> Result<(), E2EError> {
         "owner_reference should be null before test"
     );
 
-    // Start agent run with --org-id argument
+    // Start runtime run with --org-id argument
     let custom_org = "custom-org@test.local";
-    AgentRunner::new(&infra)
+    RuntimeRunner::new(&infra)
         .with_args(&["--org-id", custom_org])
         .start_run()
         .await?;
@@ -34,7 +34,7 @@ async fn test_agent_run_with_org_id() -> Result<(), E2EError> {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // Verify config was updated with the new owner_reference
-    let config_after = read_agent_config(&infra.agent).await?;
+    let config_after = read_runtime_config(&infra.runtime).await?;
     tracing::info!("Config after: {}", config_after);
     assert!(
         config_after.contains(&format!("\"owner_reference\": \"{}\"", custom_org))
@@ -61,25 +61,25 @@ async fn test_agent_run_with_org_id() -> Result<(), E2EError> {
     Ok(())
 }
 
-/// Test that `m87 agent run --email <email>` saves to config and device registers
+/// Test that `m87 runtime run --email <email>` saves to config and device registers
 #[tokio::test]
-async fn test_agent_run_with_email() -> Result<(), E2EError> {
+async fn test_runtime_run_with_email() -> Result<(), E2EError> {
     let infra = E2EInfra::init().await?;
 
     // Clear existing owner_reference first
-    clear_owner_reference(&infra.agent).await?;
+    clear_owner_reference(&infra.runtime).await?;
 
     // Verify it was cleared
-    let config_before = read_agent_config(&infra.agent).await?;
+    let config_before = read_runtime_config(&infra.runtime).await?;
     assert!(
         config_before.contains("\"owner_reference\": null")
             || config_before.contains("\"owner_reference\":null"),
         "owner_reference should be null before test"
     );
 
-    // Start agent run with --email argument
+    // Start runtime run with --email argument
     let custom_email = "custom-email@test.local";
-    AgentRunner::new(&infra)
+    RuntimeRunner::new(&infra)
         .with_args(&["--email", custom_email])
         .start_run()
         .await?;
@@ -88,7 +88,7 @@ async fn test_agent_run_with_email() -> Result<(), E2EError> {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // Verify config was updated with the new owner_reference
-    let config_after = read_agent_config(&infra.agent).await?;
+    let config_after = read_runtime_config(&infra.runtime).await?;
     tracing::info!("Config after: {}", config_after);
     assert!(
         config_after.contains(&format!("\"owner_reference\": \"{}\"", custom_email))
@@ -117,15 +117,15 @@ async fn test_agent_run_with_email() -> Result<(), E2EError> {
 
 /// Test that `--org-id` argument overrides existing config value
 #[tokio::test]
-async fn test_agent_run_args_override_existing_config() -> Result<(), E2EError> {
+async fn test_runtime_run_args_override_existing_config() -> Result<(), E2EError> {
     let infra = E2EInfra::init().await?;
 
     // Set an initial owner_reference
     let original_owner = "original@test.local";
-    set_owner_reference(&infra.agent, original_owner).await?;
+    set_owner_reference(&infra.runtime, original_owner).await?;
 
     // Verify it was set
-    let config_before = read_agent_config(&infra.agent).await?;
+    let config_before = read_runtime_config(&infra.runtime).await?;
     tracing::info!("Config before: {}", config_before);
     assert!(
         config_before.contains(&format!("\"owner_reference\": \"{}\"", original_owner))
@@ -134,9 +134,9 @@ async fn test_agent_run_args_override_existing_config() -> Result<(), E2EError> 
         original_owner
     );
 
-    // Start agent run with a different --org-id to override
+    // Start runtime run with a different --org-id to override
     let override_owner = "override@test.local";
-    AgentRunner::new(&infra)
+    RuntimeRunner::new(&infra)
         .with_args(&["--org-id", override_owner])
         .start_run()
         .await?;
@@ -145,7 +145,7 @@ async fn test_agent_run_args_override_existing_config() -> Result<(), E2EError> 
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // Verify config was updated with the new owner_reference
-    let config_after = read_agent_config(&infra.agent).await?;
+    let config_after = read_runtime_config(&infra.runtime).await?;
     tracing::info!("Config after: {}", config_after);
     assert!(
         config_after.contains(&format!("\"owner_reference\": \"{}\"", override_owner))
@@ -158,33 +158,33 @@ async fn test_agent_run_args_override_existing_config() -> Result<(), E2EError> 
     Ok(())
 }
 
-/// Test that `m87 agent enable --org-id` saves to config before systemctl fails
+/// Test that `m87 runtime enable --org-id` saves to config before systemctl fails
 /// Note: systemctl is not available in the container, so we just verify config is saved
 #[tokio::test]
-async fn test_agent_enable_saves_config_before_systemctl() -> Result<(), E2EError> {
+async fn test_runtime_enable_saves_config_before_systemctl() -> Result<(), E2EError> {
     let infra = E2EInfra::init().await?;
 
     // Clear existing owner_reference first
-    clear_owner_reference(&infra.agent).await?;
+    clear_owner_reference(&infra.runtime).await?;
 
     // Verify it was cleared
-    let config_before = read_agent_config(&infra.agent).await?;
+    let config_before = read_runtime_config(&infra.runtime).await?;
     assert!(
         config_before.contains("\"owner_reference\": null")
             || config_before.contains("\"owner_reference\":null"),
         "owner_reference should be null before test"
     );
 
-    // Run agent enable command (will fail on systemctl but should save config first)
+    // Run runtime enable command (will fail on systemctl but should save config first)
     let enable_org = "enable-org@test.local";
     let _result = exec_shell(
-        &infra.agent,
-        &format!("m87 agent enable --now --org-id {} 2>&1 || true", enable_org),
+        &infra.runtime,
+        &format!("m87 runtime enable --now --org-id {} 2>&1 || true", enable_org),
     )
     .await?;
 
     // Verify config was updated with the new owner_reference despite systemctl failure
-    let config_after = read_agent_config(&infra.agent).await?;
+    let config_after = read_runtime_config(&infra.runtime).await?;
     tracing::info!("Config after enable: {}", config_after);
     assert!(
         config_after.contains(&format!("\"owner_reference\": \"{}\"", enable_org))
@@ -197,24 +197,24 @@ async fn test_agent_enable_saves_config_before_systemctl() -> Result<(), E2EErro
     Ok(())
 }
 
-/// Test that `m87 agent start --org-id` saves to config before systemctl fails
+/// Test that `m87 runtime start --org-id` saves to config before systemctl fails
 #[tokio::test]
-async fn test_agent_start_saves_config_before_systemctl() -> Result<(), E2EError> {
+async fn test_runtime_start_saves_config_before_systemctl() -> Result<(), E2EError> {
     let infra = E2EInfra::init().await?;
 
     // Clear existing owner_reference first
-    clear_owner_reference(&infra.agent).await?;
+    clear_owner_reference(&infra.runtime).await?;
 
-    // Run agent start command (will fail on systemctl but should save config first)
+    // Run runtime start command (will fail on systemctl but should save config first)
     let start_org = "start-org@test.local";
     let _result = exec_shell(
-        &infra.agent,
-        &format!("m87 agent start --org-id {} 2>&1 || true", start_org),
+        &infra.runtime,
+        &format!("m87 runtime start --org-id {} 2>&1 || true", start_org),
     )
     .await?;
 
     // Verify config was updated with the new owner_reference despite systemctl failure
-    let config_after = read_agent_config(&infra.agent).await?;
+    let config_after = read_runtime_config(&infra.runtime).await?;
     tracing::info!("Config after start: {}", config_after);
     assert!(
         config_after.contains(&format!("\"owner_reference\": \"{}\"", start_org))
@@ -227,24 +227,24 @@ async fn test_agent_start_saves_config_before_systemctl() -> Result<(), E2EError
     Ok(())
 }
 
-/// Test that `m87 agent restart --org-id` saves to config before systemctl fails
+/// Test that `m87 runtime restart --org-id` saves to config before systemctl fails
 #[tokio::test]
-async fn test_agent_restart_saves_config_before_systemctl() -> Result<(), E2EError> {
+async fn test_runtime_restart_saves_config_before_systemctl() -> Result<(), E2EError> {
     let infra = E2EInfra::init().await?;
 
     // Clear existing owner_reference first
-    clear_owner_reference(&infra.agent).await?;
+    clear_owner_reference(&infra.runtime).await?;
 
-    // Run agent restart command (will fail on systemctl but should save config first)
+    // Run runtime restart command (will fail on systemctl but should save config first)
     let restart_org = "restart-org@test.local";
     let _result = exec_shell(
-        &infra.agent,
-        &format!("m87 agent restart --org-id {} 2>&1 || true", restart_org),
+        &infra.runtime,
+        &format!("m87 runtime restart --org-id {} 2>&1 || true", restart_org),
     )
     .await?;
 
     // Verify config was updated with the new owner_reference despite systemctl failure
-    let config_after = read_agent_config(&infra.agent).await?;
+    let config_after = read_runtime_config(&infra.runtime).await?;
     tracing::info!("Config after restart: {}", config_after);
     assert!(
         config_after.contains(&format!("\"owner_reference\": \"{}\"", restart_org))

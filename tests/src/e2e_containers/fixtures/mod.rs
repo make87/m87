@@ -2,10 +2,10 @@
 //!
 //! Fixtures provide reusable setup patterns for common test scenarios.
 
-mod agent;
+mod runtime;
 mod device;
 mod setup;
 
-pub use agent::*;
+pub use runtime::*;
 pub use device::*;
 pub use setup::*;

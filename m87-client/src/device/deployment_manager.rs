@@ -9,7 +9,7 @@ use std::{
     fmt::Display,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tokio::{fs, io::AsyncWriteExt, sync::RwLock, time::sleep};
 
@@ -80,11 +80,11 @@ struct ObserveDecision {
     consecutive: u32,
 }
 
-fn now_ms_u32() -> u32 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+fn now_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() as u32
+        .as_millis() as u64
 }
 
 impl ObserveKind {
@@ -145,7 +145,7 @@ impl ObserveKind {
                         revision_id: revision_id.to_string(),
                         healthy: None,
                         alive: Some(true),
-                        report_time: now_ms_u32(),
+                        report_time: now_ms_u64(),
                         log_tail: None,
                     }
                 } else {
@@ -154,7 +154,7 @@ impl ObserveKind {
                         revision_id: revision_id.to_string(),
                         healthy: Some(false),
                         alive: Some(false),
-                        report_time: now_ms_u32(),
+                        report_time: now_ms_u64(),
                         log_tail,
                     }
                 }
@@ -166,7 +166,7 @@ impl ObserveKind {
                         revision_id: revision_id.to_string(),
                         healthy: Some(true),
                         alive: Some(true),
-                        report_time: now_ms_u32(),
+                        report_time: now_ms_u64(),
                         log_tail: None,
                     }
                 } else {
@@ -175,7 +175,7 @@ impl ObserveKind {
                         revision_id: revision_id.to_string(),
                         healthy: Some(false),
                         alive: None,
-                        report_time: now_ms_u32(),
+                        report_time: now_ms_u64(),
                         log_tail,
                     }
                 }
@@ -215,6 +215,16 @@ impl LocalRunState {
 
         std::fs::write(&path, contents)
             .with_context(|| format!("Failed to write state file for dir {}", &display_name))?;
+
+        Ok(())
+    }
+
+    fn delete(work_dir: &Path) -> Result<()> {
+        let path = LocalRunState::state_file_path(work_dir)?;
+
+        let display_name = work_dir.display();
+        std::fs::remove_file(path)
+            .with_context(|| format!("Failed to delete state file for dir {}", &display_name))?;
 
         Ok(())
     }
@@ -357,6 +367,13 @@ impl DeploymentManager {
             rollback_policy: Arc::new(RwLock::new(rollback_policy)),
             deployment_started_at: Arc::new(RwLock::new(None)),
         })
+    }
+
+    pub fn get_current_deploy_hash() -> String {
+        match RevisionStore::get_desired_config() {
+            Ok(Some(config)) => config.get_hash(),
+            _ => "".to_string(),
+        }
     }
 
     /// Get reference to the log manager for external use (e.g., streams/logs routing)
@@ -572,7 +589,7 @@ impl DeploymentManager {
                 None => {
                     // Unit removed - try to stop it using previous spec
                     if let Ok(Some(config)) = RevisionStore::get_previous_config() {
-                        if let Some(prev_spec) = config.get_job(&id) {
+                        if let Some(prev_spec) = config.get_job_by_hash(&id) {
                             if matches!(prev_spec.run_type, RunType::Service) {
                                 let wd = match self.resolve_workdir(&prev_spec).await {
                                     Ok(wd) => wd,
@@ -654,9 +671,16 @@ impl DeploymentManager {
         }
         // if ephemeral workspace, delete it
         if let Some(workdir) = &spec.workdir {
-            if let WorkdirMode::Ephemeral = workdir.mode {
-                let path = self.get_workspace_path(spec)?;
-                tokio::fs::remove_dir_all(path).await?;
+            // change to match and remove local run state if persistent
+            match workdir.mode {
+                WorkdirMode::Persistent => {
+                    let path = self.get_workspace_path(spec)?;
+                    LocalRunState::delete(&path)?;
+                }
+                WorkdirMode::Ephemeral => {
+                    let path = self.get_workspace_path(spec)?;
+                    tokio::fs::remove_dir_all(path).await?;
+                }
             }
         }
         Ok(())
@@ -724,7 +748,7 @@ impl DeploymentManager {
 
         match r {
             Ok(d) if d.consecutive > 0 => {
-                tracing::info!("Observe check had {} consecutive failures", d.consecutive);
+                tracing::info!("{} check had {} consecutive failures", &kind, d.consecutive);
                 let _ = self
                     .check_rollback_on_observe_failure(
                         kind,
@@ -814,7 +838,29 @@ impl DeploymentManager {
                 LocalRunState::save(&wd, &st)?;
 
                 let mut on_fail_log_tail = None;
+                let mut record_log_tail = None;
                 if decision.is_failure {
+                    if let Some(record) = &hooks.record {
+                        let record_timeout = hooks.record_timeout.unwrap_or(kind.default_timeout());
+
+                        let r = run_command(
+                            run_id,
+                            &wd,
+                            &spec.env,
+                            record,
+                            Some(record_timeout),
+                            MAX_TAIL_BYTES,
+                        )
+                        .await;
+
+                        record_log_tail = match r {
+                            Ok(tail) => Some(tail),
+                            Err(RunCommandError::Failed(cmd)) => Some(cmd.combined_tail),
+                            Err(RunCommandError::Io(_)) => None,
+                            Err(RunCommandError::Other(_)) => None,
+                        };
+                    }
+
                     if let Some(report) = &hooks.report {
                         let report_timeout = hooks.report_timeout.unwrap_or(kind.default_timeout());
 
@@ -843,7 +889,8 @@ impl DeploymentManager {
                         _ => None,
                     };
 
-                    let log_tail = merge_log_tails(observe_log_tail, on_fail_log_tail);
+                    let log_tail = merge_log_tails(observe_log_tail, record_log_tail);
+                    let log_tail = merge_log_tails(log_tail, on_fail_log_tail);
 
                     let _ = enqueue_event(DeployReportKind::RunState(kind.build_runstate_event(
                         run_id,
@@ -1133,11 +1180,7 @@ impl DeploymentManager {
 pub async fn enqueue_event(event: DeployReportKind) -> Result<()> {
     ensure_dirs().await?;
 
-    let id = format!(
-        "{}-{}",
-        chrono::Utc::now().timestamp_millis(),
-        rand_suffix()
-    );
+    let id = format!("{}", now_ms_u64());
     let pending = pending_dir()?.join(format!("{id}.json"));
     let tmp = pending.with_extension("json.tmp");
 
@@ -1152,14 +1195,6 @@ pub async fn enqueue_event(event: DeployReportKind) -> Result<()> {
         .await
         .context("atomic rename tmp->pending")?;
     Ok(())
-}
-
-fn rand_suffix() -> u32 {
-    // no extra crate needed; weak but fine for 1/day
-    (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos()) as u32
 }
 
 pub struct ClaimedEvent {
@@ -1267,10 +1302,7 @@ async fn run_step(
             success: true,
             is_undo: false,
             error: None,
-            report_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            report_time: now_ms_u64(),
         }),
         Err(RunCommandError::Other(e)) => Err(e),
         Err(RunCommandError::Io(e)) => Err(e.into()),
@@ -1284,10 +1316,7 @@ async fn run_step(
             success: false,
             is_undo: false,
             error: e.error,
-            report_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            report_time: now_ms_u64(),
         }),
     };
     match res {
@@ -1333,10 +1362,7 @@ async fn run_undo(
             exit_code: None,
             success: true,
             error: None,
-            report_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            report_time: now_ms_u64(),
         }),
         Err(RunCommandError::Other(e)) => Err(e),
         Err(RunCommandError::Io(e)) => Err(e.into()),
@@ -1350,10 +1376,7 @@ async fn run_undo(
             exit_code: e.exit_code,
             success: false,
             error: e.error,
-            report_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            report_time: now_ms_u64(),
         }),
     };
     match res {

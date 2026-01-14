@@ -6,7 +6,7 @@
 //! - `device:/absolute/path` → absolute path on the remote filesystem
 
 use super::containers::E2EInfra;
-use super::fixtures::{AgentRunner, DeviceRegistration};
+use super::fixtures::{RuntimeRunner, DeviceRegistration};
 use super::helpers::{exec_shell, read_log, E2EError, SniSetup};
 
 /// Test copying a file from local (CLI) to remote (agent)
@@ -29,13 +29,13 @@ async fn test_cp_local_to_remote() -> Result<(), E2EError> {
     // Step 2: Setup SNI for tunneling
     tracing::info!("Setting up SNI...");
     let sni = SniSetup::from_cli(&infra.cli).await?;
-    sni.setup_both(&infra.agent, &infra.cli, &device.short_id)
+    sni.setup_both(&infra.runtime, &infra.cli, &device.short_id)
         .await?;
 
     // Step 3: Start agent and wait for control tunnel
     tracing::info!("Starting agent run...");
-    let agent = AgentRunner::new(&infra);
-    agent.start_with_tunnel().await?;
+    let runtime = RuntimeRunner::new(&infra);
+    runtime.start_with_tunnel().await?;
 
     // Wait a bit for agent's SSH/SFTP server to be fully ready
     tracing::info!("Waiting for agent SSH server to be ready...");
@@ -72,7 +72,7 @@ async fn test_cp_local_to_remote() -> Result<(), E2EError> {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // Check agent run log for any errors
-    let agent_log = read_log(&infra.agent, "/tmp/agent-run.log").await?;
+    let agent_log = read_log(&infra.runtime, "/tmp/agent-run.log").await?;
     tracing::info!("Agent run log:\n{}", agent_log);
 
     // Step 6: Verify file exists on agent with correct content
@@ -80,10 +80,10 @@ async fn test_cp_local_to_remote() -> Result<(), E2EError> {
     tracing::info!("Verifying file on agent...");
 
     // First check if file exists at expected location
-    let file_exists = exec_shell(&infra.agent, "ls -la /root/test-dest.txt 2>&1").await?;
+    let file_exists = exec_shell(&infra.runtime, "ls -la /root/test-dest.txt 2>&1").await?;
     tracing::info!("File listing: {}", file_exists);
 
-    let dest_content = exec_shell(&infra.agent, "cat /root/test-dest.txt 2>&1").await?;
+    let dest_content = exec_shell(&infra.runtime, "cat /root/test-dest.txt 2>&1").await?;
     tracing::info!("Destination file content: {}", dest_content);
 
     assert!(
@@ -116,13 +116,13 @@ async fn test_cp_remote_to_local() -> Result<(), E2EError> {
     // Step 2: Setup SNI for tunneling
     tracing::info!("Setting up SNI...");
     let sni = SniSetup::from_cli(&infra.cli).await?;
-    sni.setup_both(&infra.agent, &infra.cli, &device.short_id)
+    sni.setup_both(&infra.runtime, &infra.cli, &device.short_id)
         .await?;
 
     // Step 3: Start agent and wait for control tunnel
     tracing::info!("Starting agent run...");
-    let agent = AgentRunner::new(&infra);
-    agent.start_with_tunnel().await?;
+    let runtime = RuntimeRunner::new(&infra);
+    runtime.start_with_tunnel().await?;
 
     // Wait a bit for agent's SSH/SFTP server to be fully ready
     tracing::info!("Waiting for agent SSH server to be ready...");
@@ -133,13 +133,13 @@ async fn test_cp_remote_to_local() -> Result<(), E2EError> {
     // (scp-style: relative paths resolve to home directory)
     tracing::info!("Creating test file on agent...");
     exec_shell(
-        &infra.agent,
+        &infra.runtime,
         "echo 'Hello from Agent to CLI' > /root/agent-source.txt",
     )
     .await?;
 
     // Verify the source file was created
-    let source_content = exec_shell(&infra.agent, "cat /root/agent-source.txt").await?;
+    let source_content = exec_shell(&infra.runtime, "cat /root/agent-source.txt").await?;
     tracing::info!("Source file content: {}", source_content);
 
     // Step 5: Run cp command to copy file to CLI
@@ -190,13 +190,13 @@ async fn test_sync_directory() -> Result<(), E2EError> {
     // Step 2: Setup SNI for tunneling
     tracing::info!("Setting up SNI...");
     let sni = SniSetup::from_cli(&infra.cli).await?;
-    sni.setup_both(&infra.agent, &infra.cli, &device.short_id)
+    sni.setup_both(&infra.runtime, &infra.cli, &device.short_id)
         .await?;
 
     // Step 3: Start agent and wait for control tunnel
     tracing::info!("Starting agent run...");
-    let agent = AgentRunner::new(&infra);
-    agent.start_with_tunnel().await?;
+    let runtime = RuntimeRunner::new(&infra);
+    runtime.start_with_tunnel().await?;
 
     // Wait a bit for agent's SSH/SFTP server to be fully ready
     tracing::info!("Waiting for agent SSH server to be ready...");
@@ -236,7 +236,7 @@ async fn test_sync_directory() -> Result<(), E2EError> {
     tracing::info!("Verifying files on agent...");
 
     // Check file1.txt
-    let file1_content = exec_shell(&infra.agent, "cat /root/sync-dest/file1.txt 2>&1").await?;
+    let file1_content = exec_shell(&infra.runtime, "cat /root/sync-dest/file1.txt 2>&1").await?;
     assert!(
         file1_content.contains("File 1 content"),
         "Expected 'File 1 content' in file1.txt, got: {}",
@@ -244,7 +244,7 @@ async fn test_sync_directory() -> Result<(), E2EError> {
     );
 
     // Check file2.txt
-    let file2_content = exec_shell(&infra.agent, "cat /root/sync-dest/file2.txt 2>&1").await?;
+    let file2_content = exec_shell(&infra.runtime, "cat /root/sync-dest/file2.txt 2>&1").await?;
     assert!(
         file2_content.contains("File 2 content"),
         "Expected 'File 2 content' in file2.txt, got: {}",
@@ -253,7 +253,7 @@ async fn test_sync_directory() -> Result<(), E2EError> {
 
     // Check nested file
     let nested_content =
-        exec_shell(&infra.agent, "cat /root/sync-dest/subdir/nested.txt 2>&1").await?;
+        exec_shell(&infra.runtime, "cat /root/sync-dest/subdir/nested.txt 2>&1").await?;
     assert!(
         nested_content.contains("Nested file content"),
         "Expected 'Nested file content' in subdir/nested.txt, got: {}",
@@ -261,7 +261,7 @@ async fn test_sync_directory() -> Result<(), E2EError> {
     );
 
     // List all synced files
-    let dest_files = exec_shell(&infra.agent, "find /root/sync-dest -type f | sort").await?;
+    let dest_files = exec_shell(&infra.runtime, "find /root/sync-dest -type f | sort").await?;
     tracing::info!("Destination files: {}", dest_files);
 
     tracing::info!("sync directory test passed!");
@@ -286,13 +286,13 @@ async fn test_sync_with_delete() -> Result<(), E2EError> {
     // Step 2: Setup SNI for tunneling
     tracing::info!("Setting up SNI...");
     let sni = SniSetup::from_cli(&infra.cli).await?;
-    sni.setup_both(&infra.agent, &infra.cli, &device.short_id)
+    sni.setup_both(&infra.runtime, &infra.cli, &device.short_id)
         .await?;
 
     // Step 3: Start agent and wait for control tunnel
     tracing::info!("Starting agent run...");
-    let agent = AgentRunner::new(&infra);
-    agent.start_with_tunnel().await?;
+    let runtime = RuntimeRunner::new(&infra);
+    runtime.start_with_tunnel().await?;
 
     // Wait a bit for agent's SSH/SFTP server to be fully ready
     tracing::info!("Waiting for agent SSH server to be ready...");
@@ -311,7 +311,7 @@ async fn test_sync_with_delete() -> Result<(), E2EError> {
     // Relative path "sync-delete-dest" = ~/sync-delete-dest = /root/sync-delete-dest
     tracing::info!("Creating destination directory on agent with extra file...");
     exec_shell(
-        &infra.agent,
+        &infra.runtime,
         "mkdir -p /root/sync-delete-dest && \
          echo 'Delete me' > /root/sync-delete-dest/extra.txt",
     )
@@ -319,7 +319,7 @@ async fn test_sync_with_delete() -> Result<(), E2EError> {
 
     // Verify extra file exists
     let extra_exists = exec_shell(
-        &infra.agent,
+        &infra.runtime,
         "test -f /root/sync-delete-dest/extra.txt && echo 'exists' || echo 'not found'",
     )
     .await?;
@@ -342,7 +342,7 @@ async fn test_sync_with_delete() -> Result<(), E2EError> {
     tracing::info!("sync --delete output: {}", sync_output);
 
     // Step 7: Verify keep.txt exists
-    let keep_content = exec_shell(&infra.agent, "cat /root/sync-delete-dest/keep.txt 2>&1").await?;
+    let keep_content = exec_shell(&infra.runtime, "cat /root/sync-delete-dest/keep.txt 2>&1").await?;
     assert!(
         keep_content.contains("Keep me"),
         "Expected 'Keep me' in keep.txt, got: {}",
@@ -351,7 +351,7 @@ async fn test_sync_with_delete() -> Result<(), E2EError> {
 
     // Step 8: Verify extra.txt was deleted
     let extra_after = exec_shell(
-        &infra.agent,
+        &infra.runtime,
         "test -f /root/sync-delete-dest/extra.txt && echo 'exists' || echo 'not found'",
     )
     .await?;
@@ -376,12 +376,12 @@ async fn test_sync_dry_run() -> Result<(), E2EError> {
 
     // Setup SNI
     let sni = SniSetup::from_cli(&infra.cli).await?;
-    sni.setup_both(&infra.agent, &infra.cli, &device.short_id)
+    sni.setup_both(&infra.runtime, &infra.cli, &device.short_id)
         .await?;
 
     // Start agent
-    let agent = AgentRunner::new(&infra);
-    agent.start_with_tunnel().await?;
+    let runtime = RuntimeRunner::new(&infra);
+    runtime.start_with_tunnel().await?;
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // Create source directory
@@ -393,11 +393,12 @@ async fn test_sync_dry_run() -> Result<(), E2EError> {
     .await?;
 
     // Run sync with --dry-run (destination doesn't exist)
+    // Note: --verbose is needed to see the [dry-run] messages in output
     tracing::info!("Running sync with --dry-run...");
     let sync_output = exec_shell(
         &infra.cli,
         &format!(
-            "m87 sync --dry-run /tmp/dry-run-source/ {}:dry-run-dest/ 2>&1",
+            "m87 sync --verbose --dry-run /tmp/dry-run-source/ {}:dry-run-dest/ 2>&1",
             device.name
         ),
     )
@@ -413,7 +414,7 @@ async fn test_sync_dry_run() -> Result<(), E2EError> {
 
     // Verify destination was NOT created
     let dest_exists = exec_shell(
-        &infra.agent,
+        &infra.runtime,
         "test -d /root/dry-run-dest && echo 'exists' || echo 'not found'",
     )
     .await?;
@@ -438,12 +439,12 @@ async fn test_sync_exclude() -> Result<(), E2EError> {
 
     // Setup SNI
     let sni = SniSetup::from_cli(&infra.cli).await?;
-    sni.setup_both(&infra.agent, &infra.cli, &device.short_id)
+    sni.setup_both(&infra.runtime, &infra.cli, &device.short_id)
         .await?;
 
     // Start agent
-    let agent = AgentRunner::new(&infra);
-    agent.start_with_tunnel().await?;
+    let runtime = RuntimeRunner::new(&infra);
+    runtime.start_with_tunnel().await?;
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // Create source directory with various files
@@ -470,7 +471,7 @@ async fn test_sync_exclude() -> Result<(), E2EError> {
 
     // Verify keep.txt exists
     let keep_exists = exec_shell(
-        &infra.agent,
+        &infra.runtime,
         "test -f /root/exclude-dest/keep.txt && echo 'exists' || echo 'not found'",
     )
     .await?;
@@ -482,7 +483,7 @@ async fn test_sync_exclude() -> Result<(), E2EError> {
 
     // Verify .git directory was NOT synced
     let git_exists = exec_shell(
-        &infra.agent,
+        &infra.runtime,
         "test -d /root/exclude-dest/.git && echo 'exists' || echo 'not found'",
     )
     .await?;
@@ -494,7 +495,7 @@ async fn test_sync_exclude() -> Result<(), E2EError> {
 
     // Verify *.log files were NOT synced
     let log_exists = exec_shell(
-        &infra.agent,
+        &infra.runtime,
         "test -f /root/exclude-dest/debug.log && echo 'exists' || echo 'not found'",
     )
     .await?;

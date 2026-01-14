@@ -23,10 +23,10 @@ impl<'a> DeviceRegistration<'a> {
         Self { infra }
     }
 
-    /// Step 1: Start agent login process (runs in background)
+    /// Step 1: Start runtime login process (runs in background)
     pub async fn start_login(&self) -> Result<(), E2EError> {
         self.infra
-            .start_agent_login()
+            .start_runtime_login()
             .await
             .map_err(|e| E2EError::Exec(e.to_string()))
     }
