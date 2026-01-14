@@ -24,7 +24,7 @@ Linux:
 curl -fsSL https://get.make87.com | sh
 ```
 
-Or download from [releases](https://github.com/make87/make87/releases).
+Or download from [releases](https://github.com/make87/m87/releases).
 
 ## Quick Start
 
@@ -156,7 +156,7 @@ See [examples/features/forward](./examples/features/forward/) for more.
 Requires Rust 1.85+
 
 ```sh
-git clone https://github.com/make87/make87
+git clone https://github.com/make87/m87
 cd make87
 cargo build --release -p m87-client
 ```

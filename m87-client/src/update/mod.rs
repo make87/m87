@@ -6,7 +6,7 @@ use std::fs::File;
 use tracing::{error, info};
 
 const GITHUB_LATEST_RELEASE_URL: &str =
-    "https://api.github.com/repos/make87/make87/releases/latest";
+    "https://api.github.com/repos/make87/m87/releases/latest";
 
 fn arch_bin_name() -> &'static str {
     #[cfg(target_arch = "x86_64")]

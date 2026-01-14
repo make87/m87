@@ -304,7 +304,7 @@ jobs:
           push: true
           tags: ghcr.io/make87/m87-server:${{ needs.read-version.outputs.version }}-${{ matrix.arch }}
           labels: |
-            org.opencontainers.image.source=https://github.com/make87/make87
+            org.opencontainers.image.source=https://github.com/make87/m87
           build-args: |
             BUILD_PROFILE=${{ inputs.build_profile == 'dev' && 'debug' || 'release' }}
           cache-from: type=registry,ref=ghcr.io/make87/m87-server:buildcache-${{ matrix.arch }}
@@ -420,7 +420,7 @@ jobs:
             
             Supported architectures: linux/amd64, linux/arm64
 
-            See available tags at: https://github.com/make87/make87/pkgs/container/m87-server
+            See available tags at: https://github.com/make87/m87/pkgs/container/m87-server
             
             ### Docker Compose
             Run a full Docker Compose stack from `ghcr.io/make87/m87-server-compose` to also start dependencies like mongoDB.
