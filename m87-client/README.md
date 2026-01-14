@@ -103,13 +103,7 @@ After updating, restart the runtime to use the new version:
 m87 runtime restart             # restart the runtime service
 ```
 
-**Note:** If you're running `m87 runtime restart` from within a device shell (e.g., via `m87 <device> shell`), the command will fail because the shell is a subprocess of the runtime being restarted. Use `systemd-run` to run the restart in an independent scope:
-
-```sh
-sudo -v && systemd-run --scope m87 runtime restart
-```
-
-The `sudo -v` prompts for your password upfront, then `systemd-run --scope` creates a transient scope outside the runtime's cgroup, allowing the restart to complete successfully.
+This works even from within a device shell (via `m87 <device> shell`), allowing you to update and restart the runtime remotely.
 
 ### Running as Runtime (Linux)
 
