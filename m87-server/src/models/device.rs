@@ -213,7 +213,7 @@ impl DeviceDoc {
             update_fields.insert("system_info", mongodb::bson::to_bson(&sys_info).unwrap());
         }
         if let Some(client_version) = payload.client_version {
-            update_fields.insert("client_version", client_version);
+            update_fields.insert("version", client_version);
         }
 
         if !update_fields.is_empty() {
