@@ -42,6 +42,30 @@ cargo build --release
 cp target/release/m87 $HOME/.local/bin/
 ```
 
+**Via Docker (no local install)**
+
+Run m87 from a container without installing anything locally. Useful for CI pipelines or keeping your system clean.
+
+```bash
+# Build the image
+git clone https://github.com/make87/m87.git
+cd make87
+docker build -f m87-client/Dockerfile -t m87 .
+
+# Run commands (config persists in ~/.config/m87)
+docker run -it --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$HOME/.config/m87:/.config/m87" \
+  -e HOME=/ \
+  m87 login
+```
+
+For convenience, add an alias to your shell rc:
+
+```bash
+alias m87='docker run -it --rm --user "$(id -u):$(id -g)" -v "$HOME/.config/m87:/.config/m87" -e HOME=/ m87'
+```
+
 </details>
 
 ### 2. Set up your developer machine

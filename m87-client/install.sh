@@ -81,14 +81,14 @@ detect_arch() {
                 error "macOS x86_64 (Intel) is not supported. Only Apple Silicon (ARM64) is supported."
                 exit 1
             fi
-            TARGET="x86_64-unknown-linux-gnu"
+            TARGET="x86_64-unknown-linux-musl"
             ;;
         aarch64|arm64)
             ARCH="aarch64"
             if [ "$OS" = "macos" ]; then
                 TARGET="aarch64-apple-darwin"
             else
-                TARGET="aarch64-unknown-linux-gnu"
+                TARGET="aarch64-unknown-linux-musl"
             fi
             ;;
         *)

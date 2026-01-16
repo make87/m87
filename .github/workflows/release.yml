@@ -88,9 +88,9 @@ jobs:
     strategy:
       matrix:
         include:
-          # Linux builds (Docker/manylinux2014)
+          # Linux builds (Docker/Alpine for static musl binaries)
           - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             os: linux
             arch: amd64
             package: m87-client
@@ -98,7 +98,7 @@ jobs:
             binary_name: m87
             use_docker: true
           - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             os: linux
             arch: arm64
             package: m87-client
@@ -142,7 +142,7 @@ jobs:
         if: matrix.use_docker
         uses: docker/setup-buildx-action@v3
 
-      - name: Build ${{ matrix.package }} using manylinux2014 container
+      - name: Build ${{ matrix.package }} using Docker
         if: matrix.use_docker
         run: |
           if [ "${{ inputs.build_profile }}" = "release" ]; then
@@ -172,9 +172,20 @@ jobs:
           ls -lh artifacts/${{ matrix.binary_name }}-${{ matrix.target }}
           file artifacts/${{ matrix.binary_name }}-${{ matrix.target }}
 
-          # Verify glibc version requirement
-          echo "GLIBC requirements:"
-          strings artifacts/${{ matrix.binary_name }}-${{ matrix.target }} | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 || echo "No GLIBC symbols found"
+          # Verify binary linking
+          if [[ "${{ matrix.target }}" == *"-musl" ]]; then
+            echo "Verifying static linking for musl build..."
+            if ldd artifacts/${{ matrix.binary_name }}-${{ matrix.target }} 2>&1 | grep -q "not a dynamic executable"; then
+              echo "SUCCESS: Binary is statically linked"
+            else
+              echo "WARNING: Binary may be dynamically linked"
+              file artifacts/${{ matrix.binary_name }}-${{ matrix.target }}
+              ldd artifacts/${{ matrix.binary_name }}-${{ matrix.target }} || true
+            fi
+          else
+            echo "GLIBC requirements:"
+            strings artifacts/${{ matrix.binary_name }}-${{ matrix.target }} | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 || echo "No GLIBC symbols found"
+          fi
 
       - name: Install Rust
         if: ${{ !matrix.use_docker }}
@@ -403,8 +414,8 @@ jobs:
             ### Binaries
 
             **m87 (client) - Linux**
-            - `m87-x86_64-unknown-linux-gnu` - x86_64/AMD64 architecture
-            - `m87-aarch64-unknown-linux-gnu` - ARM64 architecture
+            - `m87-x86_64-unknown-linux-musl` - x86_64/AMD64 (static binary)
+            - `m87-aarch64-unknown-linux-musl` - ARM64 (static binary)
 
             **m87 (client) - macOS**
             - `m87-aarch64-apple-darwin` - Apple Silicon (ARM64)

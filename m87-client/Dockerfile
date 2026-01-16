@@ -1,61 +1,71 @@
 # ===========================
-# Build Stage (manylinux2014 for glibc 2.17 compatibility)
+# Build Stage (cross-compile to musl for static binaries)
 # ===========================
+FROM rust:slim-bookworm AS builder
 
-FROM quay.io/pypa/manylinux2014 AS builder
-
-# Build profile: "release" or "debug"
 ARG BUILD_PROFILE=release
+ARG TARGETARCH
 
-# Install Rust
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
+# Install build dependencies and musl toolchain
+RUN apt-get update && apt-get install -y \
+    musl-tools \
+    musl-dev \
+    build-essential \
+    cmake \
+    clang \
+    perl \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+# Add musl targets
+RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+# Install aarch64 cross-compiler if needed
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+      apt-get update && apt-get install -y gcc-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 WORKDIR /workspace
 
-# Copy workspace files
 COPY Cargo.toml Cargo.lock ./
-
-# Copy all workspace members (required by workspace manifest)
 COPY m87-client ./m87-client
 COPY m87-server ./m87-server
 COPY m87-shared ./m87-shared
 
-# Build the m87 binary with both runtime and command line features
-RUN if [ "$BUILD_PROFILE" = "release" ]; then \
-      cargo build --release --package m87-client --features runtime,cli; \
+# Set up cross-compilation environment
+ENV RUSTFLAGS="-C target-feature=+crt-static"
+
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+      export TARGET="aarch64-unknown-linux-musl"; \
+      export CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc; \
+      export AR_aarch64_unknown_linux_musl=aarch64-linux-gnu-ar; \
     else \
-      cargo build --package m87-client --features runtime,cli; \
-    fi
+      export TARGET="x86_64-unknown-linux-musl"; \
+    fi && \
+    if [ "$BUILD_PROFILE" = "release" ]; then \
+      cargo build --release --target $TARGET --package m87-client --features runtime,cli; \
+    else \
+      cargo build --target $TARGET --package m87-client --features runtime,cli; \
+    fi && \
+    mkdir -p /workspace/out && \
+    cp /workspace/target/$TARGET/${BUILD_PROFILE}/m87 /workspace/out/m87
 
 # ===========================
 # Runtime Stage (for e2e tests and container deployments)
 # ===========================
-FROM debian:bookworm-slim
+FROM alpine:3.21
 
-# Build profile: "release" or "debug"
 ARG BUILD_PROFILE=release
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
+RUN apk add --no-cache \
     ca-certificates \
     curl \
-    netcat-openbsd \
-    && rm -rf /var/lib/apt/lists/*
+    netcat-openbsd
 
 WORKDIR /app
 
-# Copy compiled binary from manylinux builder
-# Binary compiled on glibc 2.17 is forward-compatible with glibc 2.36 (bookworm)
-COPY --from=builder /workspace/target/${BUILD_PROFILE}/m87 /app/m87
+COPY --from=builder /workspace/out/m87 /app/m87
 
-# Create config directory
-RUN mkdir -p /root/.config/m87
-
-# Add to PATH
 ENV PATH="/app:${PATH}"
 
-# No default entrypoint - commands passed via docker compose
+ENTRYPOINT ["/app/m87"]

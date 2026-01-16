@@ -1,0 +1,29 @@
+# Rust build artifacts (main culprit - GBs of data)
+target/
+**/target/
+debug/
+
+# E2E tests directory (not needed for build)
+tests/
+
+# Rustfmt backups
+**/*.rs.bk
+
+# MSVC debug files
+*.pdb
+
+# Cargo mutants output
+**/mutants.out*/
+
+# IDE
+.idea/
+.vscode/
+.run/
+
+# Git
+.git/
+
+# CI/docs (not needed in build context)
+.github/
+*.md
+LICENSE
