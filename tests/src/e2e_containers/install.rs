@@ -13,16 +13,16 @@ const TEST_VERSION: &str = "0.0.0-test";
 /// Get the target triple for the current architecture
 fn get_target_triple() -> &'static str {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    return "x86_64-unknown-linux-gnu";
+    return "x86_64-unknown-linux-musl";
 
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    return "aarch64-unknown-linux-gnu";
+    return "aarch64-unknown-linux-musl";
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    return "aarch64-unknown-linux-gnu"; // Container will be linux
+    return "aarch64-unknown-linux-musl"; // Container will be linux
 
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    return "x86_64-unknown-linux-gnu"; // Container will be linux
+    return "x86_64-unknown-linux-musl"; // Container will be linux
 
     #[cfg(not(any(
         all(target_os = "linux", target_arch = "x86_64"),
@@ -30,7 +30,7 @@ fn get_target_triple() -> &'static str {
         all(target_os = "macos", target_arch = "aarch64"),
         all(target_os = "macos", target_arch = "x86_64"),
     )))]
-    return "x86_64-unknown-linux-gnu"; // Default fallback
+    return "x86_64-unknown-linux-musl"; // Default fallback
 }
 
 // Build install-test image once per test run
