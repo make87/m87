@@ -103,7 +103,11 @@ After updating, restart the runtime to use the new version:
 m87 runtime restart             # restart the runtime service
 ```
 
-This works even from within a device shell (via `m87 <device> shell`), allowing you to update and restart the runtime remotely.
+To update and restart a remote device:
+
+```sh
+m87 <device> exec -it -- 'm87 update && m87 runtime restart'
+```
 
 ### Running as Runtime (Linux)
 
