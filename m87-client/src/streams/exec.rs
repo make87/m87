@@ -1,8 +1,10 @@
 //! Raw TCP/TLS endpoint for clean command execution.
 //!
 //! Unlike `/terminal` which spawns an interactive login shell,
-//! this endpoint runs commands directly via `$SHELL -c "command"`,
+//! this endpoint runs commands via `$SHELL -l -i -c "command"`,
 //! producing clean output without MOTD, prompts, or logout messages.
+//! The `-l -i` flags ensure profile files (including ~/.bashrc) are sourced
+//! so PATH is properly set.
 //!
 //! Protocol:
 //! 1. Client sends JSON config line: {"command":"...", "tty":false}\n
@@ -77,7 +79,9 @@ where
     let shell = get_shell();
 
     let mut cmd = Command::new(&shell);
-    cmd.arg("-c")
+    cmd.arg("-l")
+        .arg("-i")
+        .arg("-c")
         .arg(&config.command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -237,9 +241,9 @@ where
         }
     };
 
-    // Spawn command in PTY (via shell -c, not interactive shell)
+    // Spawn command in PTY (via shell -l -i -c, sources profile files for PATH)
     let mut cmd = CommandBuilder::new(&shell);
-    cmd.args(&["-c", &config.command]);
+    cmd.args(&["-l", "-i", "-c", &config.command]);
     cmd.env("TERM", "xterm-256color");
 
     let mut child = match pair.slave.spawn_command(cmd) {
