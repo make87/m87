@@ -1,6 +1,6 @@
 services:
   m87-server:
-    image: ghcr.io/make87/m87-server:latest
+    image: ghcr.io/make87/m87-server:0.4.2
     build:
       context: ..
       dockerfile: m87-server/Dockerfile
