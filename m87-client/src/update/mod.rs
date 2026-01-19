@@ -20,7 +20,7 @@ fn arch_bin_name() -> &'static str {
 
     // #[cfg(target_arch = "riscv64")]
     // {
-    //     "m87-riscv64gc-unknown-linux-gnu"
+    //     "m87-riscv64gc-unknown-linux-musl"
     // }
 }
 
@@ -124,16 +124,16 @@ mod tests {
     fn test_arch_bin_name_format() {
         let name = arch_bin_name();
         assert!(name.starts_with("m87-"));
-        assert!(name.contains("-unknown-linux-gnu"));
+        assert!(name.contains("-unknown-linux-musl"));
     }
 
     #[test]
     fn test_arch_bin_name_known_arch() {
         let name = arch_bin_name();
         let known_archs = [
-            "m87-x86_64-unknown-linux-gnu",
-            "m87-aarch64-unknown-linux-gnu",
-            "m87-riscv64gc-unknown-linux-gnu",
+            "m87-x86_64-unknown-linux-musl",
+            "m87-aarch64-unknown-linux-musl",
+            "m87-riscv64gc-unknown-linux-musl",
         ];
         assert!(
             known_archs.contains(&name),
@@ -147,15 +147,15 @@ mod tests {
         let json = r#"{
             "tag_name": "v1.2.3",
             "assets": [
-                {"name": "m87-x86_64-unknown-linux-gnu", "browser_download_url": "https://example.com/download1"},
-                {"name": "m87-aarch64-unknown-linux-gnu", "browser_download_url": "https://example.com/download2"}
+                {"name": "m87-x86_64-unknown-linux-musl", "browser_download_url": "https://example.com/download1"},
+                {"name": "m87-aarch64-unknown-linux-musl", "browser_download_url": "https://example.com/download2"}
             ]
         }"#;
 
         let release: GitHubRelease = serde_json::from_str(json).unwrap();
         assert_eq!(release.tag_name, "v1.2.3");
         assert_eq!(release.assets.len(), 2);
-        assert_eq!(release.assets[0].name, "m87-x86_64-unknown-linux-gnu");
+        assert_eq!(release.assets[0].name, "m87-x86_64-unknown-linux-musl");
         assert!(
             release.assets[0]
                 .browser_download_url
