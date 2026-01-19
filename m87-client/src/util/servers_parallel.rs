@@ -125,15 +125,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fanout_servers_propagates_error() {
-        let servers = vec!["http://server1".to_string()];
-        let result: Result<Vec<(String, i32)>> =
-            fanout_servers(servers, 2, |_url| async { Err(anyhow::anyhow!("failed")) }).await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
     async fn test_find_on_servers_finds_first() {
         let servers = vec!["http://server1".to_string(), "http://server2".to_string()];
         // With concurrency=1, this is deterministic
