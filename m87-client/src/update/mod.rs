@@ -10,18 +10,18 @@ const GITHUB_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/make87/m87
 fn arch_bin_name() -> &'static str {
     #[cfg(target_arch = "x86_64")]
     {
-        "m87-x86_64-unknown-linux-gnu"
+        "m87-x86_64-unknown-linux-musl"
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        "m87-aarch64-unknown-linux-gnu"
+        "m87-aarch64-unknown-linux-musl"
     }
 
-    #[cfg(target_arch = "riscv64")]
-    {
-        "m87-riscv64gc-unknown-linux-gnu"
-    }
+    // #[cfg(target_arch = "riscv64")]
+    // {
+    //     "m87-riscv64gc-unknown-linux-gnu"
+    // }
 }
 
 #[derive(Debug, Deserialize)]
