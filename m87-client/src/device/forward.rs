@@ -84,7 +84,7 @@ pub async fn forward_device_port(
             .await
         }
         ForwardTarget::Vpn(_target) => {
-            info!("COMING SOON");
+            println!("COMING SOON");
             Ok(())
         }
     }
@@ -109,7 +109,7 @@ async fn forward_device_port_tcp(
         connect_quic_only(host_name, token, device_short_id, trust_invalid_server_cert).await?;
     debug!("QUIC connection established, entering accept loop");
 
-    info!(
+    println!(
         "TCP forward: 127.0.0.1:{} → {}/{}:{}",
         &forward_spec.local_port, device_short_id, remote_host, &forward_spec.remote_port
     );
@@ -176,7 +176,7 @@ async fn forward_device_port_udp(
     // Close the control stream – we're done with it
     quic_io.send.finish()?;
 
-    info!(
+    println!(
         "UDP forward: 127.0.0.1:{} → {} {}:{}",
         &forward_spec.local_port,
         device_short_id,
@@ -303,7 +303,7 @@ async fn forward_device_socket(
     }
 
     let listener = UnixListener::bind(local_path)?;
-    info!(
+    println!(
         "Socket forward: local {} → {} {}",
         local_path, device_short_id, target.remote_path
     );

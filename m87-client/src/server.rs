@@ -16,7 +16,6 @@ use reqwest::Client;
 
 use tracing::error;
 
-use crate::retry_async;
 // Import shared types
 pub use m87_shared::auth::{
     AuthRequestAction, CheckAuthRequest, DeviceAuthRequest, DeviceAuthRequestBody,
@@ -143,7 +142,7 @@ pub async fn set_auth_request(
     let url = format!("{}/auth/request", api_url);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.post(&url).json(&body).send())?;
+    let res = client.post(&url).json(&body).send().await?;
     match res.error_for_status() {
         Ok(r) => {
             // returns a string with device id on success
@@ -164,16 +163,13 @@ pub async fn check_auth_request(
     let url = format!("{}/auth/request/check", api_url);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(
-        3,
-        3,
-        client
-            .post(&url)
-            .json(&CheckAuthRequest {
-                request_id: request_id.to_string()
-            })
-            .send()
-    )?;
+    let res = client
+        .post(&url)
+        .json(&CheckAuthRequest {
+            request_id: request_id.to_string(),
+        })
+        .send()
+        .await?;
     match res.error_for_status() {
         Ok(r) => {
             // returns a string with device id on success
@@ -193,7 +189,7 @@ pub async fn list_auth_requests(
     let url = format!("{}/auth/request", api_url);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
     match res.error_for_status() {
         Ok(r) => {
             let response: Vec<DeviceAuthRequest> = r.json().await?;
@@ -214,18 +210,15 @@ pub async fn handle_auth_request(
     let url = format!("{}/auth/request/approve", api_url);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(
-        3,
-        3,
-        client
-            .post(&url)
-            .bearer_auth(token)
-            .json(&AuthRequestAction {
-                accept,
-                request_id: request_id.to_string()
-            })
-            .send()
-    )?;
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&AuthRequestAction {
+            accept,
+            request_id: request_id.to_string(),
+        })
+        .send()
+        .await?;
     match res.error_for_status() {
         Ok(_) => Ok(()),
         Err(e) => Err(anyhow!(e)),
@@ -240,14 +233,11 @@ pub async fn list_devices(
 ) -> Result<Vec<PublicDevice>> {
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(
-        3,
-        3,
-        client
-            .get(&format!("{}/device", api_url))
-            .bearer_auth(token)
-            .send()
-    )?;
+    let res = client
+        .get(&format!("{}/device", api_url))
+        .bearer_auth(token)
+        .send()
+        .await?;
     match res.error_for_status() {
         Ok(res) => Ok(res.json().await?),
         Err(e) => Err(anyhow!(e)),
@@ -259,13 +249,13 @@ fn get_client(trust_invalid_server_cert: bool) -> Result<Client> {
     if trust_invalid_server_cert {
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(5))
             .build()?;
         Ok(client)
     } else {
         // otherwise we verify the certificate
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(5))
             .build()?;
         Ok(client)
     }
@@ -281,11 +271,12 @@ pub async fn update_device(
     let client = get_client(trust_invalid_server_cert)?;
     let url = format!("{}/device/{}", api_url.trim_end_matches('/'), device_id);
 
-    let res = retry_async!(
-        3,
-        3,
-        client.post(&url).bearer_auth(token).json(&body).send()
-    );
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await;
     if let Err(e) = res {
         tracing::error!("Error reporting device details: {}", e);
         return Err(anyhow!(e));
@@ -309,15 +300,12 @@ pub async fn get_device_status(
 
     let url = format!("{}/device/{}/status", api_url, device_id);
 
-    let res = retry_async!(
-        3,
-        3,
-        client
-            .get(&url)
-            .bearer_auth(token)
-            // .query(&[("since", since)])
-            .send()
-    );
+    let res = client
+        .get(&url)
+        .bearer_auth(token)
+        // .query(&[("since", since)])
+        .send()
+        .await;
     if let Err(e) = res {
         tracing::error!("Error getting device status: {}", e);
         return Err(anyhow!(e));
@@ -359,7 +347,7 @@ pub async fn get_deployments(
 
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => {
@@ -380,7 +368,7 @@ pub async fn get_deployment(
     let url = format!("{}/device/{}/revisions/{}", api_url, device_id, revision_id);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => {
@@ -401,11 +389,12 @@ pub async fn create_deployment(
     let url = format!("{}/device/{}/revisions", api_url, device_id);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(
-        3,
-        3,
-        client.post(&url).bearer_auth(token).json(&body).send()
-    )?;
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
 
     match res.error_for_status() {
         Ok(r) => {
@@ -427,11 +416,12 @@ pub async fn update_deployment(
     let url = format!("{}/device/{}/revisions/{}", api_url, device_id, revision_id);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(
-        3,
-        3,
-        client.post(&url).bearer_auth(token).json(&body).send()
-    )?;
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
 
     match res.error_for_status() {
         Ok(_) => Ok(()),
@@ -449,7 +439,7 @@ pub async fn delete_deployment(
     let url = format!("{}/device/{}/revisions/{}", api_url, device_id, revision_id);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.delete(&url).bearer_auth(token).send())?;
+    let res = client.delete(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(_) => Ok(()),
@@ -466,7 +456,7 @@ pub async fn get_active_deployment_id(
     let url = format!("{}/device/{}/revisions/active", api_url, device_id);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -487,7 +477,7 @@ pub async fn get_deployment_reports(
     );
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -508,7 +498,7 @@ pub async fn get_device_revision_snapshot(
     );
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -536,7 +526,7 @@ pub async fn get_device_audit_logs(
         q.push(("until", u.to_string()));
     }
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).query(&q).send())?;
+    let res = client.get(&url).bearer_auth(token).query(&q).send().await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -553,7 +543,7 @@ pub async fn get_device_users(
     let url = format!("{}/device/{}/users", api_url, device_id);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -574,7 +564,7 @@ pub async fn remove_device_access(
     );
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.delete(&url).bearer_auth(token).send())?;
+    let res = client.delete(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(_) => Ok(()),
@@ -597,11 +587,12 @@ pub async fn add_device_access(
         role,
     };
 
-    let res = retry_async!(
-        3,
-        3,
-        client.post(&url).bearer_auth(token).json(&body).send()
-    )?;
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
 
     match res.error_for_status() {
         Ok(_) => Ok(()),
@@ -627,7 +618,12 @@ pub async fn update_device_access(
         role,
     };
 
-    let res = retry_async!(3, 3, client.put(&url).bearer_auth(token).json(&body).send())?;
+    let res = client
+        .put(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
 
     match res.error_for_status() {
         Ok(_) => Ok(()),
@@ -643,7 +639,7 @@ pub async fn list_organizations(
     let url = format!("{}/organization", api_url);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -666,11 +662,12 @@ pub async fn create_organization(
         owner_email: owner_email.to_string(),
     };
 
-    let res = retry_async!(
-        3,
-        3,
-        client.post(&url).bearer_auth(token).json(&body).send()
-    )?;
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -687,7 +684,7 @@ pub async fn delete_organization(
     let url = format!("{}/organization/{}", api_url, id);
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = retry_async!(3, 3, client.delete(&url).bearer_auth(token).send())?;
+    let res = client.delete(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(_) => Ok(()),
@@ -709,7 +706,12 @@ pub async fn update_organization(
         new_id: new_id.to_string(),
     };
 
-    let res = retry_async!(3, 3, client.put(&url).bearer_auth(token).json(&body).send())?;
+    let res = client
+        .put(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -726,7 +728,7 @@ pub async fn list_organization_members(
     let url = format!("{}/organization/{}/members", server_url, org_id);
     let client = get_client(trust)?;
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -746,11 +748,12 @@ pub async fn add_organization_member(
     let client = get_client(trust)?;
 
     let body = InviteMemberBody { email, role };
-    let res = retry_async!(
-        3,
-        3,
-        client.post(&url).bearer_auth(token).json(&body).send()
-    )?;
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -768,7 +771,7 @@ pub async fn remove_organization_member(
     let url = format!("{}/organization/{}/members/{}", server_url, org_id, user_id);
     let client = get_client(trust)?;
 
-    let res = retry_async!(3, 3, client.delete(&url).bearer_auth(token).send())?;
+    let res = client.delete(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -784,7 +787,7 @@ pub async fn list_organization_invites(
     let url = format!("{}/invites", server_url);
     let client = get_client(trust)?;
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -805,11 +808,12 @@ pub async fn handle_organization_invite(
         invite_id: invite_id.to_string(),
         accepted: accept,
     };
-    let res = retry_async!(
-        3,
-        3,
-        client.post(&url).bearer_auth(token).json(&body).send()
-    )?;
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.text().await?),
@@ -826,7 +830,7 @@ pub async fn list_org_devices(
     let url = format!("{}/organization/{}/devices", server_url, org_id);
     let client = get_client(trust)?;
 
-    let res = retry_async!(3, 3, client.get(&url).bearer_auth(token).send())?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -848,11 +852,12 @@ pub async fn add_org_device(
         device_id: device_id.to_string(),
     };
 
-    let res = retry_async!(
-        3,
-        3,
-        client.post(&url).bearer_auth(token).json(&body).send()
-    )?;
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -873,7 +878,7 @@ pub async fn remove_org_device(
     );
     let client = get_client(trust)?;
 
-    let res = retry_async!(3, 3, client.delete(&url).bearer_auth(token).send())?;
+    let res = client.delete(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),

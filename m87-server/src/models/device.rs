@@ -459,6 +459,16 @@ impl DeviceDoc {
                 }
             }
         }
+        // also add owner
+        if let Some(user_owner) = self.owner_scope.strip_prefix("user:") {
+            let owner = db
+                .users() // adjust to your users collection getter
+                .find_one(doc! { "email": user_owner })
+                .await?;
+            if let Some(owner) = owner {
+                users_out.push(owner.to_public_user(&Role::Owner));
+            }
+        }
 
         let mut merged: HashMap<String, User> = HashMap::new();
 

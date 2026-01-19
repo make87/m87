@@ -33,8 +33,8 @@ macro_rules! retry_async {
             if res.is_ok() || attempts >= $times {
                 break res;
             } else {
-                std::thread::sleep(std::time::Duration::from_millis(delay));
-                delay *= 2; // Exponential backoff
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                delay = delay.saturating_mul(2);
             }
         };
 

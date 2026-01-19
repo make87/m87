@@ -4,7 +4,6 @@ use std::ffi::CStr;
 use std::os::fd::{FromRawFd, RawFd};
 use tokio::io::split;
 use tokio::task;
-use tracing::info;
 
 use crate::streams::quic::open_quic_io;
 use crate::streams::stream_type::StreamType;
@@ -59,7 +58,7 @@ pub async fn open_serial(device: &str, port: &str, baud: u32) -> Result<()> {
 
     let (master_fd, slave_path) = open_pty()?;
 
-    info!("Local virtual serial device: {}", slave_path);
+    println!("Local virtual serial device: {}", slave_path);
 
     // Convert master FD → tokio file
     let master = unsafe { tokio::fs::File::from_raw_fd(master_fd) };

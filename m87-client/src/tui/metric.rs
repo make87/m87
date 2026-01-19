@@ -42,7 +42,7 @@ async fn run_metrics_inner(device: &str) -> Result<()> {
     )
     .await?;
 
-    tracing::info!("Connected to device");
+    println!("Connected to device");
 
     // spawn metrics reader
     let reader = BufReader::new(io);

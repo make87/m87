@@ -20,7 +20,7 @@ where
                 tracing::debug!(server_url = %server_url, "fanout: starting");
 
                 // pick a sane timeout for your use-case
-                let res = tokio::time::timeout(Duration::from_secs(30), f(server_url)).await;
+                let res = tokio::time::timeout(Duration::from_secs(10), f(server_url)).await;
 
                 let mapped = match res {
                     Ok(Ok(items)) => Ok(items

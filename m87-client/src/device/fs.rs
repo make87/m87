@@ -10,7 +10,7 @@ use russh::keys::ssh_key;
 use russh_sftp::client::fs::{DirEntry, Metadata};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::error;
 
 use russh::client::{Config as ClientConfig, Handler};
 use russh_sftp::client::SftpSession;
@@ -479,9 +479,9 @@ pub async fn sync(
                 let dst_full = dst_tree.root.join(rel);
 
                 if dry_run {
-                    info!("[dry-run] would upload {}", rel);
+                    println!("[dry-run] would upload {}", rel);
                 } else {
-                    info!("uploading {}", rel);
+                    println!("uploading {}", rel);
                     copy_file(
                         &LocalOrRemotePath::from_path(&src_path, &src_full),
                         &LocalOrRemotePath::from_path(&dst_path, &dst_full),
@@ -503,9 +503,9 @@ pub async fn sync(
                 let dst_full = dst_tree.root.join(rel);
 
                 if dry_run {
-                    info!("[dry-run] would delete {}", rel);
+                    println!("[dry-run] would delete {}", rel);
                 } else {
-                    info!("deleting {}", rel);
+                    println!("deleting {}", rel);
                     delete_file(
                         &LocalOrRemotePath::from_path(&dst_path, &dst_full),
                         &mut sftp_dst,
@@ -520,7 +520,7 @@ pub async fn sync(
 }
 
 pub async fn watch_sync(src: &str, dst: &str, delete: bool, excludes: &[String]) -> Result<()> {
-    info!("Starting periodic watch-sync…");
+    println!("Starting periodic watch-sync…");
 
     // Initial run (never dry-run for watch mode)
     sync(src, dst, delete, false, excludes).await?;
@@ -536,7 +536,7 @@ pub async fn watch_sync(src: &str, dst: &str, delete: bool, excludes: &[String])
             }
 
             _ = SHUTDOWN.cancelled() => {
-                info!("Shutdown requested — closing SSH tunnel");
+                println!("Shutdown requested — closing");
                 return Ok(());
             }
         }
