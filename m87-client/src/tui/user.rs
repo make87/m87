@@ -1,8 +1,6 @@
-use crate::tui::helper::{
-    Align, ColSpec, RenderOpts, Table, bold, dim, role_badge, terminal_width,
-};
+use crate::tui::helper::{Align, ColSpec, RenderOpts, Table, dim, role_badge, terminal_width};
 
-use m87_shared::{roles::Role, users::User}; // adjust import if Role lives elsewhere
+use m87_shared::users::User;
 
 pub fn print_users(users: &[User]) {
     if users.is_empty() {

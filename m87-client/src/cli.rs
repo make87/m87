@@ -627,6 +627,8 @@ pub async fn cli() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // if is runtime run aso set to verbose
     let is_run = match &cli.command {
+        // only if feature is runtme
+        #[cfg(feature = "runtime")]
         Commands::Runtime(RuntimeCommands::Run { .. }) => true,
         _ => false,
     };

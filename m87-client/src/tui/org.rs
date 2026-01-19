@@ -1,7 +1,5 @@
-use crate::tui::helper::{
-    Align, ColSpec, RenderOpts, Table, bold, dim, role_badge, terminal_width,
-};
-use m87_shared::org::Organization; // adjust if needed
+use crate::tui::helper::{Align, ColSpec, RenderOpts, Table, dim, role_badge, terminal_width};
+use m87_shared::org::Organization;
 
 pub fn print_device_organizations(orgs: &[Organization]) {
     if orgs.is_empty() {
