@@ -428,11 +428,11 @@ jobs:
 
             ### Docker Images
             Multi-arch Docker images are available at `ghcr.io/make87/m87-server`
-            
+
             Supported architectures: linux/amd64, linux/arm64
 
             See available tags at: https://github.com/make87/m87/pkgs/container/m87-server
-            
+
             ### Docker Compose
             Run a full Docker Compose stack from `ghcr.io/make87/m87-server-compose` to also start dependencies like mongoDB.
         env:
@@ -509,7 +509,7 @@ jobs:
           # Publish compose configuration for each tag
           for TAG in $TAGS; do
             echo "Publishing compose configuration: $TAG"
-            docker compose publish --with-env -y $TAG
+            docker compose publish -y $TAG
           done
 
           echo "Docker Compose configurations published successfully"
