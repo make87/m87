@@ -11,6 +11,8 @@ services:
       # Watchtower: always update to :latest, even if container was started with a versioned tag
       - "com.centurylinklabs.watchtower.enable=true"
       - "com.centurylinklabs.watchtower.image-reference=ghcr.io/make87/m87-server:latest"
+    env_file:
+      - .env
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - MONGO_URI=mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongo:27017/admin
@@ -37,6 +39,8 @@ services:
     image: mongo:8
     container_name: mongo
     restart: always
+    env_file:
+      - .env
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}

@@ -142,7 +142,17 @@ impl Mongo {
 
         // add index to users sub
         self.users()
-            .create_index(IndexModel::builder().keys(doc! { "sub": 1 }).build())
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "sub": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .name(Some("sub_unique".to_string()))
+                            .build(),
+                    )
+                    .build(),
+            )
             .await?;
 
         self.deploy_revisions()

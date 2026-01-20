@@ -18,7 +18,7 @@ pub async fn list_organizations() -> Result<Vec<Organization>> {
     let config = Config::load()?;
     let trust = config.trust_invalid_server_cert;
 
-    let results = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let results = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         async move { server::list_organizations(&server_url, &token, trust).await }
     })
@@ -39,7 +39,7 @@ pub async fn create_organization(id: &str, owner_email: &str) -> Result<()> {
     let config = Config::load()?;
     let trust = config.trust_invalid_server_cert;
 
-    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         async move {
             server::create_organization(&server_url, &token, trust, id, owner_email).await?;
@@ -56,7 +56,7 @@ pub async fn delete_organization(id: &str) -> Result<()> {
     let config = Config::load()?;
     let trust = config.trust_invalid_server_cert;
 
-    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         async move {
             server::delete_organization(&server_url, &token, trust, id).await?;
@@ -73,7 +73,7 @@ pub async fn update_organization(id: &str, new_id: &str) -> Result<()> {
     let config = Config::load()?;
     let trust = config.trust_invalid_server_cert;
 
-    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         let id = id.to_string();
         let new_id = new_id.to_string();
@@ -95,7 +95,7 @@ pub async fn list_members(id: Option<String>) -> Result<Vec<User>> {
 
     let id = get_or_resolve_default_org_id(id).await?;
 
-    let results = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let results = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         let id = id.clone();
         async move { server::list_organization_members(&server_url, &token, trust, id).await }
@@ -119,7 +119,7 @@ pub async fn add_member(id: Option<String>, email: &str, role: Role) -> Result<(
 
     let id = get_or_resolve_default_org_id(id).await?;
 
-    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         let id = id.clone();
         let email = email.to_string();
@@ -142,7 +142,7 @@ pub async fn remove_member(id: Option<String>, email: &str) -> Result<()> {
 
     let id = get_or_resolve_default_org_id(id).await?;
 
-    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         let id = id.clone();
         let email = email.to_string();
@@ -160,7 +160,7 @@ pub async fn list_invites() -> Result<Vec<Invite>> {
     let config = Config::load()?;
     let trust = config.trust_invalid_server_cert;
 
-    let results = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let results = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         async move { server::list_organization_invites(&server_url, &token, trust).await }
     })
@@ -181,7 +181,7 @@ pub async fn handle_invite(invite_id: &str, accept: bool) -> Result<()> {
     let trust = config.trust_invalid_server_cert;
 
     let results: Vec<(String, String)> =
-        fanout_servers(config.manager_server_urls.clone(), 4, |server_url| {
+        fanout_servers(config.manager_server_urls.clone(), 4, false, |server_url| {
             let token = token.clone();
             async move {
                 let org_id = server::handle_organization_invite(
@@ -218,7 +218,7 @@ pub async fn list_devices(org_id: Option<String>) -> Result<Vec<PublicDevice>> {
 
     let org_id = get_or_resolve_default_org_id(org_id).await?;
 
-    let results = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let results = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         let org_id = org_id.clone();
         async move { server::list_org_devices(&server_url, &token, trust, &org_id).await }
@@ -234,7 +234,7 @@ pub async fn list_devices(org_id: Option<String>) -> Result<Vec<PublicDevice>> {
     Ok(out)
 }
 
-pub async fn add_device(org_id: Option<String>, device_name: &str) -> Result<()> {
+pub async fn add_device(org_id: Option<String>, device_name: &str, role: Role) -> Result<()> {
     let token = AuthManager::get_cli_token().await?;
     let config = Config::load()?;
     let trust = config.trust_invalid_server_cert;
@@ -243,12 +243,13 @@ pub async fn add_device(org_id: Option<String>, device_name: &str) -> Result<()>
 
     let org_id = get_or_resolve_default_org_id(org_id).await?;
 
-    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         let device_id = resolved.id.clone();
         let org_id = org_id.clone();
+        let role = role.clone();
         async move {
-            server::add_org_device(&server_url, &token, trust, &org_id, &device_id).await?;
+            server::add_org_device(&server_url, &token, trust, &org_id, &device_id, role).await?;
             Ok(Vec::<()>::new())
         }
     })
@@ -265,7 +266,7 @@ pub async fn remove_device(org_id: Option<String>, device_name: &str) -> Result<
 
     let org_id = get_or_resolve_default_org_id(org_id).await?;
 
-    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let _: Vec<_> = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         let device_id = resolved.id.clone();
         let org_id = org_id.clone();

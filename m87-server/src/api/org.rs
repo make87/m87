@@ -92,16 +92,18 @@ async fn create_organization(
     )
     .await;
 
-    // Create owner membership binding.
-    RoleDoc::create(
-        &state.db,
-        CreateRoleBinding {
-            reference_id: UserDoc::create_reference_id(&payload.owner_email),
-            role: Role::Owner,
-            scope: scope.clone(),
-        },
-    )
-    .await?;
+    // check if its exists.
+    //
+    let body = CreateRoleBinding {
+        reference_id: UserDoc::create_reference_id(&payload.owner_email),
+        role: Role::Owner,
+        scope: scope.clone(),
+    };
+    if RoleDoc::check_if_exists(&state.db, body.clone()).await? {
+        return Err(ServerError::bad_request("Organization already exists"));
+    }
+
+    RoleDoc::create(&state.db, body).await?;
 
     let _ = AuditLogDoc::add(
         &state.db,
@@ -389,7 +391,7 @@ async fn add_org_device(
         &state.db,
         CreateRoleBinding {
             reference_id: org::org_ref(&id),
-            role: Role::Viewer,
+            role: payload.role,
             scope: DeviceDoc::scope_for_device(&device_oid),
         },
     )

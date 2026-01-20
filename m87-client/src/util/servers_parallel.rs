@@ -1,17 +1,18 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use futures::{StreamExt, stream};
 use std::{future::Future, time::Duration};
 
 pub async fn fanout_servers<T, F, Fut>(
     server_urls: Vec<String>,
     concurrency: usize,
+    raise_error: bool,
     f: F,
 ) -> Result<Vec<(String, T)>>
 where
     F: Fn(String) -> Fut + Copy,
     Fut: Future<Output = Result<Vec<T>>>,
 {
-    let concurrency = concurrency.max(1); // avoid buffer_unordered(0) deadlock
+    let concurrency = concurrency.max(1);
 
     let per_server_results: Vec<Result<Vec<(String, T)>>> = stream::iter(server_urls)
         .map(|server_url| {
@@ -30,9 +31,10 @@ where
                     Ok(Err(e)) => Err(e),
                     Err(_) => {
                         tracing::warn!(server_url = %url_for_items, "fanout: timeout; skipping");
-                        // if you want to keep signature `Result<...>`, turn timeout into an error
-                        // otherwise you can return Ok(vec![]) here and skip logging later.
-                        return Ok(Vec::new());
+                        match raise_error {
+                            true => Err(anyhow!("request to {} timed out", url_for_items)),
+                            false => Ok(Vec::new()),
+                        }
                     }
                 };
 
@@ -50,6 +52,10 @@ where
             Ok(mut v) => out.append(&mut v),
             Err(err) => {
                 tracing::warn!(error = %err, "fanout: request failed; skipping");
+                match raise_error {
+                    true => return Err(err),
+                    false => {}
+                };
             }
         }
     }
@@ -92,7 +98,7 @@ mod tests {
     #[tokio::test]
     async fn test_fanout_servers_single_server() {
         let servers = vec!["http://server1".to_string()];
-        let result = fanout_servers(servers, 2, |_url| async { Ok(vec![1, 2, 3]) }).await;
+        let result = fanout_servers(servers, 2, true, |_url| async { Ok(vec![1, 2, 3]) }).await;
 
         let items = result.unwrap();
         assert_eq!(items.len(), 3);
@@ -102,7 +108,7 @@ mod tests {
     #[tokio::test]
     async fn test_fanout_servers_multiple_servers() {
         let servers = vec!["http://server1".to_string(), "http://server2".to_string()];
-        let result = fanout_servers(servers, 2, |url| async move {
+        let result = fanout_servers(servers, 2, true, |url| async move {
             if url == "http://server1" {
                 Ok(vec!["a"])
             } else {
@@ -119,7 +125,7 @@ mod tests {
     async fn test_fanout_servers_empty_results() {
         let servers = vec!["http://server1".to_string()];
         let result: Result<Vec<(String, i32)>> =
-            fanout_servers(servers, 2, |_url| async { Ok(vec![]) }).await;
+            fanout_servers(servers, 2, true, |_url| async { Ok(vec![]) }).await;
 
         assert!(result.unwrap().is_empty());
     }

@@ -82,6 +82,22 @@ impl RoleDoc {
         Ok(updated.unwrap())
     }
 
+    pub async fn check_if_exists(db: &Arc<Mongo>, body: CreateRoleBinding) -> ServerResult<bool> {
+        let filter = doc! {
+            "reference_id": &body.reference_id,
+            "scope": &body.scope,
+            "role": role_to_bson(&body.role),
+        };
+
+        let coll = db.roles();
+        let exists = coll
+            .find_one(filter)
+            .await
+            .map_err(|_| ServerError::internal_error("Failed to check if role binding exists"))?;
+
+        Ok(exists.is_some())
+    }
+
     /// List all bindings (used for admin views)
     pub async fn list_all(db: &Arc<Mongo>) -> ServerResult<Vec<RoleDoc>> {
         let mut cursor = db

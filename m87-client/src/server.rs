@@ -249,13 +249,13 @@ fn get_client(trust_invalid_server_cert: bool) -> Result<Client> {
     if trust_invalid_server_cert {
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
             .build()?;
         Ok(client)
     } else {
         // otherwise we verify the certificate
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
             .build()?;
         Ok(client)
     }
@@ -670,7 +670,7 @@ pub async fn create_organization(
         .await?;
 
     match res.error_for_status() {
-        Ok(r) => Ok(r.json().await?),
+        Ok(_) => Ok(()),
         Err(e) => Err(anyhow!(e)),
     }
 }
@@ -756,7 +756,7 @@ pub async fn add_organization_member(
         .await?;
 
     match res.error_for_status() {
-        Ok(r) => Ok(r.json().await?),
+        Ok(_) => Ok(()),
         Err(e) => Err(anyhow!(e)),
     }
 }
@@ -774,7 +774,7 @@ pub async fn remove_organization_member(
     let res = client.delete(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
-        Ok(r) => Ok(r.json().await?),
+        Ok(_) => Ok(()),
         Err(e) => Err(anyhow!(e)),
     }
 }
@@ -844,12 +844,14 @@ pub async fn add_org_device(
     trust: bool,
     org_id: &str,
     device_id: &str,
+    role: Role,
 ) -> Result<()> {
     let url = format!("{}/organization/{}/devices", server_url, org_id);
     let client = get_client(trust)?;
 
     let body = AddDeviceBody {
         device_id: device_id.to_string(),
+        role,
     };
 
     let res = client
@@ -860,7 +862,7 @@ pub async fn add_org_device(
         .await?;
 
     match res.error_for_status() {
-        Ok(r) => Ok(r.json().await?),
+        Ok(_) => Ok(()),
         Err(e) => Err(anyhow!(e)),
     }
 }
@@ -881,7 +883,7 @@ pub async fn remove_org_device(
     let res = client.delete(&url).bearer_auth(token).send().await?;
 
     match res.error_for_status() {
-        Ok(r) => Ok(r.json().await?),
+        Ok(_) => Ok(()),
         Err(e) => Err(anyhow!(e)),
     }
 }

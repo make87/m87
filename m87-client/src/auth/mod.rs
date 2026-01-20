@@ -375,7 +375,7 @@ pub async fn list_auth_requests() -> Result<Vec<server::DeviceAuthRequest>> {
     let config = Config::load()?;
     let trust = config.trust_invalid_server_cert;
 
-    let requests = fanout_servers(config.manager_server_urls, 4, |server_url| {
+    let requests = fanout_servers(config.manager_server_urls, 4, false, |server_url| {
         let token = token.clone();
         async move { server::list_auth_requests(&server_url, &token, trust).await }
     })

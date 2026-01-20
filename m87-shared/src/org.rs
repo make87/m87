@@ -42,4 +42,5 @@ pub struct InviteMemberBody {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AddDeviceBody {
     pub device_id: String,
+    pub role: Role,
 }

@@ -216,7 +216,16 @@ check_path() {
     echo "  For fish (~/.config/fish/config.fish):"
     echo "    set -gx PATH \$HOME/.local/bin \$PATH"
     echo ""
-    echo "Then restart your shell or run: source <config-file>"
+    echo "Then restart your shell or run: source <config-file>. E.g."
+    echo ""
+    echo "  For bash (~/.bashrc or ~/.bash_profile):"
+    echo "  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc"
+    echo ""
+    echo "  For zsh (~/.zshrc):"
+    echo "  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc"
+    echo ""
+    echo "  For fish (~/.config/fish/config.fish):"
+    echo "  echo 'set -gx PATH $HOME/.local/bin \$PATH' >> ~/.config/fish/config.fish && source ~/.config/fish/config.fish"
 }
 
 # Main installation flow
