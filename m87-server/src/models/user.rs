@@ -57,7 +57,7 @@ impl UserDoc {
         let approved = match config.users_need_approval {
             true => {
                 if let Some(mail) = &email {
-                    !config
+                    config
                         .user_auto_accept_domains
                         .contains(&mail.split('@').last().unwrap().to_string())
                 } else {
