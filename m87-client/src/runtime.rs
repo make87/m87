@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
-use std::fs::{self, Permissions};
+use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::NamedTempFile;
@@ -310,9 +311,44 @@ pub async fn status() -> Result<()> {
     Ok(())
 }
 
+/// Acquire an exclusive lock to prevent multiple runtime instances.
+/// Returns the lock file handle which must be kept alive to hold the lock.
+fn acquire_runtime_lock() -> Result<File> {
+    let lock_path = dirs::data_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine data directory"))?
+        .join("m87")
+        .join("runtime.lock");
+
+    // Ensure parent directory exists
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).context("Failed to create lock directory")?;
+    }
+
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .context("Failed to open lock file")?;
+
+    // Try to acquire exclusive lock (non-blocking)
+    let fd = file.as_raw_fd();
+    let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+
+    if result != 0 {
+        bail!("Another m87 runtime is already running. Check 'm87 runtime status' for systemd service or 'pgrep -af \'m87 runtime run\'' for manual instances.");
+    }
+
+    Ok(file)
+}
+
 /// CLI: m87 runtime run
 /// Main runtime daemon entry point (used by systemd service)
 pub async fn run() -> Result<()> {
+    // Acquire lock first - exits if another instance is running
+    // The lock is held for the lifetime of this function (until process exits)
+    let _lock = acquire_runtime_lock()?;
+
     info!("Running device");
 
     // Handle both SIGTERM (systemd stop) and SIGINT (Ctrl+C)
