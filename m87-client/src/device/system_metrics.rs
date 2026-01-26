@@ -1,5 +1,10 @@
 use anyhow::Result;
-use std::{collections::HashMap, process::Command, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    process::Command,
+    sync::OnceLock,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use sysinfo::{Disks, Networks, System};
 use tokio::sync::Mutex;
 
@@ -163,6 +168,10 @@ pub async fn collect_system_metrics() -> Result<SystemMetrics> {
     let os = System::name().unwrap_or_else(|| "Unknown".into());
     let arch = std::env::consts::ARCH.to_string();
     let uptime_secs = System::uptime();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
 
     Ok(SystemMetrics {
         hostname,
@@ -174,6 +183,7 @@ pub async fn collect_system_metrics() -> Result<SystemMetrics> {
         disk,
         network,
         gpu,
+        timestamp: now as u64,
     })
 }
 
