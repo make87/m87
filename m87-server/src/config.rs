@@ -53,7 +53,7 @@ impl AppConfig {
     pub fn from_env() -> ServerResult<Self> {
         // Keep it simple: read from env; in prod you might use figment/envy.
         let mongo_uri =
-            std::env::var("MONGO_URI").unwrap_or_else(|_| "mongodb://admin:e95d076d-4f78-46cc-8f1c-11a4cfb0b8f3@localhost:27018/admin?authSource=admin&directConnection=true".into());
+            std::env::var("MONGO_URI").unwrap_or_else(|_| "mongodb://a:b@localhost:27017".into());
         let mongo_db = std::env::var("MONGO_DB").unwrap_or_else(|_| "m87-server".into());
         let issuer =
             std::env::var("OAUTH_ISSUER").unwrap_or_else(|_| "https://auth.make87.com/".into());

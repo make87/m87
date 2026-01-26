@@ -277,11 +277,6 @@ impl Claims {
     where
         T: AccessControlled,
     {
-        // Admin bypass: treat as Owner (or Admin if you prefer)
-        if self.is_admin {
-            return Ok(Role::Owner);
-        }
-
         // Build set of scopes that grant access to this object
         // (owner scope always present; allowed scopes optional)
         let mut object_scopes: Vec<String> = Vec::new();
