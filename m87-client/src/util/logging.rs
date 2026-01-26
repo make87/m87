@@ -81,7 +81,7 @@ pub fn init_tracing_with_log_layer(default_level: &str) -> broadcast::Sender<Str
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_fmt::layer())
+        .with(tracing_fmt::layer().with_target(false).with_file(false))
         .with(LogBroadcastLayer::new(tx.clone()))
         .init();
 

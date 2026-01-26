@@ -21,7 +21,7 @@ pub async fn handle_logs_io(io: &mut QuicIo, unit_manager: Arc<DeploymentManager
         tokio::select! {
             Ok(line) = app_rx.recv() => {
                 // only format if line does not start with [
-                let formatted_msg = match line.trim().starts_with("[observe]") {
+                let formatted_msg = match line.trim().contains("[observe]") {
                     true => line.to_string().replace("[observe]", ""),
                     false => format::format_log("m87", &line, true),
                 };
