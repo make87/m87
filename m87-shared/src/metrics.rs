@@ -12,6 +12,7 @@ pub struct SystemMetrics {
     pub disk: DiskMetrics,
     pub network: NetworkMetrics,
     pub gpu: Vec<GpuMetrics>,
+    pub timestamp: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
