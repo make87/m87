@@ -2599,7 +2599,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "m87-client"
-version = "0.0.0-dev0"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2649,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "m87-server"
-version = "0.0.0-dev0"
+version = "0.6.3"
 dependencies = [
  "arc-swap",
  "argon2",
@@ -2697,7 +2697,7 @@ dependencies = [
 
 [[package]]
 name = "m87-shared"
-version = "0.0.0-dev0"
+version = "0.6.3"
 dependencies = [
  "hex",
  "serde",

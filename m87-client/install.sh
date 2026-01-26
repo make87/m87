@@ -34,7 +34,7 @@ INSTALL_DIR="$HOME/.local/bin"
 BINARY_NAME="m87"
 GITHUB_REPO="make87/m87"
 # This version is set during release - do not change manually
-VERSION="${M87_VERSION:-__VERSION__}"
+VERSION="${M87_VERSION:-0.6.3}"
 # Allow custom download URL for testing (e.g., M87_DOWNLOAD_URL=http://localhost:8000)
 DOWNLOAD_BASE_URL="${M87_DOWNLOAD_URL:-https://github.com/$GITHUB_REPO/releases/download}"
 
