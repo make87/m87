@@ -300,12 +300,14 @@ async fn add_device_access(
     )
     .await;
 
-    let owner_scope = UserDoc::create_owner_scope(&payload.email_or_org_id);
-    let scope = DeviceDoc::create_device_scope(&id);
-    let role = claims.get_role_for_scope(&owner_scope);
+    // check if e are owner otherwise check if we have at least the same role rank or higher
+    let role = claims.get_role_for_scope(&device.owner_scope);
     let role = match role {
         Ok(role) => role,
-        Err(_) => claims.get_role_for_scope(&scope)?,
+        Err(_) => {
+            let access_scope = DeviceDoc::create_device_scope(&id);
+            claims.get_role_for_scope(&access_scope)?
+        }
     };
     if payload.role.rank() > role.rank() {
         return Err(ServerError::forbidden("Cannot add member with higher role"));
