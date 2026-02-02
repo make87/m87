@@ -246,6 +246,7 @@ impl DeviceDoc {
             )
             .await;
 
+        let mut ack_report_hash = None;
         if let Some(deploy_report) = payload.deploy_report {
             let body = CreateDeployReportBody {
                 device_id: self.id.clone().unwrap(),
@@ -260,6 +261,7 @@ impl DeviceDoc {
             if let Err(err) = res {
                 tracing::error!("Failed to create deploy report: {}", err);
             }
+            ack_report_hash = Some(deploy_report.get_hash().to_string());
 
             if let DeployReportKind::RollbackReport(rollback) = deploy_report {
                 // change active deplotment to rollback.new_revision_id
@@ -302,6 +304,11 @@ impl DeviceDoc {
             }
         }
 
+        let ack_hash_list = match ack_report_hash {
+            Some(hash) => Some(vec![hash]),
+            None => None,
+        };
+
         let target_hash =
             build_instruction_hash(&self.last_deployment_hash, &self.last_config_hash);
         if payload.last_instruction_hash == target_hash {
@@ -310,6 +317,7 @@ impl DeviceDoc {
                 config: None,
                 instruction_hash: target_hash.clone(),
                 target_revision: None,
+                received_report_hashes: ack_hash_list,
             });
         }
 
@@ -346,6 +354,7 @@ impl DeviceDoc {
             config: Some(self.config.clone()),
             instruction_hash: build_instruction_hash(&new_deployment_hash, &config_hash),
             target_revision,
+            received_report_hashes: ack_hash_list,
         };
         Ok(resp)
     }
@@ -357,9 +366,8 @@ impl DeviceDoc {
             Some(revision) => {
                 let observations = DeployReportDoc::get_device_observations_since(
                     db,
-                    &revision.revision.id.unwrap(),
                     &self.id.clone().unwrap(),
-                    // since,
+                    &revision.revision.id.unwrap(),
                 )
                 .await?;
                 observations

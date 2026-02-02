@@ -27,4 +27,6 @@ pub struct HeartbeatResponse {
     pub instruction_hash: String,
     #[serde(default)]
     pub target_revision: Option<DeploymentRevision>,
+    #[serde(default)]
+    pub received_report_hashes: Option<Vec<String>>,
 }

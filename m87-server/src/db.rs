@@ -4,7 +4,7 @@ use crate::{
     models::{
         api_key::ApiKeyDoc,
         audit_logs::AuditLogDoc,
-        deploy_spec::{DeployReportDoc, DeployRevisionDoc},
+        deploy_spec::{CurrentRunStateDoc, DeployReportDoc, DeployRevisionDoc},
         device::DeviceDoc,
         device_auth_request::DeviceAuthRequestDoc,
         roles::RoleDoc,
@@ -62,6 +62,10 @@ impl Mongo {
 
     pub fn deploy_reports(&self) -> Collection<DeployReportDoc> {
         self.col("deploy_reports")
+    }
+
+    pub fn current_run_states(&self) -> Collection<CurrentRunStateDoc> {
+        self.col("current_run_states")
     }
 
     pub fn audit_logs(&self) -> Collection<AuditLogDoc> {
@@ -207,22 +211,9 @@ impl Mongo {
             )
             .await?;
 
-        // group + revision.id
-        // self.deploy_revisions()
-        //     .create_index(
-        //         IndexModel::builder()
-        //             .keys(doc! { "group_id": 1, "revision.id": 1 })
-        //             .build(),
-        //     )
-        //     .await?;
-
         self.deploy_reports()
             .create_index(IndexModel::builder().keys(doc! { "device_id": 1 }).build())
             .await?;
-
-        // self.deploy_reports()
-        //     .create_index(IndexModel::builder().keys(doc! { "group_id": 1 }).build())
-        //     .await?;
 
         // ttl index
         self.deploy_reports()
@@ -251,6 +242,30 @@ impl Mongo {
             .create_index(
                 IndexModel::builder()
                     .keys(doc! { "device_id": 1, "revision_id": 1, "kind.type": 1 })
+                    .build(),
+            )
+            .await?;
+
+        self.current_run_states()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {
+                        "device_id": 1,
+                        "revision_id": 1,
+                        "run_id": 1
+                    })
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+            )
+            .await?;
+
+        self.current_run_states()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {
+                        "device_id": 1,
+                        "revision_id": 1
+                    })
                     .build(),
             )
             .await?;

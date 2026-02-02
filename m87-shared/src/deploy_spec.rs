@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Display;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
 fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
@@ -459,7 +460,7 @@ pub enum WorkdirMode {
     Ephemeral,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
     Success,
@@ -477,7 +478,7 @@ impl Display for Outcome {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct DeploymentRevisionReport {
     pub revision_id: String,
     pub outcome: Outcome,
@@ -486,7 +487,7 @@ pub struct DeploymentRevisionReport {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct RunReport {
     pub run_id: String,
     pub revision_id: String,
@@ -500,7 +501,7 @@ pub struct RunReport {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct StepReport {
     pub revision_id: String,
     pub run_id: String,
@@ -527,7 +528,7 @@ pub struct StepReport {
     pub log_tail: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct RollbackReport {
     pub revision_id: String,
 
@@ -539,7 +540,7 @@ pub enum ObserveKind {
     Healthy,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct RunState {
     pub run_id: String,
     pub revision_id: String,
@@ -560,7 +561,7 @@ impl RunState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 #[serde(tag = "type", content = "data")]
 pub enum DeployReportKind {
     DeploymentRevisionReport(DeploymentRevisionReport),
@@ -589,6 +590,12 @@ impl DeployReportKind {
             DeployReportKind::RollbackReport(_) => None,
             DeployReportKind::RunState(r) => Some(r.run_id.clone()),
         }
+    }
+
+    pub fn get_hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
     }
 }
 
@@ -688,6 +695,22 @@ pub mod option_duration_human {
 pub fn build_instruction_hash(deploy_hash: &str, config_hash: &str) -> String {
     format!("{}-{}", deploy_hash, config_hash)
 }
+
+// #[derive(Debug, Clone, Serialize, Deserialize)]
+// pub struct CurrentRunState {
+//     pub device_id: String,
+//     pub revision_id: String,
+//     pub run_id: String,
+
+//     pub alive: bool,
+//     pub healthy: bool,
+//     pub last_report_time: u64,
+
+//     pub unhealthy_checks: u64,
+//     pub crashes: u64,
+
+//     pub updated_at: u64,
+// }
 
 // structs for UI and cli to display reports
 

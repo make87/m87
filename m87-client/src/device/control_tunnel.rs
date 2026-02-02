@@ -86,6 +86,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
     let _receiver = tokio::spawn({
         let state = state.clone();
         let update_mutex = Arc::new(tokio::sync::Mutex::new(()));
+        use crate::device::deployment_manager::ack_event;
         async move {
             loop {
                 tokio::select! {
@@ -115,6 +116,16 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                                 continue;
                             }
                         }
+                        if let Some(received_report_hashes) = resp.received_report_hashes {
+                            tracing::info!("Received new received report hashes");
+                            for hash in received_report_hashes {
+                                tracing::info!("Received report hash: {}", hash);
+                                if let Err(e) = ack_event(&hash).await {
+                                    // not an issue. client will resend and well ack next time
+                                    tracing::error!("Failed to ack event: {}", e);
+                                }
+                            }
+                        }
 
                         st.last_instruction_hash = resp.instruction_hash;
                     }
@@ -132,7 +143,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
             loop {
                 use std::time::Duration;
 
-                use crate::device::deployment_manager::{ack_event, on_new_event};
+                use crate::device::deployment_manager::on_new_event;
 
                 tokio::select! {
                     _ = shutdown.changed() => break,
@@ -150,9 +161,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
 
                         tracing::info!("Sending heartbeat with event udpate");
 
-                        if write_msg(&mut send, &req).await.is_ok() {
-                            let _ = ack_event(&claimed).await;
-                        }
+                        let _ = write_msg(&mut send, &req).await;
                     },
 
 

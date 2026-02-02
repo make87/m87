@@ -9,7 +9,7 @@ use std::{
     fmt::Display,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::{fs, io::AsyncWriteExt, sync::RwLock, time::sleep};
 
@@ -95,6 +95,7 @@ impl ObserveKind {
     }
 
     fn decide_on_success(&self, st: &LocalRunState) -> bool {
+        // return true;
         match self {
             ObserveKind::Liveness => st.last_alive == false || !st.reported_alive_once,
             ObserveKind::Health => {
@@ -239,13 +240,6 @@ impl LocalRunState {
         match kind {
             ObserveKind::Liveness => &mut self.consecutive_alive_failures,
             ObserveKind::Health => &mut self.consecutive_health_failures,
-        }
-    }
-
-    fn last_mut(&mut self, kind: ObserveKind) -> &mut bool {
-        match kind {
-            ObserveKind::Liveness => &mut self.last_alive,
-            ObserveKind::Health => &mut self.last_health,
         }
     }
 }
@@ -844,9 +838,17 @@ impl DeploymentManager {
                 let consecutive = *failures;
 
                 let decision = kind.decide_on_error(&st, hooks, consecutive);
-                if decision.is_failure {
-                    *st.last_mut(kind) = false;
-                }
+                // if decision.is_failure {
+                //     match kind {
+                //         ObserveKind::Health => {
+                //             st.last_health = false;
+                //         }
+                //         ObserveKind::Liveness => {
+                //             st.last_alive = false;
+                //             st.last_health = false;
+                //         }
+                //     }
+                // }
 
                 LocalRunState::save(&wd, &st)?;
 
@@ -916,9 +918,12 @@ impl DeploymentManager {
                     match kind {
                         ObserveKind::Health => {
                             st.reported_health_once = true;
+                            st.last_health = false;
                         }
                         ObserveKind::Liveness => {
                             st.reported_alive_once = true;
+                            st.last_alive = false;
+                            st.last_health = false;
                         }
                     }
 
@@ -1195,7 +1200,7 @@ impl DeploymentManager {
 pub async fn enqueue_event(event: DeployReportKind) -> Result<()> {
     ensure_dirs().await?;
 
-    let id = format!("{}", now_ms_u64());
+    let id = event.get_hash().to_string();
     let pending = pending_dir()?.join(format!("{id}.json"));
     let tmp = pending.with_extension("json.tmp");
 
@@ -1233,24 +1238,35 @@ pub async fn recover_inflight() -> Result<()> {
     Ok(())
 }
 
-pub async fn claim_next_event() -> Result<Option<ClaimedEvent>> {
+pub async fn claim_next_event() -> anyhow::Result<Option<ClaimedEvent>> {
     ensure_dirs().await?;
 
     let pending = pending_dir()?;
     let inflight = inflight_dir()?;
 
-    // List pending files; pick oldest by filename (timestamp prefix)
-    let mut files = Vec::new();
+    // collect candidate paths
+    let mut paths = Vec::new();
     let mut rd = fs::read_dir(&pending).await?;
     while let Some(e) = rd.next_entry().await? {
         let p = e.path();
         if p.extension().and_then(|s| s.to_str()) == Some("json") {
-            files.push(p);
+            paths.push(p);
         }
     }
-    files.sort(); // works if filename starts with timestamp
 
-    let Some(p) = files.first().cloned() else {
+    // compute keys (async) then sort
+    let mut keyed = Vec::with_capacity(paths.len());
+    for p in paths {
+        let t = match fs::metadata(&p).await {
+            Ok(m) => m.created().unwrap_or(SystemTime::UNIX_EPOCH),
+            Err(_) => SystemTime::UNIX_EPOCH,
+        };
+        keyed.push((t, p));
+    }
+
+    keyed.sort_by_key(|(t, _)| *t);
+
+    let Some((_t, p)) = keyed.into_iter().next() else {
         return Ok(None);
     };
 
@@ -1268,10 +1284,9 @@ pub async fn claim_next_event() -> Result<Option<ClaimedEvent>> {
     }))
 }
 
-pub async fn ack_event(claimed: &ClaimedEvent) -> Result<()> {
-    fs::remove_file(&claimed.path)
-        .await
-        .context("delete inflight")?;
+pub async fn ack_event(hash: &str) -> Result<()> {
+    let path = inflight_dir()?.join(format!("{hash}.json"));
+    fs::remove_file(&path).await.context("delete inflight")?;
     Ok(())
 }
 

@@ -12,7 +12,6 @@ use crate::auth::claims::Claims;
 use crate::models::audit_logs::AuditLogDoc;
 use crate::models::device::{DeviceDoc, PublicDevice, UpdateDeviceBody};
 use crate::models::org;
-use crate::models::user::UserDoc;
 use crate::response::{ResponsePagination, ServerAppResult, ServerError, ServerResponse};
 use crate::util::app_state::AppState;
 use crate::util::pagination::RequestPagination;

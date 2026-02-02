@@ -268,6 +268,15 @@ async fn update_revision_by_id(
         tracing::info!("Deleted {} deploy reports", res.deleted_count);
     }
 
+    // if we removed a run_id also remove form current_run_states
+    if let Some(run_id) = &payload.remove_run_spec_id {
+        let _ = state
+            .db
+            .current_run_states()
+            .delete_many(doc! { "revision_id": &id, "device_id": &device_oid, "run_id": run_id })
+            .await?;
+    }
+
     let latest_doc = state
         .db
         .deploy_revisions()
@@ -324,6 +333,13 @@ async fn delete_revision(
     if !success {
         return Err(ServerError::not_found("Revision not found"));
     }
+
+    // delete runstate with revision id
+    let _ = state
+        .db
+        .current_run_states()
+        .delete_many(doc! { "revision.id": &id, "device_id": &device_oid })
+        .await?;
 
     let _ = AuditLogDoc::add(
         &state.db,

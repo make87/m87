@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use futures::TryStreamExt;
 use m87_shared::{
@@ -13,8 +10,9 @@ use m87_shared::{
     device::ObserveStatus,
 };
 use mongodb::{
-    bson::{DateTime as BsonDateTime, Document, doc, oid::ObjectId, to_bson},
-    options::FindOptions,
+    bson::{Bson, DateTime as BsonDateTime, Document, doc, oid::ObjectId, to_bson},
+    error::{ErrorKind, WriteFailure},
+    options::{FindOptions, UpdateOptions},
 };
 use serde::{Deserialize, Serialize};
 
@@ -292,118 +290,34 @@ pub struct CreateDeployReportBody {
 }
 
 impl DeployReportDoc {
-    // fn upsert_filter(body: &CreateDeployReportBody) -> ServerResult<Document> {
-    //     let base = doc! {
-    //         "device_id": body.device_id,
-    //         "revision_id": &body.revision_id,
-    //     };
-
-    //     let f = match &body.kind {
-    //         DeployReportKind::DeploymentRevisionReport(_) => {
-    //             doc! { "kind.type": "DeploymentRevisionReport" }
-    //         }
-    //         DeployReportKind::RunReport(r) => {
-    //             doc! {
-    //                 "kind.type": "RunReport",
-    //                 "kind.data.run_id": &r.run_id,
-    //             }
-    //         }
-    //         DeployReportKind::StepReport(s) => {
-    //             // Match on (run_id, name, attempts) as you requested.
-    //             // name is Option<String> -> match null when None.
-    //             let name_bson = match &s.name {
-    //                 Some(n) => Bson::String(n.clone()),
-    //                 None => Bson::Null,
-    //             };
-
-    //             doc! {
-    //                 "kind.type": "StepReport",
-    //                 "kind.data.run_id": &s.run_id,
-    //                 "kind.data.name": name_bson,
-    //                 "kind.data.attempts": Bson::Int32(s.attempts as i32),
-    //             }
-    //         }
-    //         DeployReportKind::RollbackReport(_) => {
-    //             // If you can have multiple rollback reports per revision and want only one, this is fine.
-    //             // If you want to key by something else, add it here.
-    //             doc! { "kind.type": "RollbackReport" }
-    //         }
-    //         DeployReportKind::RunState(s) => {
-    //             doc! {
-    //                 "kind.type": "RunState",
-    //                 "kind.data.run_id": &s.run_id,
-    //             }
-    //         }
-    //     };
-
-    //     Ok(doc! { "$and": [base, f] })
-    // }
-
     pub async fn get_device_observations_since(
         db: &Arc<Mongo>,
-        revision_id: &str,
         device_id: &ObjectId,
-        // since: Option<u64>,
+        revision_id: &str,
     ) -> ServerResult<Vec<ObserveStatus>> {
-        let mut match_doc = doc! {
+        let filter = doc! {
             "device_id": device_id,
             "revision_id": revision_id,
-            "kind.type": "RunState",
         };
 
-        // If you add `since`, uncomment this:
-        // if let Some(since) = since {
-        //     match_doc.insert("kind.data.report_time", doc! { "$gt": Bson::Int64(since as i64) });
-        // }
+        let mut cursor = db
+            .current_run_states()
+            .find(filter)
+            .await
+            .map_err(|e| ServerError::internal_error(&format!("Mongo find failed: {e}")))?;
 
-        let pipeline = vec![
-            doc! { "$match": match_doc },
-            // Ensure `$first` in the group is the latest status.
-            doc! { "$sort": { "kind.data.run_id": 1, "kind.data.report_time": -1 } },
-            doc! { "$group": {
-                "_id": "$kind.data.run_id",
-
-                // latest values (may be null if the newest event didn't include the field)
-                "latest_report_time": { "$first": "$kind.data.report_time" },
-                "latest_healthy": { "$first": "$kind.data.healthy" },
-                "latest_alive": { "$first": "$kind.data.alive" },
-
-                // counters across all docs
-                "unhealthy_checks": { "$sum": {
-                    "$cond": [
-                        { "$eq": ["$kind.data.healthy", false] },
-                        1,
-                        0
-                    ]
-                }},
-                "crashes": { "$sum": {
-                    "$cond": [
-                        { "$eq": ["$kind.data.alive", false] },
-                        1,
-                        0
-                    ]
-                }},
-            }},
-            // Build your ObserveStatus shape; treat null as false (same as your init defaults).
-            doc! { "$project": {
-                "_id": 0,
-                "name": "$_id",
-                "alive": { "$ifNull": ["$latest_alive", false] },
-                "healthy": { "$ifNull": ["$latest_healthy", false] },
-                "crashes": 1,
-                "unhealthy_checks": 1,
-            }},
-        ];
-
-        let mut cursor = db.deploy_reports().aggregate(pipeline).await?;
         let mut out = Vec::new();
+
         while let Some(doc) = cursor.try_next().await? {
-            out.push(
-                mongodb::bson::from_document::<ObserveStatus>(doc).map_err(|e| {
-                    ServerError::internal_error(&format!("Failed to parse ObserveStatus: {}", e))
-                })?,
-            );
+            out.push(ObserveStatus {
+                name: doc.run_id,
+                alive: doc.alive,
+                healthy: doc.healthy,
+                crashes: doc.crashes as u32,
+                unhealthy_checks: doc.unhealthy_checks as u32,
+            });
         }
+
         Ok(out)
     }
 
@@ -443,6 +357,7 @@ impl DeployReportDoc {
         }
 
         let now = BsonDateTime::now();
+
         // let kind_bson = to_bson(&body.kind)
         //     .map_err(|_| ServerError::internal_error("Failed to serialize deploy report kind"))?;
 
@@ -460,6 +375,9 @@ impl DeployReportDoc {
         let res = db.deploy_reports().insert_one(&doc).await.map_err(|e| {
             ServerError::internal_error(&format!("Failed to create deploy report: {:?}", e))
         })?;
+        if let Err(e) = CurrentRunStateDoc::upsert_from_deploy_report(db, &doc).await {
+            tracing::error!("Failed to upsert current run state: {:?}", e);
+        }
         doc.id = res.inserted_id.as_object_id();
         Ok(doc)
     }
@@ -488,20 +406,44 @@ impl DeployReportDoc {
         device_id: &ObjectId,
         revision_id: &str,
         pagination: &RequestPagination,
-    ) -> ServerResult<Vec<Self>> {
+    ) -> ServerResult<Vec<DeployReportDoc>> {
+        let limit = pagination.limit.min(5) as i64;
+
+        let mut filter = doc! {
+            "device_id": device_id,
+            "revision_id": revision_id,
+        };
+
+        let mut created_at_filter = Document::new();
+
+        if let Some(until) = pagination.until {
+            created_at_filter.insert("$lt", Bson::DateTime(until));
+        }
+
+        if let Some(since) = pagination.since {
+            created_at_filter.insert("$gt", Bson::DateTime(since));
+        }
+
+        if !created_at_filter.is_empty() {
+            filter.insert("created_at", created_at_filter);
+        }
+
         let options = FindOptions::builder()
-            .skip(Some(pagination.offset))
-            .limit(Some(pagination.limit as i64))
+            .sort(doc! { "created_at": -1, "_id": -1 })
+            .limit(Some(limit))
             .build();
+
         let cursor = db
             .deploy_reports()
-            .find(doc! { "device_id": device_id, "revision_id": revision_id })
+            .find(filter)
             .with_options(options)
             .await?;
+
         let results: Vec<DeployReportDoc> = cursor
             .try_collect()
             .await
             .map_err(|_| ServerError::internal_error("Cursor decode failed"))?;
+
         Ok(results)
     }
 
@@ -793,5 +735,130 @@ fn outcome_from_steps(steps: &[StepStatus]) -> Outcome {
         Outcome::Success
     } else {
         Outcome::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrentRunStateDoc {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+
+    /// Device this run belongs to
+    pub device_id: ObjectId,
+
+    /// Deployment / revision identifier
+    pub revision_id: String,
+
+    /// Run identifier (per deployment execution)
+    pub run_id: String,
+
+    /// Last known liveness state
+    pub alive: bool,
+
+    /// Last known health state
+    pub healthy: bool,
+
+    /// Timestamp reported by the runtime (monotonic per run)
+    pub last_report_time: u64,
+
+    /// Total number of unhealthy checks observed so far
+    pub unhealthy_checks: u64,
+
+    /// Total number of crash events observed so far
+    pub crashes: u64,
+
+    /// When this state was last updated (server time)
+    pub updated_at: BsonDateTime,
+}
+
+impl CurrentRunStateDoc {
+    pub async fn upsert_from_deploy_report(
+        db: &Arc<Mongo>,
+        report: &DeployReportDoc,
+    ) -> ServerResult<()> {
+        let run_state = match &report.kind {
+            DeployReportKind::RunState(rs) => rs,
+            _ => return Ok(()),
+        };
+
+        let now = BsonDateTime::now();
+
+        let report_time_i64: i64 = run_state
+            .report_time
+            .try_into()
+            .map_err(|_| ServerError::internal_error("report_time overflows i64"))?;
+
+        // Build $set dynamically
+        let mut set_doc = doc! {
+            "last_report_time": Bson::Int64(report_time_i64),
+            "updated_at": now,
+        };
+
+        if let Some(alive) = run_state.alive {
+            set_doc.insert("alive", alive);
+        }
+        if let Some(healthy) = run_state.healthy {
+            set_doc.insert("healthy", healthy);
+        }
+
+        // Build $inc dynamically (or keep zeros out)
+        let mut inc_doc = doc! {};
+        if let Some(healthy) = run_state.healthy {
+            if !healthy {
+                inc_doc.insert("unhealthy_checks", 1i64);
+            }
+        }
+        if let Some(alive) = run_state.alive {
+            if !alive {
+                inc_doc.insert("crashes", 1i64);
+            }
+        }
+
+        let mut update = doc! {
+            "$set": set_doc,
+            "$setOnInsert": {
+                "device_id": &report.device_id,
+                "revision_id": &report.revision_id,
+                "run_id": &run_state.run_id,
+                "created_at": now,
+            },
+        };
+
+        if !inc_doc.is_empty() {
+            update.insert("$inc", inc_doc);
+        }
+
+        let filter = doc! {
+            "device_id": &report.device_id,
+            "revision_id": &report.revision_id,
+            "run_id": &run_state.run_id,
+            "$or": [
+                { "last_report_time": { "$lt": Bson::Int64(report_time_i64) } },
+                { "last_report_time": { "$exists": false } }, // allows first insert
+            ],
+        };
+
+        let res = db
+            .current_run_states()
+            .update_one(filter, update)
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await;
+
+        match res {
+            Ok(_) => Ok(()),
+
+            Err(e) => match e.kind.as_ref() {
+                // This is the case you want to ignore
+                ErrorKind::Write(WriteFailure::WriteError(we)) if we.code == 11000 => {
+                    // Existing doc + older report → ignored
+                    Ok(())
+                }
+
+                // Everything else is real failure
+                _ => Err(ServerError::internal_error(&format!(
+                    "Failed to upsert CurrentRunStateDoc: {e}"
+                ))),
+            },
+        }
     }
 }
