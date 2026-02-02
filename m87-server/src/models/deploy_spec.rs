@@ -753,18 +753,23 @@ pub struct CurrentRunStateDoc {
     pub run_id: String,
 
     /// Last known liveness state
+    #[serde(default)]
     pub alive: bool,
 
     /// Last known health state
+    #[serde(default)]
     pub healthy: bool,
 
     /// Timestamp reported by the runtime (monotonic per run)
+    #[serde(default)]
     pub last_report_time: u64,
 
     /// Total number of unhealthy checks observed so far
+    #[serde(default)]
     pub unhealthy_checks: u64,
 
     /// Total number of crash events observed so far
+    #[serde(default)]
     pub crashes: u64,
 
     /// When this state was last updated (server time)
