@@ -97,9 +97,17 @@ impl ObserveKind {
     fn decide_on_success(&self, st: &LocalRunState) -> bool {
         // return true;
         match self {
-            ObserveKind::Liveness => st.last_alive == false || !st.reported_alive_once,
+            ObserveKind::Liveness => {
+                st.last_alive == false
+                    || st.last_health == false
+                    || !st.reported_alive_once
+                    || st.consecutive_alive_failures > 0
+            }
             ObserveKind::Health => {
-                st.last_health != true || st.last_alive != true || !st.reported_health_once
+                st.last_health != true
+                    || st.last_alive != true
+                    || !st.reported_health_once
+                    || st.consecutive_health_failures > 0
             }
         }
     }
@@ -794,16 +802,6 @@ impl DeploymentManager {
 
                 let needs_send = kind.decide_on_success(&st);
 
-                match kind {
-                    ObserveKind::Liveness => {
-                        st.last_alive = true;
-                    }
-                    ObserveKind::Health => {
-                        st.last_health = true;
-                        st.last_alive = true;
-                    }
-                }
-
                 LocalRunState::save(&wd, &st)?;
 
                 if needs_send {
@@ -818,9 +816,13 @@ impl DeploymentManager {
                     match kind {
                         ObserveKind::Health => {
                             st.reported_health_once = true;
+                            st.last_health = true;
+                            st.consecutive_health_failures = 0;
                         }
                         ObserveKind::Liveness => {
                             st.reported_alive_once = true;
+                            st.last_alive = true;
+                            st.consecutive_alive_failures = 0;
                         }
                     }
                     LocalRunState::save(&wd, &st)?;
@@ -922,7 +924,6 @@ impl DeploymentManager {
                         }
                         ObserveKind::Liveness => {
                             st.reported_alive_once = true;
-                            st.last_alive = false;
                             st.last_health = false;
                         }
                     }
