@@ -197,6 +197,9 @@ impl Mongo {
             )
             .await?;
 
+        // drop old indexes
+        let _ = self.deploy_reports().drop_indexes().await;
+
         self.deploy_reports()
             .create_index(
                 IndexModel::builder()
@@ -230,18 +233,21 @@ impl Mongo {
                     .build(),
             )
             .await?;
-        // index on device id and revision id
+
         self.deploy_reports()
             .create_index(
                 IndexModel::builder()
-                    .keys(doc! { "device_id": 1, "revision_id": 1 })
-                    .build(),
-            )
-            .await?;
-        self.deploy_reports()
-            .create_index(
-                IndexModel::builder()
-                    .keys(doc! { "device_id": 1, "revision_id": 1, "kind.type": 1 })
+                    .keys(doc! {
+                        "device_id": 1,
+                        "revision_id": 1,
+                        "created_at": -1,
+                        "_id": -1
+                    })
+                    .options(
+                        IndexOptions::builder()
+                            .partial_filter_expression(doc! { "kind.type": "RunState" })
+                            .build(),
+                    )
                     .build(),
             )
             .await?;

@@ -37,7 +37,7 @@ pub fn create_route() -> Router<AppState> {
         )
         .route(
             "/{device_id}/revisions/{revision_id}/reports",
-            get(list_device_revision_reports),
+            get(list_device_revision_run_states),
         )
         //get deployment snapshot
         .route(
@@ -359,7 +359,7 @@ async fn delete_revision(
         .build())
 }
 
-async fn list_device_revision_reports(
+async fn list_device_revision_run_states(
     claims: Claims,
     State(state): State<AppState>,
     Path((device_id, revision_id)): Path<(String, String)>,
@@ -381,7 +381,8 @@ async fn list_device_revision_reports(
     page.limit = page.limit.min(5);
 
     let docs =
-        DeployReportDoc::list_for_device(&state.db, &device_oid, &revision_id, &page).await?;
+        DeployReportDoc::list_run_states_for_device(&state.db, &device_oid, &revision_id, &page)
+            .await?;
     let reports: Vec<DeployReport> = docs.into_iter().map(|doc| doc.to_pub_report()).collect();
     let total_count = reports.len() as u64;
 

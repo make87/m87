@@ -401,7 +401,7 @@ impl DeployReportDoc {
         Ok(res.deleted_count == 1)
     }
 
-    pub async fn list_for_device(
+    pub async fn list_run_states_for_device(
         db: &Arc<Mongo>,
         device_id: &ObjectId,
         revision_id: &str,
@@ -412,6 +412,7 @@ impl DeployReportDoc {
         let mut filter = doc! {
             "device_id": device_id,
             "revision_id": revision_id,
+            "kind.type": "RunState",
         };
 
         let mut created_at_filter = Document::new();
