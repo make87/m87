@@ -376,9 +376,9 @@ async fn list_device_revision_run_states(
         return Err(ServerError::not_found("Device not found"));
     }
 
-    // limit to max 5
+    // limit to max 50
     let mut page = pagination.clone();
-    page.limit = page.limit.min(5);
+    page.limit = page.limit.min(50);
 
     let docs =
         DeployReportDoc::list_run_states_for_device(&state.db, &device_oid, &revision_id, &page)

@@ -97,7 +97,7 @@ pub async fn deploy_file(
             new_id
         }
     };
-
+    let base_dir = file.parent().map(|f| f.to_path_buf());
     // Convert input -> run-spec YAML string (typed for runspec)
     let update_body = match ty {
         SpecType::Compose => {
@@ -111,9 +111,10 @@ pub async fn deploy_file(
         }
         SpecType::Runspec => {
             let s = load_file_to_string(&file)?;
-            let _ = RunSpec::from_yaml(&s)?;
+            let mut rs = RunSpec::from_yaml(&s)?;
+            rs.resolve_file_references(base_dir)?;
             UpdateDeployRevisionBody {
-                add_run_spec: Some(s),
+                add_run_spec: Some(rs.to_yaml()?),
                 ..Default::default()
             }
         }
@@ -129,19 +130,24 @@ pub async fn deploy_file(
                 }
             } else {
                 match RunSpec::from_yaml(&s) {
-                    Ok(_) => UpdateDeployRevisionBody {
-                        add_run_spec: Some(s),
-                        ..Default::default()
-                    },
+                    Ok(mut rs) => {
+                        let _ = rs.resolve_file_references(base_dir)?;
+                        UpdateDeployRevisionBody {
+                            add_run_spec: Some(rs.to_yaml()?),
+                            ..Default::default()
+                        }
+                    }
                     Err(_) => {
                         let deployment = DeploymentRevision::from_yaml(&s);
-                        if let Ok(_) = deployment {
+                        if let Ok(mut dr) = deployment {
+                            let _ = dr.resolve_file_references(base_dir)?;
                             UpdateDeployRevisionBody {
-                                revision: Some(s),
+                                revision: Some(dr.to_yaml()?),
                                 ..Default::default()
                             }
                         } else {
-                            bail!("Failed to parse deployment YAML");
+                            let err_msg = deployment.err().unwrap().to_string();
+                            bail!("Failed to parse deployment YAML: {}", err_msg);
                         }
                     }
                 }
@@ -149,9 +155,10 @@ pub async fn deploy_file(
         }
         SpecType::Deployment => {
             let s = load_file_to_string(&file)?;
-            let _ = DeploymentRevision::from_yaml(&s)?;
+            let mut dr = DeploymentRevision::from_yaml(&s)?;
+            dr.resolve_file_references(base_dir)?;
             UpdateDeployRevisionBody {
-                revision: Some(s),
+                revision: Some(dr.to_yaml()?),
                 ..Default::default()
             }
         }

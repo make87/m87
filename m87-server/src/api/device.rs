@@ -1,6 +1,7 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use m87_shared::deploy_spec::{FailureAggQuery, FailureAggResponse};
 use m87_shared::device::{AddDeviceAccessBody, AuditLog, DeviceStatus};
 use m87_shared::roles::Role;
 use m87_shared::users::User;
@@ -10,6 +11,7 @@ use mongodb::bson::oid::ObjectId;
 use crate::api::deploy_spec::create_route as deploy_spec_route;
 use crate::auth::claims::Claims;
 use crate::models::audit_logs::AuditLogDoc;
+use crate::models::deploy_spec::{DeployReportDoc, DeployRevisionDoc};
 use crate::models::device::{DeviceDoc, PublicDevice, UpdateDeviceBody};
 use crate::models::org;
 use crate::response::{ResponsePagination, ServerAppResult, ServerError, ServerResponse};
@@ -26,6 +28,8 @@ pub fn create_route() -> Router<AppState> {
                 .delete(delete_device),
         )
         .route("/{id}/status", get(get_device_status))
+        .route("/{id}/failure_agg", get(get_device_failure_agg))
+        .route("/statuses", get(get_all_device_statuses))
         .route("/{id}/audit_logs", get(get_audit_logs_by_device_id))
         .route("/{id}/users", get(get_device_users))
         .route("/{id}/access", post(add_device_access))
@@ -230,6 +234,92 @@ async fn get_device_status(
 
     Ok(ServerResponse::builder()
         .body(status)
+        .status_code(axum::http::StatusCode::OK)
+        .build())
+}
+
+async fn get_all_device_statuses(
+    claims: Claims,
+    State(state): State<AppState>,
+    pagination: RequestPagination, // keep it, or drop if you want "all"
+) -> ServerAppResult<Vec<DeviceStatus>> {
+    // 1) Get visible devices (access control) (this is still one query)
+    let devices = claims
+        .list_with_access(&state.db.devices(), &pagination)
+        .await?;
+
+    let device_ids: Vec<ObjectId> = devices.iter().filter_map(|d| d.id.clone()).collect();
+
+    if device_ids.is_empty() {
+        return Ok(ServerResponse::builder()
+            .body(vec![])
+            .status_code(axum::http::StatusCode::OK)
+            .build());
+    }
+
+    let statuses = DeviceDoc::get_statuses(&device_ids, &state.db).await?;
+
+    Ok(ServerResponse::builder()
+        .body(statuses)
+        .status_code(axum::http::StatusCode::OK)
+        .build())
+}
+
+async fn get_device_failure_agg(
+    claims: Claims,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<FailureAggQuery>,
+) -> ServerAppResult<FailureAggResponse> {
+    let device_oid =
+        ObjectId::parse_str(&id).map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
+
+    // Require Editor on this device (same as /status)
+    let device_opt = claims
+        .find_one_with_scope_and_role(
+            &state.db.devices(),
+            doc! { "_id": &device_oid },
+            Role::Editor,
+        )
+        .await?;
+    let _device = device_opt.ok_or_else(|| ServerError::not_found("Device not found"))?;
+
+    // Resolve revision_id (default: active)
+    let revision_id =
+        match q.revision_id.clone() {
+            Some(r) => r,
+            None => {
+                let active =
+                    DeployRevisionDoc::get_active_device_deployment(&state.db, device_oid.clone())
+                        .await?
+                        .ok_or_else(|| ServerError::not_found("No active revision"))?;
+                active.revision.id.clone().ok_or_else(|| {
+                    ServerError::internal_error("Active revision missing revision.id")
+                })?
+            }
+        };
+
+    // Validate
+    if q.to_ts_ms <= q.from_ts_ms {
+        return Err(ServerError::bad_request("to_ts_ms must be > from_ts_ms"));
+    }
+    if q.bucket_ms <= 0 {
+        return Err(ServerError::bad_request("bucket_ms must be > 0"));
+    }
+
+    let resp = DeployReportDoc::agg_failures_buckets(
+        &state.db,
+        &device_oid,
+        &revision_id,
+        q.from_ts_ms,
+        q.to_ts_ms,
+        q.bucket_ms,
+        q.level.clone(),
+    )
+    .await?;
+
+    Ok(ServerResponse::builder()
+        .body(resp)
         .status_code(axum::http::StatusCode::OK)
         .build())
 }

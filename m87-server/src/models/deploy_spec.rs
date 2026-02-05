@@ -1,11 +1,15 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use futures::TryStreamExt;
 use m87_shared::{
     deploy_spec::{
-        DeployReport, DeployReportKind, DeploymentRevision, DeploymentStatusSnapshot, ObserveKind,
-        ObserveStatusItem, Outcome, RollbackStatus, RunSpec, RunStatus, StepAttemptStatus,
-        StepState, StepStatus, UpdateDeployRevisionBody,
+        BucketRow, BucketTotals, DeployReport, DeployReportKind, DeploymentRevision,
+        DeploymentStatusSnapshot, FailureAggResponse, ObserveKind, ObserveStatusItem, Outcome,
+        RollbackStatus, RunSpec, RunStatus, SliceLevel, StepAttemptStatus, StepState, StepStatus,
+        UpdateDeployRevisionBody,
     },
     device::ObserveStatus,
 };
@@ -226,6 +230,26 @@ impl DeployRevisionDoc {
         }
     }
 
+    pub async fn get_active_devices_deployment_ids(
+        db: &Arc<Mongo>,
+        device_ids: &[ObjectId],
+    ) -> ServerResult<Vec<(ObjectId, String)>> {
+        let mut cursor = db
+            .deploy_revisions()
+            .find(doc! { "device_id": { "$in": device_ids }, "active": true })
+            .await?;
+
+        // create list of device_id, id tuples
+        let mut tuples = Vec::new();
+        while let Some(doc) = cursor.try_next().await? {
+            if let Some(device_id) = doc.device_id {
+                tuples.push((device_id, doc.id.unwrap().to_string()));
+            }
+        }
+
+        Ok(tuples)
+    }
+
     pub async fn list_for_device(
         db: &Arc<Mongo>,
         device_id: ObjectId,
@@ -290,7 +314,7 @@ pub struct CreateDeployReportBody {
 }
 
 impl DeployReportDoc {
-    pub async fn get_device_observations_since(
+    pub async fn get_device_observations(
         db: &Arc<Mongo>,
         device_id: &ObjectId,
         revision_id: &str,
@@ -316,6 +340,52 @@ impl DeployReportDoc {
                 crashes: doc.crashes as u32,
                 unhealthy_checks: doc.unhealthy_checks as u32,
             });
+        }
+
+        Ok(out)
+    }
+    pub async fn get_devices_observations(
+        db: &Arc<Mongo>,
+        device_and_revision_ids: &[(ObjectId, String)],
+    ) -> ServerResult<BTreeMap<String, Vec<ObserveStatus>>> {
+        // Build OR filter: [{device_id: X, revision_id: Y}, ...]
+        let or_filters: Vec<_> = device_and_revision_ids
+            .iter()
+            .map(|(device_id, revision_id)| {
+                doc! {
+                    "device_id": device_id,
+                    "revision_id": revision_id,
+                }
+            })
+            .collect();
+
+        if or_filters.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let filter = doc! {
+            "$or": or_filters
+        };
+
+        let mut cursor = db
+            .current_run_states()
+            .find(filter)
+            .await
+            .map_err(|e| ServerError::internal_error(&format!("Mongo find failed: {e}")))?;
+
+        let mut out: BTreeMap<String, Vec<ObserveStatus>> = BTreeMap::new();
+
+        while let Some(doc) = cursor.try_next().await? {
+            let device_id = doc.device_id.to_string();
+            let status = ObserveStatus {
+                name: doc.run_id,
+                alive: doc.alive,
+                healthy: doc.healthy,
+                crashes: doc.crashes as u32,
+                unhealthy_checks: doc.unhealthy_checks as u32,
+            };
+
+            out.entry(device_id).or_insert_with(Vec::new).push(status);
         }
 
         Ok(out)
@@ -687,6 +757,150 @@ impl DeployReportDoc {
             error: rev_error,
             rollback,
             runs,
+        })
+    }
+
+    pub async fn agg_failures_buckets(
+        db: &Arc<Mongo>,
+        device_id: &ObjectId,
+        revision_id: &str,
+        from_ts_ms: i64,
+        to_ts_ms: i64,
+        bucket_ms: i64,
+        level: SliceLevel,
+    ) -> ServerResult<FailureAggResponse> {
+        use futures::TryStreamExt;
+        use mongodb::bson::{Document, doc};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // Validate
+        if to_ts_ms <= from_ts_ms {
+            return Err(ServerError::bad_request("to_ts_ms must be > from_ts_ms"));
+        }
+        if bucket_ms <= 0 {
+            return Err(ServerError::bad_request("bucket_ms must be > 0"));
+        }
+
+        let from_dt = mongodb::bson::DateTime::from_millis(from_ts_ms);
+        let to_dt = mongodb::bson::DateTime::from_millis(to_ts_ms);
+
+        let match_doc = doc! {
+            "device_id": device_id,
+            "revision_id": revision_id,
+            "kind.type": "RunState",
+            "created_at": { "$gte": from_dt, "$lt": to_dt },
+        };
+
+        // bucket_start_ms = from + floor((created_at_ms - from)/bucket_ms)*bucket_ms
+        let created_ms = doc! { "$toLong": "$created_at" };
+        let bucket_start_ms = doc! {
+            "$add": [
+                from_ts_ms,
+                {
+                    "$multiply": [
+                        bucket_ms,
+                        {
+                            "$floor": {
+                                "$divide": [
+                                    { "$subtract": [ created_ms, from_ts_ms ] },
+                                    bucket_ms
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        };
+
+        let pipeline: Vec<Document> = vec![
+            doc! { "$match": match_doc },
+            doc! {
+                "$addFields": {
+                    "bucket_start_ms": bucket_start_ms,
+                    "bucket_end_ms": { "$add": ["$bucket_start_ms", bucket_ms] }
+                }
+            },
+            // per (bucket, run)
+            doc! {
+                "$group": {
+                    "_id": { "bucket_start_ms": "$bucket_start_ms", "run_id": "$kind.data.run_id" },
+                    "bucket_start_ms": { "$first": "$bucket_start_ms" },
+                    "bucket_end_ms": { "$first": "$bucket_end_ms" },
+                    "crashes": { "$sum": "$kind.data.crashes" },
+                    "unhealthy_checks": { "$sum": "$kind.data.unhealthy_checks" },
+                }
+            },
+            // per bucket
+            doc! {
+                "$group": {
+                    "_id": "$bucket_start_ms",
+                    "bucket_start_ms": { "$first": "$bucket_start_ms" },
+                    "bucket_end_ms": { "$first": "$bucket_end_ms" },
+                    "pairs": {
+                        "$push": {
+                            "k": "$_id.run_id",
+                            "v": { "crashes": "$crashes", "unhealthy_checks": "$unhealthy_checks" }
+                        }
+                    },
+                    "total_crashes": { "$sum": "$crashes" },
+                    "total_unhealthy_checks": { "$sum": "$unhealthy_checks" }
+                }
+            },
+            doc! { "$sort": { "bucket_start_ms": 1 } },
+            doc! {
+                "$project": {
+                    "_id": 0,
+                    "start_ts_ms": "$bucket_start_ms",
+                    "end_ts_ms": "$bucket_end_ms",
+                    "total": {
+                        "crashes": "$total_crashes",
+                        "unhealthy_checks": "$total_unhealthy_checks"
+                    },
+                    "by_run": { "$arrayToObject": "$pairs" }
+                }
+            },
+        ];
+
+        let mut cursor =
+            db.deploy_reports().aggregate(pipeline).await.map_err(|e| {
+                ServerError::internal_error(&format!("Mongo aggregate failed: {e}"))
+            })?;
+
+        #[derive(serde::Deserialize)]
+        struct Row {
+            start_ts_ms: i64,
+            end_ts_ms: i64,
+            total: BucketTotals,
+            by_run: Option<BTreeMap<String, BucketTotals>>,
+        }
+
+        let mut buckets: Vec<BucketRow> = Vec::new();
+        let mut run_set: BTreeSet<String> = BTreeSet::new();
+
+        while let Some(d) = cursor.try_next().await? {
+            let row: Row = mongodb::bson::from_document(d)
+                .map_err(|e| ServerError::internal_error(&format!("BSON decode failed: {e}")))?;
+
+            if let Some(ref m) = row.by_run {
+                for k in m.keys() {
+                    run_set.insert(k.clone());
+                }
+            }
+
+            buckets.push(BucketRow {
+                start_ts_ms: row.start_ts_ms,
+                end_ts_ms: row.end_ts_ms.min(to_ts_ms),
+                total: row.total,
+                by_run: row.by_run,
+            });
+        }
+
+        let runs: Vec<String> = run_set.into_iter().collect();
+
+        Ok(FailureAggResponse {
+            level,
+            runs: Some(runs),
+            buckets,
         })
     }
 }

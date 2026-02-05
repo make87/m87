@@ -364,7 +364,7 @@ impl DeviceDoc {
             DeployRevisionDoc::get_active_device_deployment(db, self.id.clone().unwrap()).await?;
         let observations = match active_revision {
             Some(revision) => {
-                let observations = DeployReportDoc::get_device_observations_since(
+                let observations = DeployReportDoc::get_device_observations(
                     db,
                     &self.id.clone().unwrap(),
                     &revision.revision.id.unwrap(),
@@ -376,9 +376,37 @@ impl DeviceDoc {
         };
         let status = DeviceStatus {
             incidents: vec![],
+            device_id: Some(self.id.clone().unwrap().to_string()),
             observations,
         };
         Ok(status)
+    }
+
+    pub async fn get_statuses(
+        device_ids: &[ObjectId],
+        db: &Arc<Mongo>,
+    ) -> ServerResult<Vec<DeviceStatus>> {
+        let active_revision_ids =
+            DeployRevisionDoc::get_active_devices_deployment_ids(db, device_ids).await?;
+        let observations =
+            DeployReportDoc::get_devices_observations(db, &active_revision_ids).await?;
+
+        let statuses = device_ids
+            .iter()
+            .map(|id| {
+                let observations = observations
+                    .get(&id.to_string())
+                    .cloned()
+                    .unwrap_or_default();
+                let status = DeviceStatus {
+                    incidents: vec![],
+                    device_id: Some(id.to_string()),
+                    observations,
+                };
+                status
+            })
+            .collect();
+        Ok(statuses)
     }
 
     pub async fn add_or_update_device_access(

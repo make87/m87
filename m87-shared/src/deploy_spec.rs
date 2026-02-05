@@ -1,9 +1,12 @@
+use serde::ser::Error;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::{fs, io};
 
 fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(bytes.as_ref()))
@@ -12,6 +15,52 @@ fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
 fn hash_json<T: Serialize>(v: &T) -> String {
     let data = serde_json::to_vec(v).expect("hash_json serialization must not fail");
     sha256_hex(data)
+}
+
+#[derive(Debug)]
+pub enum ResolveFilesError {
+    MissingFile {
+        key: String,
+        path: PathBuf,
+    },
+    Io {
+        key: String,
+        path: PathBuf,
+        source: io::Error,
+    },
+}
+
+impl std::fmt::Display for ResolveFilesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveFilesError::MissingFile { key, path } => {
+                write!(
+                    f,
+                    "files['{}'] references missing file: {}",
+                    key,
+                    path.display()
+                )
+            }
+            ResolveFilesError::Io { key, path, source } => {
+                write!(
+                    f,
+                    "failed to read files['{}'] from {}: {}",
+                    key,
+                    path.display(),
+                    source
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ResolveFilesError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ResolveFilesError::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -92,19 +141,39 @@ impl DeploymentRevision {
 
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
         let mut rev: Self = serde_yaml::from_str(yaml)?;
-        // if id is none create uuid with hash as seed
+
         if rev.id.is_none() {
-            let seed = rev.get_hash().parse::<u128>().unwrap();
-            let id = uuid::Uuid::from_u128(
-                seed & 0xFFFFFFFFFFFF4FFFBFFFFFFFFFFFFFFF | 0x40008000000000000000,
-            );
+            // SHA-256 hex is 64 chars (256-bit). u128 needs 32 hex chars (128-bit) and radix-16 parsing.
+            let h = rev.get_hash();
+            let prefix = &h[..h.len().min(32)];
+            let seed = u128::from_str_radix(prefix, 16).map_err(|e| {
+                serde_yaml::Error::custom(format!("invalid hex hash for uuid seed: {e}"))
+            })?;
+
+            // Make it a v4 UUID with RFC4122 variant.
+            let mut bytes = seed.to_be_bytes();
+            bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+            bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant RFC4122
+
+            let id = uuid::Uuid::from_bytes(bytes);
             rev.id = Some(id.to_string());
         }
+
         Ok(rev)
     }
 
     pub fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
         serde_yaml::to_string(self)
+    }
+
+    pub fn resolve_file_references(
+        &mut self,
+        base_dir: Option<PathBuf>,
+    ) -> Result<(), ResolveFilesError> {
+        for job in &mut self.jobs {
+            job.resolve_file_references(base_dir.clone())?;
+        }
+        Ok(())
     }
 }
 
@@ -193,11 +262,16 @@ pub enum RollbackTrigger {
     Consecutive(u32),
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct RunSpec {
     pub id: String,
     #[serde(rename = "type")]
     pub run_type: RunType,
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
 
     // service / job only
@@ -265,6 +339,42 @@ impl RunSpec {
 
     pub fn enable(&mut self, enabled: bool) {
         self.enabled = enabled;
+    }
+
+    /// Resolve `files` entries where the value is a file reference.
+    ///
+    /// Convention:
+    /// - Literal content: stored as-is
+    /// - File reference: value starts with '@', e.g. "@./config.yaml"
+    pub fn resolve_file_references(
+        &mut self,
+        base_dir: Option<PathBuf>,
+    ) -> Result<(), ResolveFilesError> {
+        let base_dir = base_dir.unwrap_or_else(|| Path::new(".").to_path_buf());
+
+        let mut resolved = BTreeMap::new();
+
+        for (key, value) in std::mem::take(&mut self.files) {
+            let full_path = {
+                let p = PathBuf::from(&value);
+                if p.is_absolute() { p } else { base_dir.join(p) }
+            };
+
+            let content = if !value.contains('\n') && full_path.is_file() {
+                fs::read_to_string(&full_path).map_err(|e| ResolveFilesError::Io {
+                    key: key.clone(),
+                    path: full_path,
+                    source: e,
+                })?
+            } else {
+                value
+            };
+
+            resolved.insert(key, content);
+        }
+
+        self.files = resolved;
+        Ok(())
     }
 }
 
@@ -795,4 +905,46 @@ pub enum StepState {
     Success,
     Failed,
     Skipped, // if you implement skip semantics
+}
+
+// --- Failure aggregation types (match your TS) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SliceLevel {
+    Days,
+    Hours,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BucketTotals {
+    pub crashes: u32,
+    pub unhealthy_checks: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BucketRow {
+    pub start_ts_ms: i64,
+    pub end_ts_ms: i64,
+    pub total: BucketTotals,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by_run: Option<BTreeMap<String, BucketTotals>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailureAggResponse {
+    pub level: SliceLevel,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runs: Option<Vec<String>>,
+    pub buckets: Vec<BucketRow>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FailureAggQuery {
+    pub from_ts_ms: i64,
+    pub to_ts_ms: i64,
+    pub bucket_ms: i64,
+    pub level: SliceLevel,
+    /// Optional. If absent, use active revision.
+    pub revision_id: Option<String>,
 }

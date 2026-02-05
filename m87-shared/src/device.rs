@@ -87,7 +87,7 @@ pub struct UpdateDeviceBody {
     pub config: Option<DeviceClientConfig>,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 pub struct ObserveStatus {
     pub name: String,
     pub alive: bool,
@@ -109,7 +109,11 @@ pub struct DeviceStatus {
     pub observations: Vec<ObserveStatus>,
 
     // incidents
+    #[serde(default)]
     pub incidents: Vec<IncidentInfo>,
+
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default)]
