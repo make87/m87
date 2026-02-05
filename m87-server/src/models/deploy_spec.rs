@@ -773,7 +773,6 @@ impl DeployReportDoc {
         use mongodb::bson::{Document, doc};
         use std::collections::{BTreeMap, BTreeSet};
 
-        // Validate
         if to_ts_ms <= from_ts_ms {
             return Err(ServerError::bad_request("to_ts_ms must be > from_ts_ms"));
         }
@@ -791,9 +790,11 @@ impl DeployReportDoc {
             "created_at": { "$gte": from_dt, "$lt": to_dt },
         };
 
-        // bucket_start_ms = from + floor((created_at_ms - from)/bucket_ms)*bucket_ms
+        // created_at_ms = toLong(created_at)
         let created_ms = doc! { "$toLong": "$created_at" };
-        let bucket_start_ms = doc! {
+
+        // raw_bucket_start = from + floor((created_ms - from)/bucket_ms)*bucket_ms
+        let raw_bucket_start = doc! {
             "$add": [
                 from_ts_ms,
                 {
@@ -812,12 +813,23 @@ impl DeployReportDoc {
             ]
         };
 
+        // bucket_start_ms = toLong(raw_bucket_start)
+        let bucket_start_ms = doc! { "$toLong": raw_bucket_start };
+
+        // bucket_end_ms = toLong(bucket_start_ms + bucket_ms)
+        let bucket_end_ms = doc! {
+            "$toLong": { "$add": [ bucket_start_ms.clone(), bucket_ms ] }
+        };
+
+        let crashes_expr = doc! { "$ifNull": [ "$kind.data.crashes", 0 ] };
+        let unhealthy_expr = doc! { "$ifNull": [ "$kind.data.unhealthy_checks", 0 ] };
+
         let pipeline: Vec<Document> = vec![
             doc! { "$match": match_doc },
             doc! {
                 "$addFields": {
                     "bucket_start_ms": bucket_start_ms,
-                    "bucket_end_ms": { "$add": ["$bucket_start_ms", bucket_ms] }
+                    "bucket_end_ms": bucket_end_ms
                 }
             },
             // per (bucket, run)
@@ -826,8 +838,8 @@ impl DeployReportDoc {
                     "_id": { "bucket_start_ms": "$bucket_start_ms", "run_id": "$kind.data.run_id" },
                     "bucket_start_ms": { "$first": "$bucket_start_ms" },
                     "bucket_end_ms": { "$first": "$bucket_end_ms" },
-                    "crashes": { "$sum": "$kind.data.crashes" },
-                    "unhealthy_checks": { "$sum": "$kind.data.unhealthy_checks" },
+                    "crashes": { "$sum": crashes_expr },
+                    "unhealthy_checks": { "$sum": unhealthy_expr },
                 }
             },
             // per bucket
