@@ -19,6 +19,38 @@ struct ExecResult {
     exit_code: i32,
 }
 
+/// Run a command on a remote device and return output as a string (non-interactive, no TTY).
+///
+/// This variant collects all output into a String instead of writing to stdout,
+/// making it suitable for MCP tool use. A timeout prevents hanging on long-running commands.
+pub async fn run_exec_capture(
+    device: &str,
+    command: Vec<String>,
+    timeout_secs: u64,
+) -> Result<String> {
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider()).ok();
+
+    let config = Config::load()?;
+    let resolved = devices::resolve_device_cached(device).await?;
+    let token = AuthManager::get_cli_token().await?;
+
+    let stream_type = StreamType::Exec {
+        token: token.to_string(),
+    };
+    let (_, io) = open_quic_io(
+        &resolved.host,
+        &token,
+        &resolved.short_id,
+        stream_type,
+        config.trust_invalid_server_cert,
+    )
+    .await
+    .context("Failed to connect to exec stream")?;
+
+    let cmd_str = command.join(" ");
+    run_output_only_capture(io, cmd_str, timeout_secs).await
+}
+
 /// Run a command on a remote device.
 ///
 /// Flags follow Docker's model:
@@ -63,6 +95,74 @@ fn try_parse_exit_code(line: &str) -> Option<i32> {
     serde_json::from_str::<ExecResult>(line.trim())
         .ok()
         .map(|r| r.exit_code)
+}
+
+/// No stdin, no tty: send command config and collect all output into a string
+async fn run_output_only_capture<IO>(io: IO, cmd_str: String, timeout_secs: u64) -> Result<String>
+where
+    IO: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
+{
+    let (reader, mut writer) = tokio::io::split(io);
+    let mut reader = BufReader::new(reader);
+
+    // Send command config as JSON line
+    let config = ExecRequest {
+        command: cmd_str,
+        tty: false,
+    };
+    writer
+        .write_all(format!("{}\n", serde_json::to_string(&config)?).as_bytes())
+        .await?;
+    writer.flush().await?;
+
+    let mut output = String::new();
+    let mut exit_code = 0;
+
+    // Stream output until connection closes or timeout
+    let mut line = String::new();
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
+    tokio::pin!(timeout);
+
+    loop {
+        line.clear();
+
+        tokio::select! {
+            _ = SHUTDOWN.cancelled() => {
+                return Err(anyhow::anyhow!("Command cancelled"));
+            }
+            _ = &mut timeout => {
+                return Err(anyhow::anyhow!(
+                    "Command execution timed out after {} seconds",
+                    timeout_secs
+                ));
+            }
+            result = reader.read_line(&mut line) => {
+                match result {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        if let Some(code) = try_parse_exit_code(&line) {
+                            exit_code = code;
+                        } else {
+                            output.push_str(&line);
+                        }
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("Read error: {}", e));
+                    }
+                }
+            }
+        }
+    }
+
+    if exit_code != 0 {
+        return Err(anyhow::anyhow!(
+            "Command exited with code {}: {}",
+            exit_code,
+            output.trim()
+        ));
+    }
+
+    Ok(output)
 }
 
 /// No stdin, no tty: just send command config and stream output

@@ -19,6 +19,9 @@ pub mod cli;
 
 pub mod org;
 
+// MCP (Model Context Protocol) server for AI agent integration
+pub mod mcp;
+
 /// Entrypoint used by `main.rs` and tests to run the full CLI.
 pub async fn run_cli() -> anyhow::Result<()> {
     cli::cli().await
