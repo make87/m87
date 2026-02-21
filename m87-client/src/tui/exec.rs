@@ -19,15 +19,22 @@ struct ExecResult {
     exit_code: i32,
 }
 
+/// Captured output from a remote exec command.
+pub struct ExecCapture {
+    pub output: String,
+    pub exit_code: i32,
+}
+
 /// Run a command on a remote device and return output as a string (non-interactive, no TTY).
 ///
 /// This variant collects all output into a String instead of writing to stdout,
 /// making it suitable for MCP tool use. A timeout prevents hanging on long-running commands.
+/// Returns both output and exit code — non-zero exit is NOT an error.
 pub async fn run_exec_capture(
     device: &str,
     command: Vec<String>,
     timeout_secs: u64,
-) -> Result<String> {
+) -> Result<ExecCapture> {
     rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider()).ok();
 
     let config = Config::load()?;
@@ -48,7 +55,8 @@ pub async fn run_exec_capture(
     .context("Failed to connect to exec stream")?;
 
     let cmd_str = command.join(" ");
-    run_output_only_capture(io, cmd_str, timeout_secs).await
+    let (output, exit_code) = run_output_only_capture(io, cmd_str, timeout_secs).await?;
+    Ok(ExecCapture { output, exit_code })
 }
 
 /// Run a command on a remote device.
@@ -97,8 +105,9 @@ fn try_parse_exit_code(line: &str) -> Option<i32> {
         .map(|r| r.exit_code)
 }
 
-/// No stdin, no tty: send command config and collect all output into a string
-async fn run_output_only_capture<IO>(io: IO, cmd_str: String, timeout_secs: u64) -> Result<String>
+/// No stdin, no tty: send command config and collect all output into a string.
+/// Returns (output, exit_code) — non-zero exit is not an error.
+async fn run_output_only_capture<IO>(io: IO, cmd_str: String, timeout_secs: u64) -> Result<(String, i32)>
 where
     IO: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
 {
@@ -154,15 +163,7 @@ where
         }
     }
 
-    if exit_code != 0 {
-        return Err(anyhow::anyhow!(
-            "Command exited with code {}: {}",
-            exit_code,
-            output.trim()
-        ));
-    }
-
-    Ok(output)
+    Ok((output, exit_code))
 }
 
 /// No stdin, no tty: just send command config and stream output

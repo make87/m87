@@ -1,10 +1,13 @@
 use anyhow::{Context, Result, anyhow};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::UNIX_EPOCH;
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 
-use crate::device::forward::open_local_forward;
+use crate::device::forward::start_forward;
+use crate::util::shutdown::SHUTDOWN;
 use crate::util::subprocess::SubprocessBuilder;
 
 /// docker -H <socket> … → forwarded via QUIC
@@ -12,8 +15,9 @@ pub async fn run_docker_command(device: &str, args: Vec<String>) -> Result<()> {
     check_docker_cli()?;
 
     let endpoint = generate_local_socket_path(device);
+    let cancel = SHUTDOWN.child_token();
 
-    spawn_socket_forward(device, &endpoint).await?;
+    spawn_socket_forward(device, &endpoint, cancel).await?;
     wait_for_socket_ready(&endpoint).await?;
     tracing::info!("Connected");
 
@@ -26,6 +30,60 @@ pub async fn run_docker_command(device: &str, args: Vec<String>) -> Result<()> {
     cleanup(&endpoint);
 
     Ok(())
+}
+
+/// Captured output from a non-interactive docker command.
+#[derive(Serialize)]
+pub struct DockerOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+/// Run a docker command against a device, capturing output instead of inheriting stdio.
+/// The socket forward is automatically created and cleaned up.
+pub async fn run_docker_capture(device: &str, args: Vec<String>, timeout_secs: u64) -> Result<DockerOutput> {
+    check_docker_cli()?;
+
+    let endpoint = generate_local_socket_path(device);
+    let cancel = CancellationToken::new();
+    let shutdown_cancel = SHUTDOWN.child_token();
+
+    // Link to global shutdown so Ctrl-C also stops this forward
+    let linked_cancel = cancel.clone();
+    let shutdown_guard = shutdown_cancel.clone();
+    tokio::spawn(async move {
+        shutdown_guard.cancelled().await;
+        linked_cancel.cancel();
+    });
+
+    spawn_socket_forward(device, &endpoint, cancel.clone()).await?;
+    wait_for_socket_ready(&endpoint).await?;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        tokio::process::Command::new("docker")
+            .args(&args)
+            .env("DOCKER_HOST", docker_host_uri(&endpoint))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await;
+
+    // Always clean up forward + socket
+    cancel.cancel();
+    cleanup(&endpoint);
+
+    match result {
+        Ok(Ok(output)) => Ok(DockerOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: output.status.code().unwrap_or(-1),
+        }),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => Err(anyhow!("Docker command timed out after {timeout_secs}s")),
+    }
 }
 
 //
@@ -76,18 +134,13 @@ fn docker_host_uri(p: &PathBuf) -> String {
 // ─────────────────────────────────────────────────────────────
 //
 
-async fn spawn_socket_forward(device: &str, endpoint: &PathBuf) -> Result<()> {
+async fn spawn_socket_forward(device: &str, endpoint: &PathBuf, cancel: CancellationToken) -> Result<()> {
     let local = endpoint.display().to_string();
     let remote = "/var/run/docker.sock".to_string(); // robot docker sock
 
     let spec = format!("{local}:{remote}");
 
-    let device = device.to_string();
-    tokio::spawn(async move {
-        if let Err(e) = open_local_forward(&device, vec![spec]).await {
-            eprintln!("Docker socket forward exited with error: {e}");
-        }
-    });
+    start_forward(device, vec![spec], cancel).await?;
 
     Ok(())
 }

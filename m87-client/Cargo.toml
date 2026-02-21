@@ -35,22 +35,18 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 anyhow = { workspace = true }
 reqwest = { workspace = true }
 sha1 = { workspace = true }
 futures = { workspace = true }
 dashmap = { workspace = true }
-jsonwebtoken = { workspace = true }
 once_cell = { workspace = true }
-axum = { version = "0.8.6", features = ["ws", "macros"] }
 
 # http3 and quic
 quinn.workspace = true
 quinn-proto.workspace = true
 
 rustls = { workspace = true }
-# tokio-rustls = { workspace = true }
 
 # Client-specific dependencies
 clap = { version = "4.5", features = ["derive", "cargo"] }
@@ -70,8 +66,6 @@ ratatui = { version = "0.30", features = ["termion"] }
 stun = "0.9.0"
 
 bytes = ">=1.11.1"
-base64 = "0.22"
-futures-util = "0.3"
 # ssh
 russh = "0.55.0"
 russh-sftp = "2.1.1"
@@ -94,7 +88,6 @@ libc = "=0.2.177"
 
 # Time parsing for relative timestamps
 chrono = "0.4"
-sha2 = "0.10.9"
 
 # MCP (Model Context Protocol) server
 rmcp = { version = "0.16.0", features = ["server", "macros", "transport-io"] }

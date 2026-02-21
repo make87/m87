@@ -80,7 +80,6 @@ where
 
     let mut cmd = Command::new(&shell);
     cmd.arg("-l")
-        .arg("-i")
         .arg("-c")
         .arg(&config.command)
         .stdin(Stdio::piped())

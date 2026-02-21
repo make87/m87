@@ -3,7 +3,14 @@
 //! Exposes m87 platform commands as MCP tools via stdio transport.
 //! This allows AI agents to programmatically call m87 operations.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::{auth, device, devices, org, tui};
+use crate::device::forward::start_forward;
+use crate::streams::stream_type::ForwardTarget;
+use crate::util::shutdown::SHUTDOWN;
+use dashmap::DashMap;
 use rmcp::{
     ServerHandler,
     handler::server::tool::ToolRouter,
@@ -15,15 +22,110 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
+
+struct ForwardSession {
+    id: String,
+    device: String,
+    specs: Vec<String>,
+    targets: Vec<ForwardTarget>,
+    cancel: CancellationToken,
+}
 
 /// MCP Server for m87 platform commands
 #[derive(Clone)]
 pub struct M87McpServer {
     tool_router: ToolRouter<Self>,
+    forward_sessions: Arc<DashMap<String, ForwardSession>>,
+    next_session_id: Arc<AtomicU64>,
 }
 
-fn internal_err(e: impl std::fmt::Display) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
+fn internal_err(e: impl std::fmt::Display + std::fmt::Debug) -> ErrorData {
+    // Use Debug format to include the full anyhow error chain, not just the outermost context
+    ErrorData::internal_error(format!("{e:?}"), None)
+}
+
+/// Strip ANSI escape sequences from output (useless for AI agents).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip ESC [ ... <final byte>
+            if let Some(next) = chars.next() {
+                if next == '[' {
+                    // CSI sequence: consume until 0x40..0x7E
+                    for c2 in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c2) {
+                            break;
+                        }
+                    }
+                }
+                // else: other ESC sequences — just skip the one char
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+// ===== Batch support =====
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DeviceTarget {
+    /// Single device name or ID (mutually exclusive with `devices`)
+    device: Option<String>,
+    /// Multiple device names/IDs for batch execution (mutually exclusive with `device`)
+    devices: Option<Vec<String>>,
+}
+
+impl DeviceTarget {
+    fn resolve(&self) -> Result<(Vec<String>, bool), ErrorData> {
+        match (&self.device, &self.devices) {
+            (Some(d), None) => Ok((vec![d.clone()], false)),
+            (None, Some(ds)) => {
+                if ds.is_empty() {
+                    Err(ErrorData::invalid_request(
+                        "devices array must not be empty",
+                        None,
+                    ))
+                } else {
+                    Ok((ds.clone(), true))
+                }
+            }
+            (Some(_), Some(_)) => Err(ErrorData::invalid_request(
+                "Provide either 'device' or 'devices', not both",
+                None,
+            )),
+            (None, None) => Err(ErrorData::invalid_request(
+                "Either 'device' or 'devices' is required",
+                None,
+            )),
+        }
+    }
+}
+
+async fn run_batch<F, Fut>(devices: Vec<String>, op: F) -> Vec<serde_json::Value>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = serde_json::Value>,
+{
+    let futs: Vec<_> = devices
+        .into_iter()
+        .map(|d| {
+            let fut = op(d.clone());
+            async move {
+                let mut result = fut.await;
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("device".into(), d.into());
+                }
+                result
+            }
+        })
+        .collect();
+    futures::future::join_all(futs).await
 }
 
 // ===== Parameter Structs =====
@@ -42,14 +144,14 @@ struct DeviceRejectReq {
 
 #[derive(Deserialize, JsonSchema)]
 struct DeviceStatusReq {
-    /// Device name or ID
-    device: String,
+    #[serde(flatten)]
+    target: DeviceTarget,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct DeviceAuditLogsReq {
-    /// Device name or ID
-    device: String,
+    #[serde(flatten)]
+    target: DeviceTarget,
     /// Start time (ISO 8601)
     since: Option<String>,
     /// End time (ISO 8601)
@@ -112,8 +214,8 @@ struct DeviceSyncReq {
 
 #[derive(Deserialize, JsonSchema)]
 struct DeviceExecReq {
-    /// Device name or ID
-    device: String,
+    #[serde(flatten)]
+    target: DeviceTarget,
     /// Command and arguments to execute
     command: Vec<String>,
     /// Timeout in seconds
@@ -146,8 +248,8 @@ struct DeviceUndeployReq {
 
 #[derive(Deserialize, JsonSchema)]
 struct DeviceDeploymentListReq {
-    /// Device name or ID
-    device: String,
+    #[serde(flatten)]
+    target: DeviceTarget,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -190,8 +292,8 @@ struct DeviceDeploymentActivateReq {
 
 #[derive(Deserialize, JsonSchema)]
 struct DeviceDeploymentStatusReq {
-    /// Device name or ID
-    device: String,
+    #[serde(flatten)]
+    target: DeviceTarget,
     /// Deployment ID (uses active if not specified)
     deployment_id: Option<String>,
 }
@@ -277,11 +379,40 @@ struct OrgDevicesRemoveReq {
     device: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct ForwardStartReq {
+    /// Device name or ID
+    device: String,
+    /// Forward specs (e.g. ["8080:80", "/tmp/sock:/var/run/docker.sock"])
+    specs: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ForwardStopReq {
+    /// Session ID returned by forward_start
+    session_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ForwardListReq {}
+
+#[derive(Deserialize, JsonSchema)]
+struct DockerExecReq {
+    /// Device name or ID
+    device: String,
+    /// Docker CLI arguments (e.g. ["ps", "-a"] or ["run", "-d", "nginx"])
+    args: Vec<String>,
+    /// Timeout in seconds (default 60). Use a higher value for builds/pulls.
+    timeout_secs: Option<u64>,
+}
+
 #[tool_router]
 impl M87McpServer {
     pub fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
+            forward_sessions: Arc::new(DashMap::new()),
+            next_session_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -312,23 +443,55 @@ impl M87McpServer {
 
     // Device commands
 
-    #[tool(description = "Get device status and health")]
+    #[tool(description = "Get device status and health. Supports batch: pass 'devices' array instead of 'device' to query multiple devices at once.")]
     async fn device_status(&self, Parameters(req): Parameters<DeviceStatusReq>) -> Result<CallToolResult, ErrorData> {
-        let status = devices::get_device_status(&req.device).await
-            .map_err(internal_err)?;
-        let text = serde_json::to_string(&status)
-            .map_err(internal_err)?;
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let (devices, is_batch) = req.target.resolve()?;
+
+        let results = run_batch(devices, |device| async move {
+            match devices::get_device_status(&device).await {
+                Ok(status) => match serde_json::to_value(&status) {
+                    Ok(v) => v,
+                    Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
+                },
+                Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
+            }
+        }).await;
+
+        if is_batch {
+            let text = serde_json::json!({ "results": results }).to_string();
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(results[0].to_string())]))
+        }
     }
 
-    #[tool(description = "Get audit logs for a device")]
+    #[tool(description = "Get audit logs for a device. Supports batch: pass 'devices' array instead of 'device' to query multiple devices at once.")]
     async fn device_audit_logs(&self, Parameters(req): Parameters<DeviceAuditLogsReq>) -> Result<CallToolResult, ErrorData> {
+        let (devices, is_batch) = req.target.resolve()?;
         let max = req.max.unwrap_or(100);
-        let logs = devices::get_audit_logs(&req.device, req.until, req.since, max).await
-            .map_err(internal_err)?;
-        let text = serde_json::to_string(&logs)
-            .map_err(internal_err)?;
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let until = req.until;
+        let since = req.since;
+
+        let results = run_batch(devices, |device| {
+            let until = until.clone();
+            let since = since.clone();
+            async move {
+                match devices::get_audit_logs(&device, until, since, max).await {
+                    Ok(logs) => match serde_json::to_value(&logs) {
+                        Ok(v) => serde_json::json!({ "logs": v }),
+                        Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
+                    },
+                    Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
+                }
+            }
+        }).await;
+
+        if is_batch {
+            let text = serde_json::json!({ "results": results }).to_string();
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(results[0].to_string())]))
+        }
     }
 
     #[tool(description = "List users with access to a device")]
@@ -387,13 +550,31 @@ impl M87McpServer {
 
     // Exec
 
-    #[tool(description = "Execute a command on a device and return output")]
+    #[tool(description = "Execute a command on a device and return output. Non-zero exit codes are returned as data, not errors. Supports batch: pass 'devices' array instead of 'device' to execute on multiple devices at once.")]
     async fn device_exec(&self, Parameters(req): Parameters<DeviceExecReq>) -> Result<CallToolResult, ErrorData> {
+        let (devices, is_batch) = req.target.resolve()?;
         let timeout_secs = req.timeout_secs.unwrap_or(30);
-        let output = tui::exec::run_exec_capture(&req.device, req.command, timeout_secs).await
-            .map_err(internal_err)?;
-        let text = serde_json::json!({"output": output}).to_string();
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let command = req.command;
+
+        let results = run_batch(devices, |device| {
+            let cmd = command.clone();
+            async move {
+                match tui::exec::run_exec_capture(&device, cmd, timeout_secs).await {
+                    Ok(capture) => serde_json::json!({
+                        "output": strip_ansi(&capture.output),
+                        "exit_code": capture.exit_code,
+                    }),
+                    Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
+                }
+            }
+        }).await;
+
+        if is_batch {
+            let text = serde_json::json!({ "results": results }).to_string();
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(results[0].to_string())]))
+        }
     }
 
     // Deployment operations
@@ -419,13 +600,26 @@ impl M87McpServer {
         Ok(CallToolResult::success(vec![Content::text(serde_json::json!({"status": "undeployed"}).to_string())]))
     }
 
-    #[tool(description = "List all deployments for a device")]
+    #[tool(description = "List all deployments for a device. Supports batch: pass 'devices' array instead of 'device' to query multiple devices at once.")]
     async fn device_deployment_list(&self, Parameters(req): Parameters<DeviceDeploymentListReq>) -> Result<CallToolResult, ErrorData> {
-        let revs = device::deploy::get_deployments(&req.device).await
-            .map_err(internal_err)?;
-        let text = serde_json::to_string(&revs)
-            .map_err(internal_err)?;
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let (devices, is_batch) = req.target.resolve()?;
+
+        let results = run_batch(devices, |device| async move {
+            match device::deploy::get_deployments(&device).await {
+                Ok(revs) => match serde_json::to_value(&revs) {
+                    Ok(v) => serde_json::json!({ "deployments": v }),
+                    Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
+                },
+                Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
+            }
+        }).await;
+
+        if is_batch {
+            let text = serde_json::json!({ "results": results }).to_string();
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(results[0].to_string())]))
+        }
     }
 
     #[tool(description = "Create a new deployment for a device")]
@@ -475,20 +669,38 @@ impl M87McpServer {
         Ok(CallToolResult::success(vec![Content::text(serde_json::json!({"status": "activated"}).to_string())]))
     }
 
-    #[tool(description = "Get deployment status")]
+    #[tool(description = "Get deployment status. Supports batch: pass 'devices' array instead of 'device' to query multiple devices at once.")]
     async fn device_deployment_status(&self, Parameters(req): Parameters<DeviceDeploymentStatusReq>) -> Result<CallToolResult, ErrorData> {
-        let id = if let Some(id) = req.deployment_id {
-            id
+        let (devices, is_batch) = req.target.resolve()?;
+        let deployment_id = req.deployment_id;
+
+        let results = run_batch(devices, |device| {
+            let dep_id = deployment_id.clone();
+            async move {
+                let id = match dep_id {
+                    Some(id) => id,
+                    None => match device::deploy::get_active_deployment_id(&device).await {
+                        Ok(Some(id)) => id,
+                        Ok(None) => return serde_json::json!({ "error": "No active deployment" }),
+                        Err(e) => return serde_json::json!({ "error": format!("{e:?}") }),
+                    },
+                };
+                match device::deploy::get_deployment_snapshot(&device, &id).await {
+                    Ok(snapshot) => match serde_json::to_value(&snapshot) {
+                        Ok(v) => v,
+                        Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
+                    },
+                    Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
+                }
+            }
+        }).await;
+
+        if is_batch {
+            let text = serde_json::json!({ "results": results }).to_string();
+            Ok(CallToolResult::success(vec![Content::text(text)]))
         } else {
-            device::deploy::get_active_deployment_id(&req.device).await
-                .map_err(internal_err)?
-                .ok_or_else(|| ErrorData::internal_error("No active deployment".to_string(), None))?
-        };
-        let snapshot = device::deploy::get_deployment_snapshot(&req.device, &id).await
-            .map_err(internal_err)?;
-        let text = serde_json::to_string(&snapshot)
-            .map_err(internal_err)?;
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+            Ok(CallToolResult::success(vec![Content::text(results[0].to_string())]))
+        }
     }
 
     #[tool(description = "Clone a deployment")]
@@ -580,6 +792,87 @@ impl M87McpServer {
             .map_err(internal_err)?;
         Ok(CallToolResult::success(vec![Content::text(serde_json::json!({"status": "removed"}).to_string())]))
     }
+
+    // Forward management
+
+    #[tool(description = "Start port/socket forwarding to a device. Returns a session ID for lifecycle management. Forwarding runs in the background until stopped.")]
+    async fn forward_start(&self, Parameters(req): Parameters<ForwardStartReq>) -> Result<CallToolResult, ErrorData> {
+        let id = self.next_session_id.fetch_add(1, Ordering::Relaxed).to_string();
+        let cancel = SHUTDOWN.child_token();
+
+        let targets = start_forward(&req.device, req.specs.clone(), cancel.clone())
+            .await
+            .map_err(internal_err)?;
+
+        let target_descriptions: Vec<String> = targets.iter().map(|t| format!("{:?}", t)).collect();
+
+        self.forward_sessions.insert(id.clone(), ForwardSession {
+            id: id.clone(),
+            device: req.device.clone(),
+            specs: req.specs,
+            targets: targets.clone(),
+            cancel,
+        });
+
+        let text = serde_json::json!({
+            "session_id": id,
+            "device": req.device,
+            "targets": target_descriptions,
+            "status": "started"
+        }).to_string();
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Stop a running forward session by session ID")]
+    async fn forward_stop(&self, Parameters(req): Parameters<ForwardStopReq>) -> Result<CallToolResult, ErrorData> {
+        let session = self.forward_sessions.remove(&req.session_id)
+            .map(|(_, s)| s)
+            .ok_or_else(|| ErrorData::invalid_request(format!("No session with id '{}'", req.session_id), None))?;
+
+        session.cancel.cancel();
+
+        let text = serde_json::json!({
+            "session_id": req.session_id,
+            "status": "stopped"
+        }).to_string();
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "List all active forward sessions")]
+    async fn forward_list(&self, Parameters(_req): Parameters<ForwardListReq>) -> Result<CallToolResult, ErrorData> {
+        let sessions: Vec<serde_json::Value> = self.forward_sessions.iter()
+            .map(|entry| {
+                let s = entry.value();
+                serde_json::json!({
+                    "session_id": s.id,
+                    "device": s.device,
+                    "specs": s.specs,
+                    "targets": s.targets.iter().map(|t| format!("{:?}", t)).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        let text = serde_json::to_string(&sessions).map_err(internal_err)?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    // Docker
+
+    #[tool(description = "Run a docker command on a device and capture output. The docker socket is forwarded via QUIC automatically. For long-running containers use '-d' flag — the output will include the container ID for lifecycle management. Non-zero exit codes are returned as data, not errors.")]
+    async fn docker_exec(&self, Parameters(req): Parameters<DockerExecReq>) -> Result<CallToolResult, ErrorData> {
+        let timeout = req.timeout_secs.unwrap_or(60);
+
+        let output = device::docker::run_docker_capture(&req.device, req.args, timeout)
+            .await
+            .map_err(internal_err)?;
+
+        let text = serde_json::json!({
+            "stdout": output.stdout,
+            "stderr": output.stderr,
+            "exit_code": output.exit_code,
+        }).to_string();
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
 }
 
 #[tool_handler]
@@ -593,7 +886,7 @@ impl ServerHandler for M87McpServer {
             },
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             instructions: Some(
-                "m87 platform CLI — device management, deployments, file ops, exec, and org management".into(),
+                "m87 platform CLI — device management, deployments, file ops, exec, port forwarding, docker, and org management. Use forward_start/forward_stop to manage persistent port forwards. Use docker_exec to run docker commands on devices (use -d for long-running containers).".into(),
             ),
             ..Default::default()
         }
