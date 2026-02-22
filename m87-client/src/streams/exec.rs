@@ -1,14 +1,15 @@
 //! Raw TCP/TLS endpoint for clean command execution.
 //!
 //! Unlike `/terminal` which spawns an interactive login shell,
-//! this endpoint runs commands via `$SHELL -l -i -c "command"`,
-//! producing clean output without MOTD, prompts, or logout messages.
-//! The `-l -i` flags ensure profile files (including ~/.bashrc) are sourced
-//! so PATH is properly set.
+//! this endpoint runs commands via a detected shell with mode-appropriate
+//! flags, producing clean output without MOTD, prompts, or logout messages.
+//! Profile files are sourced on shells that support `-l` (bash, zsh, fish)
+//! and PATH is hardened for minimal environments.
 //!
 //! Protocol:
-//! 1. Client sends JSON config line: {"command":"...", "tty":false}\n
+//! 1. Client sends JSON config line: {"command":"...", "tty":false, "rows":24, "cols":80}\n
 //! 2. Bidirectional raw bytes for stdin/stdout
+//!    - In PTY mode, `0xFF` + 4 bytes = resize frame (same as terminal.rs)
 //! 3. Server sends exit code JSON before closing: {"exit_code":N}\n
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -19,25 +20,25 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc};
-use tokio::{select, time::Duration};
+use tokio::select;
 
 use crate::streams::quic::QuicIo;
+use crate::util::shell::{self, ShellMode};
 
 #[derive(Deserialize)]
 struct ExecRequest {
     command: String,
     #[serde(default)]
     tty: bool,
+    #[serde(default)]
+    rows: Option<u16>,
+    #[serde(default)]
+    cols: Option<u16>,
 }
 
 #[derive(Serialize)]
 struct ExecResult {
     exit_code: i32,
-}
-
-/// Get the user's shell, falling back to /bin/sh
-fn get_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
 pub async fn handle_exec_io(io: QuicIo) {
@@ -76,12 +77,18 @@ where
     R: AsyncReadExt + Unpin + Send + 'static,
     W: AsyncWriteExt + Unpin + Send + 'static,
 {
-    let shell = get_shell();
+    let shell = shell::detect_shell();
+    let args = shell::build_shell_args(
+        &shell,
+        ShellMode::ExecPiped {
+            command: config.command.clone(),
+        },
+    );
+    let path = shell::ensure_minimal_path();
 
     let mut cmd = Command::new(&shell);
-    cmd.arg("-l")
-        .arg("-c")
-        .arg(&config.command)
+    cmd.args(&args)
+        .env("PATH", &path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -95,7 +102,9 @@ where
         use std::os::unix::process::CommandExt;
         unsafe {
             cmd.pre_exec(|| {
-                libc::setsid();
+                if libc::setsid() == -1 {
+                    eprintln!("setsid() failed: {}", std::io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
@@ -190,10 +199,19 @@ where
     // Wait for child to exit
     let status = child.wait().await;
 
-    // Clean up tasks
-    stdout_task.abort();
-    stderr_task.abort();
-    output_task.abort();
+    // Drop the original sender so the output channel can close once
+    // stdout_task and stderr_task finish draining their pipes.
+    drop(out_tx);
+
+    // Wait for stdout/stderr reader tasks to finish (they'll hit EOF quickly
+    // after the child exits) — this prevents silently dropping buffered output.
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+
+    // Now the output_task will finish once all senders are dropped
+    let _ = output_task.await;
+
+    // Abort stdin task (no longer needed)
     if let Some(task) = stdin_task {
         task.abort();
     }
@@ -208,25 +226,29 @@ where
     let _ = w.shutdown().await;
 }
 
-// Make get_shell testable by exposing it for tests
-#[cfg(test)]
-pub(crate) fn get_shell_for_test() -> String {
-    get_shell()
-}
-
 /// Run command with PTY - for TUI applications (vim, htop, etc.)
 async fn run_with_pty<R, W>(mut reader: R, writer: Arc<Mutex<W>>, config: ExecRequest)
 where
     R: AsyncReadExt + Unpin + Send + 'static,
     W: AsyncWriteExt + Unpin + Send + 'static,
 {
-    let shell = get_shell();
+    let shell = shell::detect_shell();
+    let args = shell::build_shell_args(
+        &shell,
+        ShellMode::ExecPty {
+            command: config.command.clone(),
+        },
+    );
+    let path = shell::ensure_minimal_path();
+
+    let rows = config.rows.unwrap_or(24);
+    let cols = config.cols.unwrap_or(80);
 
     // Create PTY
     let pty_system = native_pty_system();
     let pair = match pty_system.openpty(PtySize {
-        rows: 24,
-        cols: 80,
+        rows,
+        cols,
         pixel_width: 0,
         pixel_height: 0,
     }) {
@@ -240,10 +262,12 @@ where
         }
     };
 
-    // Spawn command in PTY (via shell -l -i -c, sources profile files for PATH)
+    // Spawn command in PTY with mode-appropriate flags
     let mut cmd = CommandBuilder::new(&shell);
-    cmd.args(&["-l", "-i", "-c", &config.command]);
+    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    cmd.args(&args_refs);
     cmd.env("TERM", "xterm-256color");
+    cmd.env("PATH", &path);
 
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
@@ -297,23 +321,68 @@ where
         }
     });
 
+    // Spawn a blocking task to wait for child exit — replaces 50ms polling
+    let (exit_tx, mut exit_rx) = mpsc::channel::<i32>(1);
+    let child_arc = Arc::new(std::sync::Mutex::new(child));
+    let child_wait = child_arc.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut guard = child_wait.lock().unwrap();
+        let code = guard
+            .wait()
+            .ok()
+            .map(|s| s.exit_code() as i32)
+            .unwrap_or(-1);
+        let _ = exit_tx.blocking_send(code);
+    });
+
     // Main loop
     let mut read_buf = [0u8; 4096];
+    let mut input_buf: Vec<u8> = Vec::new();
+    let mut exit_code: Option<i32> = None;
     'outer: loop {
         select! {
-            // Client -> PTY
+            // Client -> PTY (with resize frame parsing)
             r = reader.read(&mut read_buf) => {
                 match r {
                     Ok(0) => break 'outer,
                     Ok(n) => {
-                        let data = read_buf[..n].to_vec();
-                        let pty_w = pty_writer.clone();
-                        if tokio::task::spawn_blocking(move || {
-                            let mut w = pty_w.blocking_lock();
-                            w.write_all(&data)?;
-                            w.flush()
-                        }).await.is_err() {
-                            break 'outer;
+                        input_buf.extend_from_slice(&read_buf[..n]);
+
+                        while !input_buf.is_empty() {
+                            // Resize frame: 0xFF + 4 bytes (rows_hi, rows_lo, cols_hi, cols_lo)
+                            if input_buf.len() >= 5 && input_buf[0] == 0xFF {
+                                let new_rows = u16::from_be_bytes([input_buf[1], input_buf[2]]);
+                                let new_cols = u16::from_be_bytes([input_buf[3], input_buf[4]]);
+
+                                let _ = pair.master.resize(PtySize {
+                                    rows: new_rows,
+                                    cols: new_cols,
+                                    pixel_width: 0,
+                                    pixel_height: 0,
+                                });
+
+                                input_buf.drain(..5);
+                                continue;
+                            }
+
+                            // Normal input — everything until next 0xFF or end
+                            let next_resize = input_buf
+                                .iter()
+                                .position(|&b| b == 0xFF)
+                                .unwrap_or(input_buf.len());
+
+                            let payload: Vec<u8> = input_buf.drain(..next_resize).collect();
+
+                            if !payload.is_empty() {
+                                let pty_w = pty_writer.clone();
+                                if tokio::task::spawn_blocking(move || {
+                                    let mut w = pty_w.blocking_lock();
+                                    w.write_all(&payload)?;
+                                    w.flush()
+                                }).await.is_err() {
+                                    break 'outer;
+                                }
+                            }
                         }
                     }
                     Err(_) => break 'outer,
@@ -328,42 +397,46 @@ where
                 }
             }
 
-            // Check if child exited
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                if let Some(status) = child.try_wait().unwrap_or(None) {
-                    // Send exit code
-                    let exit_code = status.exit_code() as i32;
-                    let result = ExecResult { exit_code };
-                    let mut w = writer.lock().await;
-                    let _ = w
-                        .write_all(format!("{}\n", serde_json::to_string(&result).unwrap()).as_bytes())
-                        .await;
-                    break 'outer;
-                }
+            // Child exited
+            Some(code) = exit_rx.recv() => {
+                exit_code = Some(code);
+                break 'outer;
             }
 
             else => break 'outer,
         }
     }
 
-    // Cleanup
-    let _ = child.kill();
+    // Cleanup — drop PTY master to send SIGHUP to the session
+    drop(pair);
+
+    // Kill process group if child didn't exit cleanly
+    {
+        let mut guard = child_arc.lock().unwrap();
+        let _ = guard.kill();
+    }
+
+    // Send exit code
+    let code = exit_code.unwrap_or(-1);
+    let result = ExecResult { exit_code: code };
     let mut w = writer.lock().await;
+    let _ = w
+        .write_all(format!("{}\n", serde_json::to_string(&result).unwrap()).as_bytes())
+        .await;
     let _ = w.shutdown().await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::shell;
 
     #[test]
-    fn test_get_shell_returns_valid_path() {
-        let shell = get_shell_for_test();
-        // Should return either SHELL env var or fallback to /bin/sh
-        assert!(!shell.is_empty());
-        // On Unix, should be an absolute path or powershell on Windows
+    fn test_detect_shell_returns_valid_path() {
+        let s = shell::detect_shell();
+        assert!(!s.is_empty());
         #[cfg(unix)]
-        assert!(shell.starts_with('/') || shell == "powershell.exe");
+        assert!(s.starts_with('/') || s == "powershell.exe");
     }
 
     #[test]
@@ -379,14 +452,30 @@ mod tests {
         let json = r#"{"command":"echo hello"}"#;
         let req: ExecRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.command, "echo hello");
-        assert!(!req.tty); // default is false
+        assert!(!req.tty);
+    }
+
+    #[test]
+    fn test_exec_request_with_rows_cols() {
+        let json = r#"{"command":"htop","tty":true,"rows":50,"cols":120}"#;
+        let req: ExecRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.rows, Some(50));
+        assert_eq!(req.cols, Some(120));
+    }
+
+    #[test]
+    fn test_exec_request_rows_cols_default_none() {
+        let json = r#"{"command":"echo hello"}"#;
+        let req: ExecRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.rows, None);
+        assert_eq!(req.cols, None);
     }
 
     #[test]
     fn test_exec_request_invalid_json() {
         let json = r#"{"invalid": true}"#;
         let result: Result<ExecRequest, _> = serde_json::from_str(json);
-        assert!(result.is_err()); // missing required "command" field
+        assert!(result.is_err());
     }
 
     #[test]

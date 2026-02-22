@@ -11,6 +11,7 @@ use russh::server::{self, Auth, Config as ServerConfig, Handle, Msg, Session};
 use russh::{Channel, ChannelId};
 
 use crate::util::fs::run_sftp_server;
+use crate::util::shell;
 
 /// One PTY-backed shell session per SSH channel.
 /// Reader and writer are separated to avoid lock contention.
@@ -72,7 +73,7 @@ impl M87SshHandler {
             ptys: HashMap::new(),
             pty_writers: HashMap::new(),
             pty_sizes: HashMap::new(),
-            default_shell: default_shell(),
+            default_shell: shell::detect_shell(),
             env_vars: HashMap::new(),
         }
     }
@@ -102,6 +103,7 @@ impl M87SshHandler {
 
         // Fallback TERM if none provided
         cmd.env("TERM", "xterm-256color");
+        cmd.env("PATH", shell::ensure_minimal_path());
 
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
@@ -139,6 +141,7 @@ impl M87SshHandler {
         let mut command = CommandBuilder::new(&self.default_shell);
         command.arg("-c");
         command.arg(cmd);
+        command.env("PATH", shell::ensure_minimal_path());
 
         // apply env vars
         if let Some(envs) = self.env_vars.get(&channel) {
@@ -222,6 +225,7 @@ impl M87SshHandler {
             .arg("-c")
             .arg(cmd)
             .current_dir(cwd)
+            .env("PATH", shell::ensure_minimal_path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -650,34 +654,3 @@ impl server::Handler for M87SshHandler {
     }
 }
 
-#[cfg(unix)]
-fn default_shell() -> String {
-    use std::{ffi::CStr, path::Path};
-    // 1. $SHELL (most reliable)
-    if let Ok(shell) = std::env::var("SHELL") {
-        if !shell.is_empty() {
-            return shell;
-        }
-    }
-
-    // 2. /etc/passwd via libc
-    unsafe {
-        let uid = libc::geteuid();
-        let pwd = libc::getpwuid(uid);
-        if !pwd.is_null() {
-            let shell = CStr::from_ptr((*pwd).pw_shell);
-            if let Ok(shell) = shell.to_str() {
-                if !shell.is_empty() {
-                    return shell.to_string();
-                }
-            }
-        }
-    }
-
-    // 3. Common fallbacks
-    if Path::new("/bin/bash").exists() {
-        "/bin/bash".to_string()
-    } else {
-        "/bin/sh".to_string()
-    }
-}

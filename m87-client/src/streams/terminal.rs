@@ -7,10 +7,10 @@ use tokio::{
     time::{Duration, timeout},
 };
 
-use std::path::Path;
 use std::{io::Read, io::Write, sync::Arc};
 
 use crate::streams::quic::QuicIo;
+use crate::util::shell::{self, ShellMode};
 
 pub async fn handle_terminal_io(term: Option<String>, io: &mut QuicIo) {
     // Notify client that shell is initializing
@@ -51,13 +51,17 @@ pub async fn handle_terminal_io(term: Option<String>, io: &mut QuicIo) {
     // --------------------------------------------------------------------
     // 2. Spawn login shell
     // --------------------------------------------------------------------
-    let shell = detect_shell();
+    let detected_shell = shell::detect_shell();
+    let args = shell::build_shell_args(&detected_shell, ShellMode::InteractiveLogin);
+    let path = shell::ensure_minimal_path();
 
-    let mut cmd = CommandBuilder::new(shell);
-    cmd.args(&["-l", "-i"]);
+    let mut cmd = CommandBuilder::new(&detected_shell);
+    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    cmd.args(&args_refs);
     let term = term.as_deref().unwrap_or("xterm-256color");
     cmd.env("TERM", term);
     cmd.env("COLORTERM", "truecolor");
+    cmd.env("PATH", &path);
 
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
@@ -137,7 +141,19 @@ pub async fn handle_terminal_io(term: Option<String>, io: &mut QuicIo) {
     let _ = io.write_all(b"Shell connected successfully\r\n").await;
 
     // --------------------------------------------------------------------
-    // 5. Main loop: IO <-> PTY
+    // 5. Spawn blocking child.wait() — replaces 50ms polling
+    // --------------------------------------------------------------------
+    let (exit_tx, mut exit_rx) = mpsc::channel::<()>(1);
+    let child_arc = Arc::new(std::sync::Mutex::new(child));
+    let child_wait = child_arc.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut guard = child_wait.lock().unwrap();
+        let _ = guard.wait();
+        let _ = exit_tx.blocking_send(());
+    });
+
+    // --------------------------------------------------------------------
+    // 6. Main loop: IO <-> PTY
     // --------------------------------------------------------------------
     let mut io_read_buf = [0u8; 1024];
     let mut input_buf: Vec<u8> = Vec::new();
@@ -153,12 +169,12 @@ pub async fn handle_terminal_io(term: Option<String>, io: &mut QuicIo) {
                         while !input_buf.is_empty() {
                             // ----- RESIZE FRAME -----
                             if input_buf.len() >= 5 && input_buf[0] == 0xFF {
-                                let rows = u16::from_be_bytes([input_buf[1], input_buf[2]]);
-                                let cols = u16::from_be_bytes([input_buf[3], input_buf[4]]);
+                                let new_rows = u16::from_be_bytes([input_buf[1], input_buf[2]]);
+                                let new_cols = u16::from_be_bytes([input_buf[3], input_buf[4]]);
 
                                 let _ = pair.master.resize(PtySize {
-                                    rows,
-                                    cols,
+                                    rows: new_rows,
+                                    cols: new_cols,
                                     pixel_width: 0,
                                     pixel_height: 0,
                                 });
@@ -205,93 +221,54 @@ pub async fn handle_terminal_io(term: Option<String>, io: &mut QuicIo) {
             }
 
             // ---------- Shell exit ----------
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                if let Ok(Some(_)) = child.try_wait() {
-                    break 'outer;
-                }
+            Some(()) = exit_rx.recv() => {
+                break 'outer;
             }
         }
     }
 
     // --------------------------------------------------------------------
-    // 6. Cleanup
+    // 7. Cleanup — drop PTY master to send SIGHUP to the session
     // --------------------------------------------------------------------
-    let _ = child.kill();
+    drop(pair);
+    {
+        let mut guard = child_arc.lock().unwrap();
+        let _ = guard.kill();
+    }
     let _ = io.shutdown().await;
-}
-
-fn detect_shell() -> String {
-    if cfg!(windows) {
-        return "powershell.exe".to_string();
-    }
-
-    if let Ok(shell) = std::env::var("SHELL") {
-        if Path::new(&shell).exists() {
-            return shell;
-        }
-    }
-    for c in ["/bin/bash", "/bin/zsh", "/usr/bin/fish", "/bin/sh"] {
-        if Path::new(c).exists() {
-            return c.to_string();
-        }
-    }
-    "/bin/sh".to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::util::shell;
+    use std::path::Path;
 
     #[test]
     fn test_detect_shell_returns_valid_path() {
-        let shell = detect_shell();
-        assert!(!shell.is_empty());
+        let s = shell::detect_shell();
+        assert!(!s.is_empty());
 
         #[cfg(unix)]
         {
-            // On Unix, should be an absolute path
-            assert!(shell.starts_with('/'));
-            // Should point to a real shell
-            assert!(Path::new(&shell).exists());
+            assert!(s.starts_with('/'));
+            assert!(Path::new(&s).exists());
         }
 
         #[cfg(windows)]
         {
-            assert_eq!(shell, "powershell.exe");
+            assert_eq!(s, "powershell.exe");
         }
     }
 
     #[test]
     #[cfg(unix)]
     fn test_detect_shell_fallback_exists() {
-        // At least /bin/sh should exist on all Unix systems
-        let shell = detect_shell();
-        assert!(Path::new(&shell).exists());
-    }
-
-    #[test]
-    fn test_detect_shell_common_shells() {
-        let shell = detect_shell();
-        // Should be one of the common shells
-        let common_shells = [
-            "/bin/bash",
-            "/bin/zsh",
-            "/usr/bin/fish",
-            "/bin/sh",
-            "powershell.exe",
-        ];
-
-        // Either from env var or one of the common shells
-        let is_common = common_shells.iter().any(|s| shell.ends_with(s) || *s == shell);
-        let from_env = std::env::var("SHELL").is_ok();
-
-        assert!(is_common || from_env);
+        let s = shell::detect_shell();
+        assert!(Path::new(&s).exists());
     }
 
     #[test]
     fn test_pty_size_parsing() {
-        // Test the PTY size parsing logic used in handle_terminal_io
-        // Frame format: [0xFF, rows_high, rows_low, cols_high, cols_low]
         let buf: [u8; 5] = [0xFF, 0x00, 0x18, 0x00, 0x50]; // 24 rows, 80 cols
 
         let (rows, cols) = if buf[0] == 0xFF {
@@ -309,7 +286,6 @@ mod tests {
 
     #[test]
     fn test_pty_size_parsing_large_terminal() {
-        // Test larger terminal size
         let buf: [u8; 5] = [0xFF, 0x00, 0x64, 0x01, 0x00]; // 100 rows, 256 cols
 
         let rows = u16::from_be_bytes([buf[1], buf[2]]);
@@ -321,7 +297,6 @@ mod tests {
 
     #[test]
     fn test_pty_size_parsing_default_on_invalid() {
-        // If first byte is not 0xFF, use defaults
         let buf: [u8; 5] = [0x00, 0x00, 0x00, 0x00, 0x00];
 
         let (rows, cols) = if buf[0] == 0xFF {
