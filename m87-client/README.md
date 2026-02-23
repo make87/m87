@@ -155,6 +155,34 @@ m87 <device> forward 8080 9090 3000    # multiple ports
 
 See [examples/features/forward](./examples/features/forward/) for more.
 
+## MCP Server
+
+m87 includes a built-in [MCP](https://modelcontextprotocol.io) server, exposing all platform commands as tools for AI agents.
+
+Add to your MCP client config (e.g. Claude Code, Claude Desktop):
+
+```json
+{
+  "m87": {
+    "type": "stdio",
+    "command": "m87",
+    "args": ["mcp"]
+  }
+}
+```
+
+Or with an absolute path if `m87` isn't in your `PATH`:
+
+```json
+{
+  "m87": {
+    "type": "stdio",
+    "command": "/path/to/m87",
+    "args": ["mcp"]
+  }
+}
+```
+
 ## Building
 
 Requires Rust 1.85+

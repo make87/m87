@@ -15,9 +15,26 @@ use tokio::io;
 use tokio::net::TcpListener;
 use tokio::net::UdpSocket;
 use tokio::net::UnixListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 pub async fn open_local_forward(device_name: &str, forward_specs: Vec<String>) -> Result<()> {
+    let cancel = SHUTDOWN.child_token();
+    start_forward(device_name, forward_specs, cancel.clone()).await?;
+
+    // Wait for Ctrl-C shutdown
+    cancel.cancelled().await;
+    info!("SIGINT: shutting down all forwards");
+    Ok(())
+}
+
+/// Non-blocking variant: spawns forwards and returns parsed targets immediately.
+/// Caller controls lifetime via the `cancel` token.
+pub async fn start_forward(
+    device_name: &str,
+    forward_specs: Vec<String>,
+    cancel: CancellationToken,
+) -> Result<Vec<ForwardTarget>> {
     let config = Config::load()?;
     let resolved = devices::resolve_device_cached(device_name).await?;
     let token = AuthManager::get_cli_token().await?;
@@ -25,24 +42,21 @@ pub async fn open_local_forward(device_name: &str, forward_specs: Vec<String>) -
 
     let forwards: Vec<ForwardTarget> = ForwardTarget::from_list(forward_specs)?;
 
-    // spawn each forward as a background task
-    for t in forwards {
+    for t in forwards.clone() {
         let token = token.clone();
         let resolved = resolved.clone();
+        let cancel = cancel.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                forward_device_port(&resolved.host, &token, &resolved.short_id, t, trust).await
+                forward_device_port(&resolved.host, &token, &resolved.short_id, t, trust, cancel.clone()).await
             {
                 error!("Forward exited with error: {}", e);
-                SHUTDOWN.cancel();
+                cancel.cancel();
             }
         });
     }
 
-    // Wait for Ctrl-C shutdown
-    SHUTDOWN.cancelled().await;
-    info!("SIGINT: shutting down all forwards");
-    Ok(())
+    Ok(forwards)
 }
 
 pub async fn forward_device_port(
@@ -51,6 +65,7 @@ pub async fn forward_device_port(
     device_short_id: &str,
     forward_target: ForwardTarget,
     trust_invalid_server_cert: bool,
+    cancel: CancellationToken,
 ) -> Result<()> {
     match &forward_target {
         ForwardTarget::Tcp(target) => {
@@ -60,6 +75,7 @@ pub async fn forward_device_port(
                 device_short_id,
                 target,
                 trust_invalid_server_cert,
+                cancel,
             )
             .await
         }
@@ -70,6 +86,7 @@ pub async fn forward_device_port(
                 device_short_id,
                 target,
                 trust_invalid_server_cert,
+                cancel,
             )
             .await
         }
@@ -80,6 +97,7 @@ pub async fn forward_device_port(
                 device_short_id,
                 target,
                 trust_invalid_server_cert,
+                cancel,
             )
             .await
         }
@@ -96,6 +114,7 @@ async fn forward_device_port_tcp(
     device_short_id: &str,
     forward_spec: &TcpTarget,
     trust_invalid_server_cert: bool,
+    cancel: CancellationToken,
 ) -> Result<()> {
     debug!(
         "Binding TCP listener on 127.0.0.1:{}",
@@ -142,7 +161,7 @@ async fn forward_device_port_tcp(
                 break;
             }
 
-            _ = SHUTDOWN.cancelled() => {
+            _ = cancel.cancelled() => {
                 info!("Shutdown requested — closing TCP port forward");
                 break;
             }
@@ -158,6 +177,7 @@ async fn forward_device_port_udp(
     device_short_id: &str,
     forward_spec: &UdpTarget,
     trust_invalid_server_cert: bool,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let (_endpoint, conn) =
         connect_quic_only(host_name, token, device_short_id, trust_invalid_server_cert).await?;
@@ -185,13 +205,14 @@ async fn forward_device_port_udp(
     );
 
     // Now switch to datagram forwarding
-    udp_local_datagram_forward(forward_spec.local_port, channel_id, conn.clone()).await
+    udp_local_datagram_forward(forward_spec.local_port, channel_id, conn.clone(), cancel).await
 }
 
 pub async fn udp_local_datagram_forward(
     local_port: u16,
     channel_id: u32,
     conn: quinn::Connection,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let sock = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
 
@@ -279,7 +300,7 @@ pub async fn udp_local_datagram_forward(
         _ = udp_to_quic => {}
         _ = quic_to_udp => {}
 
-        _ = SHUTDOWN.cancelled() => {
+        _ = cancel.cancelled() => {
             info!("CLI shutdown requested — closing UDP forward");
             let _ = conn.close(0u32.into(), b"shutdown");
         }
@@ -294,6 +315,7 @@ async fn forward_device_socket(
     device_short_id: &str,
     target: &SocketTarget,
     trust_invalid_server_cert: bool,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let local_path = &target.local_path;
 
@@ -335,7 +357,7 @@ async fn forward_device_socket(
                 break;
             }
 
-            _ = SHUTDOWN.cancelled() => {
+            _ = cancel.cancelled() => {
                 warn!("Shutdown requested — closing UNIX forward");
                 break;
             }

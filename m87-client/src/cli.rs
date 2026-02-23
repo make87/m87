@@ -155,6 +155,12 @@ enum Commands {
 
     #[command(subcommand)]
     Org(OrgCommands),
+
+    /// Start MCP server (Model Context Protocol) for AI agent integration
+    ///
+    /// The server runs on stdin/stdout and exposes m87 platform commands
+    /// as MCP tools for programmatic AI agent access.
+    Mcp,
 }
 
 #[derive(Subcommand)]
@@ -958,6 +964,9 @@ pub async fn cli() -> anyhow::Result<()> {
             //     }
             // },
         },
+        Commands::Mcp => {
+            crate::mcp::run_mcp_server().await?;
+        }
     }
 
     Ok(())
