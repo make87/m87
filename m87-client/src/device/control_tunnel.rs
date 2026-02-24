@@ -68,7 +68,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
     send.write_all(&[0x01]).await?; // send to make sure the server does not timeout waiting
     // let mut recv = quic_conn.accept_uni().await?;
     //
-    let current_deploy_hash = DeploymentManager::get_current_deploy_hash();
+    let current_deploy_hash = DeploymentManager::get_current_deploy_hash(None);
     let config_hash = DeviceClientConfig {
         heartbeat_interval_secs: Some(config.heartbeat_interval_secs as u32),
     }
@@ -120,7 +120,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                             tracing::info!("Received new received report hashes");
                             for hash in received_report_hashes {
                                 tracing::info!("Received report hash: {}", hash);
-                                if let Err(e) = ack_event(&hash).await {
+                                if let Err(e) = ack_event(&hash, None).await {
                                     // not an issue. client will resend and well ack next time
                                     tracing::error!("Failed to ack event: {}", e);
                                 }
@@ -149,7 +149,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                     _ = shutdown.changed() => break,
                         // handle envent rx
 
-                    data = on_new_event() => {
+                    data = on_new_event(None) => {
                         let Some(claimed) = data else { continue };
                         let st = state.lock().await;
 

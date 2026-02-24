@@ -336,7 +336,9 @@ fn acquire_runtime_lock() -> Result<File> {
     let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
 
     if result != 0 {
-        bail!("Another m87 runtime is already running. Check 'm87 runtime status' for systemd service or 'pgrep -af \'m87 runtime run\'' for manual instances.");
+        bail!(
+            "Another m87 runtime is already running. Check 'm87 runtime status' for systemd service or 'pgrep -af \'m87 runtime run\'' for manual instances."
+        );
     }
 
     Ok(file)
@@ -386,7 +388,7 @@ async fn login_and_run() -> Result<()> {
         sleep(Duration::from_secs(1)).await;
     }
 
-    let unit_manager = DeploymentManager::new().await?;
+    let unit_manager = DeploymentManager::new(None).await?;
     let manager = Arc::new(unit_manager);
     manager.clone().start();
 

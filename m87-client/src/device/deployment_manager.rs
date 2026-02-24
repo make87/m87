@@ -22,24 +22,27 @@ use crate::{
 };
 const MAX_TAIL_BYTES: usize = 4 * 1024; // 4KB
 
-fn data_dir() -> Result<PathBuf> {
+fn data_dir(dir_path: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = dir_path {
+        return Ok(path);
+    }
     Ok(dirs::data_dir().context("data_dir")?.join("m87"))
 }
 
-fn events_dir() -> Result<PathBuf> {
-    Ok(data_dir()?.join("events"))
+fn events_dir(dir_path: Option<PathBuf>) -> Result<PathBuf> {
+    Ok(data_dir(dir_path)?.join("events"))
 }
 
-fn pending_dir() -> Result<PathBuf> {
-    Ok(events_dir()?.join("pending"))
+fn pending_dir(dir_path: Option<PathBuf>) -> Result<PathBuf> {
+    Ok(events_dir(dir_path)?.join("pending"))
 }
-fn inflight_dir() -> Result<PathBuf> {
-    Ok(events_dir()?.join("inflight"))
+fn inflight_dir(dir_path: Option<PathBuf>) -> Result<PathBuf> {
+    Ok(events_dir(dir_path)?.join("inflight"))
 }
 
-async fn ensure_dirs() -> Result<()> {
-    fs::create_dir_all(pending_dir()?).await?;
-    fs::create_dir_all(inflight_dir()?).await?;
+async fn ensure_dirs(dir_path: Option<PathBuf>) -> Result<()> {
+    fs::create_dir_all(pending_dir(dir_path.clone())?).await?;
+    fs::create_dir_all(inflight_dir(dir_path)?).await?;
     Ok(())
 }
 
@@ -255,14 +258,14 @@ impl LocalRunState {
 pub struct RevisionStore {}
 
 impl RevisionStore {
-    fn desired_path() -> Result<PathBuf> {
-        let config_dir = data_dir()?;
+    fn desired_path(dir_path: Option<PathBuf>) -> Result<PathBuf> {
+        let config_dir = data_dir(dir_path)?;
         let desired_path = config_dir.join("desired_units.json");
         Ok(desired_path)
     }
 
-    fn previous_path() -> Result<PathBuf> {
-        let config_dir = data_dir()?;
+    fn previous_path(dir_path: Option<PathBuf>) -> Result<PathBuf> {
+        let config_dir = data_dir(dir_path)?;
         let previous_path = config_dir.join("previous_units.json");
         Ok(previous_path)
     }
@@ -287,8 +290,8 @@ impl RevisionStore {
     // }
 
     /// Get the current rollback policy
-    pub fn get_rollback_policy() -> Result<Option<RollbackPolicy>> {
-        let desired_path = RevisionStore::desired_path()?;
+    pub fn get_rollback_policy(dir_path: Option<PathBuf>) -> Result<Option<RollbackPolicy>> {
+        let desired_path = RevisionStore::desired_path(dir_path)?;
         if !desired_path.exists() {
             return Ok(None);
         }
@@ -302,8 +305,8 @@ impl RevisionStore {
     }
 
     /// Get entire previous configuration for rollback
-    pub fn get_previous_config() -> Result<Option<DeploymentRevision>> {
-        let previous_path = RevisionStore::previous_path()?;
+    pub fn get_previous_config(dir_path: Option<PathBuf>) -> Result<Option<DeploymentRevision>> {
+        let previous_path = RevisionStore::previous_path(dir_path)?;
         if !previous_path.exists() {
             return Ok(None);
         }
@@ -316,8 +319,8 @@ impl RevisionStore {
         Ok(Some(config))
     }
 
-    pub fn get_desired_config() -> Result<Option<DeploymentRevision>> {
-        let desired_path = RevisionStore::desired_path()?;
+    pub fn get_desired_config(dir_path: Option<PathBuf>) -> Result<Option<DeploymentRevision>> {
+        let desired_path = RevisionStore::desired_path(dir_path)?;
         if !desired_path.exists() {
             return Ok(None);
         }
@@ -331,9 +334,9 @@ impl RevisionStore {
     }
 
     /// Set new desired configuration, backing up current to previous
-    pub fn set_config(config: &DeploymentRevision) -> Result<()> {
-        let previous_path = RevisionStore::previous_path()?;
-        let desired_path = RevisionStore::desired_path()?;
+    pub fn set_config(config: &DeploymentRevision, dir_path: Option<PathBuf>) -> Result<()> {
+        let previous_path = RevisionStore::previous_path(dir_path.clone())?;
+        let desired_path = RevisionStore::desired_path(dir_path)?;
         if desired_path.exists() {
             std::fs::copy(&desired_path, &previous_path)
                 .context("Failed to backup previous units")?;
@@ -359,14 +362,14 @@ pub struct DeploymentManager {
 
 impl DeploymentManager {
     /// Create a new UnitManager with a custom state store.
-    pub async fn new() -> Result<Self> {
-        let _ = ensure_dirs().await?;
-        let _ = recover_inflight().await?;
-        let root_dir = data_dir()?;
+    pub async fn new(data_dir_path: Option<PathBuf>) -> Result<Self> {
+        let _ = ensure_dirs(data_dir_path.clone()).await?;
+        let _ = recover_inflight(data_dir_path.clone()).await?;
+        let root_dir = data_dir(data_dir_path.clone())?;
 
         let log_manager = LogManager::start();
         // Load rollback policy from disk if exists
-        let rollback_policy = RevisionStore::get_rollback_policy().unwrap_or(None);
+        let rollback_policy = RevisionStore::get_rollback_policy(data_dir_path).unwrap_or(None);
 
         Ok(Self {
             root_dir,
@@ -377,8 +380,8 @@ impl DeploymentManager {
         })
     }
 
-    pub fn get_current_deploy_hash() -> String {
-        match RevisionStore::get_desired_config() {
+    pub fn get_current_deploy_hash(data_dir_path: Option<PathBuf>) -> String {
+        match RevisionStore::get_desired_config(data_dir_path) {
             Ok(Some(config)) => config.get_hash(),
             _ => "".to_string(),
         }
@@ -386,7 +389,7 @@ impl DeploymentManager {
 
     /// Get reference to the log manager for external use (e.g., streams/logs routing)
     pub async fn start_log_follow(&self) -> Result<()> {
-        if let Some(spec) = RevisionStore::get_desired_config()? {
+        if let Some(spec) = RevisionStore::get_desired_config(Some(self.root_dir.clone()))? {
             for (_, unit) in spec.get_job_map() {
                 if let Some(observer_spec) = &unit.observe {
                     if let Some(log_spec) = &observer_spec.logs {
@@ -403,7 +406,7 @@ impl DeploymentManager {
     }
 
     pub async fn stop_log_follow(&self) -> Result<()> {
-        if let Some(spec) = RevisionStore::get_desired_config()? {
+        if let Some(spec) = RevisionStore::get_desired_config(Some(self.root_dir.clone()))? {
             for (_, unit) in spec.get_job_map() {
                 self.log_manager.follow_stop(unit.id).await;
             }
@@ -413,58 +416,76 @@ impl DeploymentManager {
 
     /// Replace desired set (authoritative). Marks changes dirty.
     pub async fn set_desired_units(&self, config: DeploymentRevision) -> Result<()> {
-        let old_config = RevisionStore::get_desired_config()?;
+        let old_config = RevisionStore::get_desired_config(Some(self.root_dir.clone()))?;
         if let Some(oc) = &old_config {
             if oc.get_hash() == config.get_hash() {
                 return Ok(());
             }
         }
 
-        let new_map = config.get_job_map();
-        let old_desired = match old_config {
-            Some(spec) => spec.get_job_map(),
+        let new_map = config.get_job_map(); // keyed by hash
+        let old_desired = match &old_config {
+            Some(spec) => spec.get_job_map(), // keyed by hash
             None => BTreeMap::new(),
         };
 
-        RevisionStore::set_config(&config)?;
+        RevisionStore::set_config(&config, Some(self.root_dir.clone()))?;
 
         let mut dirty = self.dirty.write().await;
 
-        // mark changed/added as dirty
-        for (id, u) in &new_map {
-            match old_desired.get(id) {
-                // if hashes match its semantically equal
-                Some(_) => {
-                    let wd = self.resolve_workdir(u).await?;
-                    let st = LocalRunState::load(&wd)?;
-                    if !st.ran_successful {
-                        dirty.insert(u.get_hash());
-                    }
+        // 1) Mark added hashes (new units) dirty
+        for (h, u) in &new_map {
+            if !old_desired.contains_key(h) {
+                dirty.insert(h.clone());
+                continue;
+            }
+
+            // 2) If it existed before but didn't run successfully, retry
+            let wd = self.resolve_workdir(u).await?;
+            if let Ok(st) = LocalRunState::load(&wd) {
+                if !st.ran_successful {
+                    dirty.insert(h.clone());
                 }
-                _ => {
-                    dirty.insert(u.get_hash());
+            } else {
+                dirty.insert(h.clone());
+            }
+        }
+
+        // 3) Mark removed hashes dirty (so old services can be stopped)
+        for (old_hash, _old_u) in old_desired.iter() {
+            if !new_map.contains_key(old_hash) {
+                dirty.insert(old_hash.clone());
+            }
+        }
+
+        // 4) Mark replacements dirty on BOTH sides (same run id, different hash)
+        //    This is the key fix: ensures old version is reconciled/stopped even when id stays the same.
+        let old_by_id: HashMap<String, String> = old_desired
+            .iter()
+            .map(|(h, u)| (u.id.clone(), h.clone()))
+            .collect();
+        let new_by_id: HashMap<String, String> = new_map
+            .iter()
+            .map(|(h, u)| (u.id.clone(), h.clone()))
+            .collect();
+
+        for (run_id, old_hash) in &old_by_id {
+            if let Some(new_hash) = new_by_id.get(run_id) {
+                if new_hash != old_hash {
+                    dirty.insert(old_hash.clone());
+                    dirty.insert(new_hash.clone());
                 }
             }
         }
 
-        // mark removed as dirty so we can stop logs / stop service if needed
-        for (id, u) in old_desired.iter() {
-            if !new_map.contains_key(id) {
-                dirty.insert(u.get_hash());
-            }
-        }
-
-        // Update rollback policy cache
         *self.rollback_policy.write().await = config.rollback.clone();
-
-        // Mark deployment start time for stabilization period
         *self.deployment_started_at.write().await = Some(Instant::now());
 
         Ok(())
     }
 
     async fn set_dirty_ids(&self) -> Result<()> {
-        let desired = match RevisionStore::get_desired_config()? {
+        let desired = match RevisionStore::get_desired_config(Some(self.root_dir.clone()))? {
             Some(spec) => spec.get_job_map(),
             None => BTreeMap::new(),
         };
@@ -501,33 +522,37 @@ impl DeploymentManager {
                 // 1) reconcile dirty changes (run missing / stop old)
                 if let Err(e) = self.reconcile_dirty().await {
                     tracing::error!("reconcile error: {e}");
-                    let Ok(Some(desired)) = RevisionStore::get_desired_config() else {
+                    let Ok(Some(desired)) =
+                        RevisionStore::get_desired_config(Some(self.root_dir.clone()))
+                    else {
                         tracing::error!("no desired config found");
                         continue;
                     };
 
-                    let _ = enqueue_event(DeployReportKind::DeploymentRevisionReport(
-                        DeploymentRevisionReport {
+                    let _ = enqueue_event(
+                        DeployReportKind::DeploymentRevisionReport(DeploymentRevisionReport {
                             revision_id: desired.id.expect("revision id is required"),
                             outcome: Outcome::Failed,
                             dirty: true,
                             error: Some(format!("reconcile error: {e}")),
-                        },
-                    ))
+                        }),
+                        Some(self.root_dir.clone()),
+                    )
                     .await;
                     // TODO: Rollback right away?
                 }
 
                 // 2) schedule/poll liveness + health only when due
                 let now = Instant::now();
-                let desired_spec = match RevisionStore::get_desired_config() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!("failed to get all revisions: {e}");
-                        // TODO: Rollback right away?
-                        continue;
-                    }
-                };
+                let desired_spec =
+                    match RevisionStore::get_desired_config(Some(self.root_dir.clone())) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("failed to get all revisions: {e}");
+                            // TODO: Rollback right away?
+                            continue;
+                        }
+                    };
 
                 if let Some(spec) = desired_spec {
                     for (id, u) in spec.get_job_map().iter() {
@@ -578,80 +603,117 @@ impl DeploymentManager {
     }
 
     async fn reconcile_dirty(&self) -> Result<()> {
-        let dirty_ids: Vec<String> = {
+        let dirty_hashes: Vec<String> = {
             let dirty = self.dirty.read().await;
             if dirty.is_empty() {
                 return Ok(());
             }
-            dirty.iter().cloned().collect::<Vec<_>>()
+            dirty.iter().cloned().collect()
         };
 
-        let deploy_spec = RevisionStore::get_desired_config()?;
-        let desired_snapshot = match &deploy_spec {
-            Some(spec) => spec.get_job_map(),
-            None => BTreeMap::new(),
-        };
+        let desired_cfg = RevisionStore::get_desired_config(Some(self.root_dir.clone()))?;
+        let desired_cfg = desired_cfg
+            .as_ref()
+            .ok_or_else(|| anyhow!("no desired config"))?;
+        let desired_rev = desired_cfg.id.clone().expect("revision id is required");
 
-        for id in dirty_ids {
-            match desired_snapshot.get(&id) {
-                None => {
-                    // Unit removed - try to stop it using previous spec
-                    if let Ok(Some(config)) = RevisionStore::get_previous_config() {
-                        if let Some(prev_spec) = config.get_job_by_hash(&id) {
-                            if matches!(prev_spec.run_type, RunType::Service) {
-                                let wd = match self.resolve_workdir(&prev_spec).await {
-                                    Ok(wd) => wd,
-                                    Err(_) => {
-                                        // Can't resolve workdir, skip
-                                        continue;
-                                    }
-                                };
-                                let _ = self
-                                    .stop_service(&prev_spec, &config.id.clone().unwrap(), &wd)
-                                    .await;
-                                // remove id from dirty
-                                self.dirty.write().await.remove(&id);
-                            }
+        let prev_cfg = RevisionStore::get_previous_config(Some(self.root_dir.clone()))?;
+        let prev_rev = prev_cfg.as_ref().and_then(|c| c.id.clone());
+
+        // Phase 1: decide what to stop / start
+        let mut to_stop: Vec<RunSpec> = Vec::new();
+        let mut to_start: Vec<RunSpec> = Vec::new();
+
+        for h in &dirty_hashes {
+            let new_spec = desired_cfg.get_job_by_hash(h).clone();
+            let old_spec = prev_cfg.as_ref().and_then(|c| c.get_job_by_hash(h).clone());
+
+            match (old_spec, new_spec) {
+                // Removed: stop old service if possible
+                (Some(old), None) => {
+                    if matches!(old.run_type, RunType::Service) {
+                        to_stop.push(old);
+                    }
+                }
+
+                // Present: if disabled stop service
+                (Some(old), Some(new)) => {
+                    if matches!(old.run_type, RunType::Service) && !new.enabled {
+                        to_stop.push(old.clone());
+                    }
+
+                    // If it's a service AND changed (hash differs) stop old first then start new
+                    if matches!(new.run_type, RunType::Service) && old.get_hash() != new.get_hash()
+                    {
+                        to_stop.push(old);
+                        if new.enabled {
+                            to_start.push(new);
+                        }
+                    } else {
+                        // Jobs/services that are enabled and changed/new run in phase 2
+                        if new.enabled && old.get_hash() != new.get_hash() {
+                            to_start.push(new);
+                        } else if new.enabled && matches!(new.run_type, RunType::Job) {
+                            // optional: rerun jobs even if same hash is handled elsewhere
+                            // (see section 3)
                         }
                     }
                 }
-                Some(spec) => {
-                    // Ensure workdir exists for service/job/observe (observe may still need a cwd)
-                    let wd = self.resolve_workdir(spec).await?;
 
-                    let desired_revision_id = match &deploy_spec {
-                        Some(spec) => spec.id.clone().expect("revision id is required"),
-                        None => {
-                            tracing::warn!("No deploy spec provided for unit {:?}", spec);
-                            continue;
-                        }
-                    };
-
-                    // Apply/stop based on type
-                    match spec.run_type {
-                        RunType::Observe => {
-                            // nothing else to execute
-                        }
-                        RunType::Job => {
-                            if spec.enabled {
-                                self.maybe_run_job(spec, &desired_revision_id, &wd).await?;
-                            }
-                        }
-                        RunType::Service => {
-                            if spec.enabled {
-                                self.apply_service(spec, &desired_revision_id, &wd).await?;
-                            } else {
-                                self.stop_service(spec, &desired_revision_id, &wd).await?;
-                            }
-                        }
+                // Added: start if enabled
+                (None, Some(new)) => {
+                    if new.enabled {
+                        to_start.push(new);
                     }
+                }
 
-                    self.dirty.write().await.remove(&id);
+                (None, None) => {}
+            }
+        }
+
+        // Dedup by run id so you don't stop/start twice if multiple hashes map to same id
+        // (keep last occurrence; simplest HashMap overwrite)
+        let mut stop_by_id = std::collections::HashMap::<String, RunSpec>::new();
+        for s in to_stop {
+            stop_by_id.insert(s.id.clone(), s);
+        }
+
+        let mut start_by_id = std::collections::HashMap::<String, RunSpec>::new();
+        for s in to_start {
+            start_by_id.insert(s.id.clone(), s);
+        }
+
+        // Phase 2a: execute stops
+        for (_id, spec) in stop_by_id.iter() {
+            let wd = self.resolve_workdir(spec).await?;
+            let rev = prev_rev.clone().unwrap_or_else(|| desired_rev.clone());
+            let _ = self.stop_service(spec, &rev, &wd).await;
+        }
+
+        // Phase 2b: execute starts/runs
+        for (_id, spec) in start_by_id.iter() {
+            let wd = self.resolve_workdir(spec).await?;
+
+            match spec.run_type {
+                RunType::Observe => {}
+                RunType::Job => {
+                    if spec.enabled {
+                        self.maybe_run_job(spec, &desired_rev, &wd).await?;
+                    }
+                }
+                RunType::Service => {
+                    if spec.enabled {
+                        self.apply_service(spec, &desired_rev, &wd).await?;
+                    }
                 }
             }
         }
-        // Clear dirty set after processing
-        // self.dirty.write().await.clear();
+
+        // Finally: clear processed dirty hashes
+        let mut dirty = self.dirty.write().await;
+        for h in dirty_hashes {
+            dirty.remove(&h);
+        }
 
         Ok(())
     }
@@ -715,24 +777,30 @@ impl DeploymentManager {
             .await
         {
             Ok(()) => {
-                let _ = enqueue_event(DeployReportKind::RunReport(RunReport {
-                    run_id: spec.id.clone(),
-                    revision_id: revision_id.to_string(),
-                    outcome: Outcome::Success,
-                    report_time: now_ms_u64(),
-                    error: None,
-                }))
+                let _ = enqueue_event(
+                    DeployReportKind::RunReport(RunReport {
+                        run_id: spec.id.clone(),
+                        revision_id: revision_id.to_string(),
+                        outcome: Outcome::Success,
+                        report_time: now_ms_u64(),
+                        error: None,
+                    }),
+                    Some(self.root_dir.clone()),
+                )
                 .await;
                 Ok(())
             }
             Err(e) => {
-                let _ = enqueue_event(DeployReportKind::RunReport(RunReport {
-                    run_id: spec.id.clone(),
-                    revision_id: revision_id.to_string(),
-                    outcome: Outcome::Failed,
-                    report_time: now_ms_u64(),
-                    error: Some(e.to_string()),
-                }))
+                let _ = enqueue_event(
+                    DeployReportKind::RunReport(RunReport {
+                        run_id: spec.id.clone(),
+                        revision_id: revision_id.to_string(),
+                        outcome: Outcome::Failed,
+                        report_time: now_ms_u64(),
+                        error: Some(e.to_string()),
+                    }),
+                    Some(self.root_dir.clone()),
+                )
                 .await;
                 Err(e)
             }
@@ -805,12 +873,15 @@ impl DeploymentManager {
                 LocalRunState::save(&wd, &st)?;
 
                 if needs_send {
-                    let _ = enqueue_event(DeployReportKind::RunState(kind.build_runstate_event(
-                        run_id,
-                        revision_id,
-                        true,
-                        None,
-                    )))
+                    let _ = enqueue_event(
+                        DeployReportKind::RunState(kind.build_runstate_event(
+                            run_id,
+                            revision_id,
+                            true,
+                            None,
+                        )),
+                        Some(self.root_dir.clone()),
+                    )
                     .await;
 
                     match kind {
@@ -909,12 +980,15 @@ impl DeploymentManager {
                     let log_tail = merge_log_tails(observe_log_tail, record_log_tail);
                     let log_tail = merge_log_tails(log_tail, on_fail_log_tail);
 
-                    let _ = enqueue_event(DeployReportKind::RunState(kind.build_runstate_event(
-                        run_id,
-                        revision_id,
-                        false,
-                        log_tail,
-                    )))
+                    let _ = enqueue_event(
+                        DeployReportKind::RunState(kind.build_runstate_event(
+                            run_id,
+                            revision_id,
+                            false,
+                            log_tail,
+                        )),
+                        Some(self.root_dir.clone()),
+                    )
                     .await;
 
                     match kind {
@@ -993,7 +1067,7 @@ impl DeploymentManager {
     }
 
     async fn check_all_units_failing(&self) -> Result<bool> {
-        let desired = match RevisionStore::get_desired_config()? {
+        let desired = match RevisionStore::get_desired_config(Some(self.root_dir.clone()))? {
             Some(config) => config.get_job_map(),
             None => return Ok(false),
         };
@@ -1020,14 +1094,17 @@ impl DeploymentManager {
         tracing::warn!("ROLLBACK TRIGGERED - Reverting to previous configuration");
 
         // Load previous configuration
-        let prev_config = match RevisionStore::get_previous_config()? {
+        let prev_config = match RevisionStore::get_previous_config(Some(self.root_dir.clone()))? {
             Some(config) => config,
             None => {
                 tracing::error!("No previous configuration available for rollback");
-                let _ = enqueue_event(DeployReportKind::RollbackReport(RollbackReport {
-                    revision_id: revision_id.to_string(),
-                    new_revision_id: None,
-                }));
+                let _ = enqueue_event(
+                    DeployReportKind::RollbackReport(RollbackReport {
+                        revision_id: revision_id.to_string(),
+                        new_revision_id: None,
+                    }),
+                    Some(self.root_dir.clone()),
+                );
                 return Err(anyhow!("No previous configuration available"));
             }
         };
@@ -1041,10 +1118,13 @@ impl DeploymentManager {
         self.set_desired_units(prev_config.clone()).await?;
 
         // TODO: this jsut changes the target revision. Rollback happens in the main loop ehwn this returns
-        let _ = enqueue_event(DeployReportKind::RollbackReport(RollbackReport {
-            revision_id: revision_id.to_string(),
-            new_revision_id: prev_config.id,
-        }));
+        let _ = enqueue_event(
+            DeployReportKind::RollbackReport(RollbackReport {
+                revision_id: revision_id.to_string(),
+                new_revision_id: prev_config.id,
+            }),
+            Some(self.root_dir.clone()),
+        );
 
         tracing::info!("Rollback complete");
         Ok(())
@@ -1105,7 +1185,17 @@ impl DeploymentManager {
         for step in steps.iter().rev() {
             if let Some(undo) = &step.undo {
                 // if undo fails we dont care for now. run_step takes care of sending the event to the user
-                let _ = run_undo(unit_id, wd, env, undo, step, revision_id, MAX_TAIL_BYTES).await;
+                let _ = run_undo(
+                    unit_id,
+                    wd,
+                    env,
+                    undo,
+                    step,
+                    revision_id,
+                    MAX_TAIL_BYTES,
+                    Some(self.root_dir.clone()),
+                )
+                .await;
             }
         }
     }
@@ -1126,7 +1216,17 @@ impl DeploymentManager {
 
         let attempts = retry.attempts.max(1);
         for i in 0..attempts {
-            let res = run_step(unit_id, wd, env, step, revision_id, i, MAX_TAIL_BYTES).await;
+            let res = run_step(
+                unit_id,
+                wd,
+                env,
+                step,
+                revision_id,
+                i,
+                MAX_TAIL_BYTES,
+                Some(self.root_dir.clone()),
+            )
+            .await;
             match res {
                 Ok(()) => return Ok(()),
                 Err(e) => {
@@ -1198,11 +1298,11 @@ impl DeploymentManager {
     }
 }
 
-pub async fn enqueue_event(event: DeployReportKind) -> Result<()> {
-    ensure_dirs().await?;
+pub async fn enqueue_event(event: DeployReportKind, root_dir: Option<PathBuf>) -> Result<()> {
+    ensure_dirs(root_dir.clone()).await?;
 
     let id = event.get_hash().to_string();
-    let pending = pending_dir()?.join(format!("{id}.json"));
+    let pending = pending_dir(root_dir)?.join(format!("{id}.json"));
     let tmp = pending.with_extension("json.tmp");
 
     let bytes = serde_json::to_vec(&event).context("serialize event")?;
@@ -1223,10 +1323,10 @@ pub struct ClaimedEvent {
     pub report: DeployReportKind,
 }
 
-pub async fn recover_inflight() -> Result<()> {
-    ensure_dirs().await?;
-    let inflight = inflight_dir()?;
-    let pending = pending_dir()?;
+pub async fn recover_inflight(root_dir: Option<PathBuf>) -> Result<()> {
+    ensure_dirs(root_dir.clone()).await?;
+    let inflight = inflight_dir(root_dir.clone())?;
+    let pending = pending_dir(root_dir)?;
 
     let mut rd = fs::read_dir(&inflight).await?;
     while let Some(e) = rd.next_entry().await? {
@@ -1239,11 +1339,11 @@ pub async fn recover_inflight() -> Result<()> {
     Ok(())
 }
 
-pub async fn claim_next_event() -> anyhow::Result<Option<ClaimedEvent>> {
-    ensure_dirs().await?;
+pub async fn claim_next_event(root_dir: Option<PathBuf>) -> anyhow::Result<Option<ClaimedEvent>> {
+    ensure_dirs(root_dir.clone()).await?;
 
-    let pending = pending_dir()?;
-    let inflight = inflight_dir()?;
+    let pending = pending_dir(root_dir.clone())?;
+    let inflight = inflight_dir(root_dir)?;
 
     // collect candidate paths
     let mut paths = Vec::new();
@@ -1285,16 +1385,16 @@ pub async fn claim_next_event() -> anyhow::Result<Option<ClaimedEvent>> {
     }))
 }
 
-pub async fn ack_event(hash: &str) -> Result<()> {
-    let path = inflight_dir()?.join(format!("{hash}.json"));
+pub async fn ack_event(hash: &str, root_dir: Option<PathBuf>) -> Result<()> {
+    let path = inflight_dir(root_dir)?.join(format!("{hash}.json"));
     fs::remove_file(&path).await.context("delete inflight")?;
     Ok(())
 }
 
-pub async fn on_new_event() -> Option<ClaimedEvent> {
+pub async fn on_new_event(root_dir: Option<PathBuf>) -> Option<ClaimedEvent> {
     loop {
         // Try immediately (covers backlog + missed cycles)
-        match claim_next_event().await {
+        match claim_next_event(root_dir.clone()).await {
             Ok(Some(ev)) => return Some(ev),
             Ok(None) => {
                 tokio::time::sleep(Duration::from_secs(10)).await;
@@ -1315,6 +1415,7 @@ async fn run_step(
     revision_id: &str,
     i: u32,
     max_tail_bytes: usize,
+    root_dir: Option<PathBuf>,
 ) -> Result<()> {
     tracing::info!(
         "running step {}. Attempt {}",
@@ -1366,7 +1467,7 @@ async fn run_step(
     };
     match res {
         Ok(report) => {
-            enqueue_event(DeployReportKind::StepReport(report.clone())).await?;
+            enqueue_event(DeployReportKind::StepReport(report.clone()), root_dir).await?;
             if !report.success {
                 Err(anyhow!(
                     "Step {} failed: {}",
@@ -1390,6 +1491,7 @@ async fn run_undo(
     step: &Step,
     revision_id: &str,
     max_tail_bytes: usize,
+    root_dir: Option<PathBuf>,
 ) -> Result<()> {
     tracing::info!(
         "undo step {}",
@@ -1426,7 +1528,7 @@ async fn run_undo(
     };
     match res {
         Ok(report) => {
-            enqueue_event(DeployReportKind::StepReport(report.clone())).await?;
+            enqueue_event(DeployReportKind::StepReport(report.clone()), root_dir).await?;
             if !report.success {
                 Err(anyhow!(
                     "Step {} failed: {}",
@@ -1448,5 +1550,160 @@ fn merge_log_tails(primary: Option<String>, secondary: Option<String>) -> Option
         (Some(a), None) => Some(a),
         (None, Some(b)) => Some(b),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use m87_shared::deploy_spec::{CommandSpec, RebootMode, StopSpec, Workdir};
+    use tempfile::TempDir;
+
+    fn sh(s: impl Into<String>) -> CommandSpec {
+        CommandSpec::Sh(s.into())
+    }
+
+    fn step(name: &str, cmd: CommandSpec) -> Step {
+        Step {
+            name: Some(name.to_string()),
+            run: cmd,
+            timeout: Some(Duration::from_secs(5)),
+            retry: None,
+            undo: None,
+        }
+    }
+
+    fn mk_service(id: &str, start_cmd: CommandSpec, stop_cmd: CommandSpec) -> RunSpec {
+        RunSpec {
+            id: id.to_string(),
+            run_type: RunType::Service,
+            enabled: true,
+            workdir: Some(Workdir {
+                mode: WorkdirMode::Persistent,
+                path: None,
+            }),
+            files: BTreeMap::new(),
+            env: BTreeMap::new(),
+            steps: vec![step("start", start_cmd)],
+            on_failure: None,
+            stop: Some(StopSpec {
+                steps: vec![step("stop", stop_cmd)],
+            }),
+            reboot: RebootMode::None,
+            observe: None,
+        }
+    }
+
+    fn mk_rev(id: &str, jobs: Vec<RunSpec>) -> DeploymentRevision {
+        DeploymentRevision {
+            id: Some(id.to_string()),
+            jobs,
+            rollback: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dirty_add_change_remove_hashes() -> Result<()> {
+        let td = TempDir::new()?;
+        let base = td.path().join("m87"); // this is your data_dir root
+
+        let mgr = DeploymentManager::new(Some(base.clone())).await?;
+
+        // add v1
+        let v1 = mk_rev(
+            "rev1",
+            vec![mk_service("svc", sh("echo start_v1"), sh("echo stop_v1"))],
+        );
+        let h1 = v1.get_job_map().keys().next().unwrap().clone();
+
+        mgr.set_desired_units(v1).await?;
+        assert!(mgr.dirty.read().await.contains(&h1));
+        mgr.dirty.write().await.clear();
+
+        // change same id (different hash) by changing command
+        let v2 = mk_rev(
+            "rev2",
+            vec![mk_service("svc", sh("echo start_v2"), sh("echo stop_v2"))],
+        );
+        let h2 = v2.get_job_map().keys().next().unwrap().clone();
+
+        mgr.set_desired_units(v2).await?;
+        let d = mgr.dirty.read().await.clone();
+        assert!(d.contains(&h1), "old hash should be dirty");
+        assert!(d.contains(&h2), "new hash should be dirty");
+        mgr.dirty.write().await.clear();
+
+        // remove: v2 hash should be marked dirty so reconcile can stop it
+        let v3 = mk_rev("rev3", vec![]);
+        mgr.set_desired_units(v3).await?;
+        assert!(
+            mgr.dirty.read().await.contains(&h2),
+            "removed hash should be dirty"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconcile_stops_before_starts_on_change() -> Result<()> {
+        let td = TempDir::new()?;
+        let base = td.path().join("m87");
+
+        let mgr = DeploymentManager::new(Some(base.clone())).await?;
+
+        let order = td.path().join("order.txt");
+        let marker = td.path().join("marker.txt");
+        let order_s = order.display().to_string();
+        let marker_s = marker.display().to_string();
+
+        // v1
+        let v1 = mk_rev(
+            "rev1",
+            vec![mk_service(
+                "svc",
+                sh(format!("echo start_v1 >> {order_s}; touch {marker_s}")),
+                sh(format!("echo stop_v1 >> {order_s}; rm -f {marker_s}")),
+            )],
+        );
+
+        mgr.set_desired_units(v1).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(marker.exists(), "expected v1 running marker");
+
+        // v2 (same id, different content => different hash)
+        let v2 = mk_rev(
+            "rev2",
+            vec![mk_service(
+                "svc",
+                sh(format!("echo start_v2 >> {order_s}; touch {marker_s}")),
+                sh(format!("echo stop_v2 >> {order_s}; rm -f {marker_s}")),
+            )],
+        );
+
+        mgr.set_desired_units(v2).await?;
+        mgr.reconcile_dirty().await?;
+
+        let contents = std::fs::read_to_string(&order)?;
+        let lines: Vec<&str> = contents.lines().collect();
+
+        let stop_v1 = lines
+            .iter()
+            .position(|l| *l == "stop_v1")
+            .expect("missing stop_v1");
+        let start_v2 = lines
+            .iter()
+            .position(|l| *l == "start_v2")
+            .expect("missing start_v2");
+
+        assert!(stop_v1 < start_v2, "stop_v1 must come before start_v2");
+        assert!(marker.exists(), "expected v2 running marker");
+
+        // remove -> should stop v2
+        let v3 = mk_rev("rev3", vec![]);
+        mgr.set_desired_units(v3).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(!marker.exists(), "expected marker removed after stop");
+
+        Ok(())
     }
 }
