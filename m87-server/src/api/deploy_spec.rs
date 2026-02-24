@@ -5,6 +5,7 @@ use m87_shared::deploy_spec::{
     CreateDeployRevisionBody, DeployReport, DeploymentRevision, DeploymentStatusSnapshot,
     UpdateDeployRevisionBody,
 };
+use m87_shared::roles::Role;
 use mongodb::bson::{doc, oid::ObjectId};
 
 use crate::auth::claims::Claims;
@@ -57,10 +58,7 @@ async fn list_device_revisions(
 
     // Ensure caller can access the device
     let dev_opt = claims
-        .find_one_with_access(
-            &state.db.deploy_revisions(),
-            doc! { "device_id": device_oid },
-        )
+        .find_one_with_access(&state.db.devices(), doc! { "device_id": device_oid })
         .await?;
     if dev_opt.is_none() {
         return Err(ServerError::not_found("Device not found"));
@@ -126,7 +124,11 @@ async fn create_device_revision(
 
     // Ensure caller can access the device
     let dev_opt = claims
-        .find_one_with_access(&state.db.devices(), doc! { "_id": device_oid })
+        .find_one_with_scope_and_role(
+            &state.db.devices(),
+            doc! { "_id": device_oid },
+            Role::Editor,
+        )
         .await?;
     if dev_opt.is_none() {
         return Err(ServerError::not_found("Device not found"));
@@ -172,11 +174,17 @@ async fn get_revision_by_id(
     let device_oid = ObjectId::parse_str(&device_id)
         .map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
     // Ensure caller can access device
-    let doc_opt = claims
-        .find_one_with_access(
-            &state.db.deploy_revisions(),
-            doc! { "revision.id": id, "device_id": device_oid},
-        )
+    let dev_opt = claims
+        .find_one_with_access(&state.db.devices(), doc! { "_id": &device_oid })
+        .await?;
+    if dev_opt.is_none() {
+        return Err(ServerError::not_found("Device not found"));
+    }
+
+    let doc_opt = state
+        .db
+        .deploy_revisions()
+        .find_one(doc! { "revision.id": id, "device_id": device_oid})
         .await?;
     if doc_opt.is_none() {
         return Err(ServerError::not_found("Deployment Revision not found"));
@@ -211,6 +219,17 @@ async fn update_revision_by_id(
     )
     .await;
 
+    let dev_opt = claims
+        .find_one_with_scope_and_role(
+            &state.db.devices(),
+            doc! { "_id": device_oid },
+            Role::Editor,
+        )
+        .await?;
+    if dev_opt.is_none() {
+        return Err(ServerError::not_found("Device not found"));
+    }
+
     let (update_doc, extra_filter) = to_update_doc(&payload)?;
     let report_delete_doc = to_report_delete_doc(&payload, &id, &device_oid)?;
 
@@ -235,26 +254,22 @@ async fn update_revision_by_id(
     if let Some(extra) = extra_filter {
         filter.extend(extra);
     }
-    let success = claims
-        .update_one_with_access::<DeployRevisionDoc>(
-            &state.db.deploy_revisions(),
-            filter,
-            update_doc,
-        )
+    let res = state
+        .db
+        .deploy_revisions()
+        .update_one(filter, update_doc)
         .await?;
 
-    if !success {
+    if res.matched_count == 0 {
         return Err(ServerError::not_found("Revision not found"));
     }
     if let Some((filter, update_doc)) = set_inactive {
-        let success = claims
-            .update_one_with_access::<DeployRevisionDoc>(
-                &state.db.deploy_revisions(),
-                filter,
-                update_doc,
-            )
+        let res = state
+            .db
+            .deploy_revisions()
+            .update_one(filter, update_doc)
             .await?;
-        if !success {
+        if res.matched_count == 0 {
             // TODO: check if and how we might need to recover to a stable state
             return Err(ServerError::not_found("Revision not found"));
         }
@@ -323,14 +338,24 @@ async fn delete_revision(
     )
     .await;
 
-    // authorize by selecting first
-    let success = claims
-        .delete_one_with_access(
-            &state.db.deploy_revisions(),
-            doc! { "revision.id": &id, "device_id": &device_oid },
+    let dev_opt = claims
+        .find_one_with_scope_and_role(
+            &state.db.devices(),
+            doc! { "_id": &device_oid },
+            Role::Editor,
         )
         .await?;
-    if !success {
+    if dev_opt.is_none() {
+        return Err(ServerError::not_found("Device not found"));
+    }
+
+    // authorize by selecting first
+    let res = state
+        .db
+        .deploy_revisions()
+        .delete_one(doc! { "revision.id": &id, "device_id": &device_oid })
+        .await?;
+    if res.deleted_count == 0 {
         return Err(ServerError::not_found("Revision not found"));
     }
 

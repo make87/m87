@@ -4,9 +4,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
-use std::{fs, io};
 
 fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(bytes.as_ref()))
