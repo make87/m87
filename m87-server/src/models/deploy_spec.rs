@@ -821,8 +821,25 @@ impl DeployReportDoc {
             "$toLong": { "$add": [ bucket_start_ms.clone(), bucket_ms ] }
         };
 
-        let crashes_expr = doc! { "$ifNull": [ "$kind.data.crashes", 0 ] };
-        let unhealthy_expr = doc! { "$ifNull": [ "$kind.data.unhealthy_checks", 0 ] };
+        // Count events (not 0/1):
+        // - crash event: alive == Some(false)
+        // - unhealthy event: healthy == Some(false)
+        // null/missing => 0
+        let crash_evt = doc! {
+            "$cond": [
+                { "$eq": [ "$kind.data.alive", false ] },
+                1,
+                0
+            ]
+        };
+
+        let unhealthy_evt = doc! {
+            "$cond": [
+                { "$eq": [ "$kind.data.healthy", false ] },
+                1,
+                0
+            ]
+        };
 
         let pipeline: Vec<Document> = vec![
             doc! { "$match": match_doc },
@@ -832,17 +849,17 @@ impl DeployReportDoc {
                     "bucket_end_ms": bucket_end_ms
                 }
             },
-            // per (bucket, run)
+            // per (bucket, run): SUM counts within the bucket for that run
             doc! {
                 "$group": {
                     "_id": { "bucket_start_ms": "$bucket_start_ms", "run_id": "$kind.data.run_id" },
                     "bucket_start_ms": { "$first": "$bucket_start_ms" },
                     "bucket_end_ms": { "$first": "$bucket_end_ms" },
-                    "crashes": { "$sum": crashes_expr },
-                    "unhealthy_checks": { "$sum": unhealthy_expr },
+                    "crashes": { "$sum": crash_evt },
+                    "unhealthy_checks": { "$sum": unhealthy_evt },
                 }
             },
-            // per bucket
+            // per bucket: totals are sums of per-run counts
             doc! {
                 "$group": {
                     "_id": "$bucket_start_ms",
