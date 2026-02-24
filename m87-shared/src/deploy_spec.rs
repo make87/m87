@@ -348,10 +348,15 @@ impl RunSpec {
     /// - File reference: value starts with '@', e.g. "@./config.yaml"
     pub fn resolve_file_references(
         &mut self,
-        base_dir: Option<PathBuf>,
+        base_dir: Option<std::path::PathBuf>,
     ) -> Result<(), ResolveFilesError> {
-        let base_dir = base_dir.unwrap_or_else(|| Path::new(".").to_path_buf());
+        use std::{
+            collections::BTreeMap,
+            fs,
+            path::{Path, PathBuf},
+        };
 
+        let base_dir = base_dir.unwrap_or_else(|| Path::new(".").to_path_buf());
         let mut resolved = BTreeMap::new();
 
         for (key, value) in std::mem::take(&mut self.files) {
@@ -361,11 +366,12 @@ impl RunSpec {
             };
 
             let content = if !value.contains('\n') && full_path.is_file() {
-                fs::read_to_string(&full_path).map_err(|e| ResolveFilesError::Io {
+                let raw = fs::read_to_string(&full_path).map_err(|e| ResolveFilesError::Io {
                     key: key.clone(),
                     path: full_path,
                     source: e,
-                })?
+                })?;
+                normalize_newlines(&raw)
             } else {
                 value
             };
@@ -375,6 +381,14 @@ impl RunSpec {
 
         self.files = resolved;
         Ok(())
+    }
+}
+
+fn normalize_newlines(s: &str) -> String {
+    if s.contains('\r') {
+        s.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        s.to_string()
     }
 }
 
