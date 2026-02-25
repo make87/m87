@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
         .context("failed to bind unix socket")?;
 
     // Set socket permissions to 0o660.
-    std::fs::set_permissions(&socket_path, std::os::unix::fs::PermissionsExt::from_mode(0o660))
+    std::fs::set_permissions(&socket_path, std::os::unix::fs::PermissionsExt::from_mode(0o666))
         .context("failed to set socket permissions")?;
 
     info!(path = %socket_path.display(), "listening on unix socket");
