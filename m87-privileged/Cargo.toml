@@ -4,9 +4,17 @@ version = "0.0.0-dev0"
 edition = "2024"
 license = "Apache-2.0"
 
+[lib]
+name = "m87_privileged"
+path = "src/lib.rs"
+
 [[bin]]
 name = "m87-privileged"
 path = "src/main.rs"
+
+[[bin]]
+name = "m87-sudo"
+path = "src/bin/m87-sudo.rs"
 
 [dependencies]
 m87-shared = { path = "../m87-shared" }
@@ -19,3 +27,6 @@ chrono = { workspace = true }
 nix = { version = "0.30", default-features = false, features = ["user"] }
 glob-match = "0.2"
 tokio-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

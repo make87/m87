@@ -1,7 +1,4 @@
-mod audit;
-mod executor;
-mod handler;
-mod policy;
+use m87_privileged::{audit, handler, policy};
 
 use std::path::PathBuf;
 use std::sync::Arc;
