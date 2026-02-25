@@ -36,6 +36,14 @@ pub async fn run_shell(device: &str) -> Result<()> {
     // --- raw mode ---
     let _raw_mode = std::io::stdout().into_raw_mode()?;
 
+    // Disable mouse tracking so clicks/scroll don't produce escape sequences
+    {
+        use std::io::Write;
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l");
+        let _ = stdout.flush();
+    }
+
     // --- send initial terminal size ---
     if let Ok((cols, rows)) = terminal_size() {
         let mut buf = [0u8; 5];
