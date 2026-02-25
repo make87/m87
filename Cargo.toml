@@ -3,7 +3,8 @@ resolver = "2"
 members = [
     "m87-client",
     "m87-server",
-    "m87-shared"
+    "m87-shared",
+    "m87-privileged",
 ]
 exclude = ["tests"]
 [workspace.dependencies]

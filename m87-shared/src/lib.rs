@@ -7,4 +7,5 @@ pub mod metrics;
 pub mod org;
 pub mod pagination;
 pub mod roles;
+pub mod privileged;
 pub mod users;

@@ -1,0 +1,24 @@
+[Unit]
+Description=m87 Privileged Execution Helper
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/m87-privileged
+Restart=on-failure
+RestartSec=3
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=strict
+ReadWritePaths=/etc/m87 /var/log/m87 /run/m87
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=m87-privileged
+
+[Install]
+WantedBy=multi-user.target
