@@ -31,6 +31,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY m87-client ./m87-client
 COPY m87-server ./m87-server
 COPY m87-shared ./m87-shared
+# Stub out m87-privileged (not needed for client build, but workspace requires it)
+COPY m87-privileged/Cargo.toml ./m87-privileged/Cargo.toml
+RUN mkdir -p m87-privileged/src && echo "" > m87-privileged/src/lib.rs && echo "fn main() {}" > m87-privileged/src/main.rs && mkdir -p m87-privileged/src/bin && echo "fn main() {}" > m87-privileged/src/bin/m87-sudo.rs
 
 # Set up cross-compilation environment
 ENV RUSTFLAGS="-C target-feature=+crt-static"
