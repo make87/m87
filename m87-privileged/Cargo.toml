@@ -1,6 +1,6 @@
 [package]
 name = "m87-privileged"
-version = "0.0.0-dev0"
+version = "0.8.0-dev0"
 edition = "2024"
 license = "Apache-2.0"
 
