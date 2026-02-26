@@ -8,4 +8,5 @@ pub mod org;
 pub mod pagination;
 pub mod roles;
 pub mod privileged;
+pub mod shell;
 pub mod users;

@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use m87_shared::privileged::{OutputStream, PrivilegedMessage};
+use m87_shared::shell::ensure_minimal_path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::process::Command;
@@ -27,7 +28,7 @@ pub async fn execute_streaming(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .env_clear()
-        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("PATH", ensure_minimal_path())
         .env("LANG", "C.UTF-8")
         .kill_on_drop(true)
         .spawn()
