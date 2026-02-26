@@ -23,6 +23,7 @@ pub async fn execute_streaming(
 
     let mut child = Command::new(program)
         .args(args)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .env_clear()
