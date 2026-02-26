@@ -27,6 +27,13 @@ const SERVICE_NAME: &str = "m87-runtime";
 const SERVICE_FILE: &str = "/etc/systemd/system/m87-runtime.service";
 const SERVICE_FILE_MODE: u32 = 0o644;
 
+const PRIVILEGED_SERVICE_NAME: &str = "m87-privileged";
+const PRIVILEGED_SERVICE_FILE: &str = "/etc/systemd/system/m87-privileged.service";
+const PRIVILEGED_BINARY_DEST: &str = "/usr/local/bin/m87-privileged";
+const PRIVILEGED_POLICY_DIR: &str = "/etc/m87";
+const PRIVILEGED_LOG_DIR: &str = "/var/log/m87";
+const PRIVILEGED_DEFAULT_POLICY: &str = "/etc/m87/privileged-policy.json";
+
 /// Generate the systemd service file content with all XDG environment variables
 fn generate_service_content(exe_path: &Path, username: &str, home: &Path) -> String {
     let home = home.display();
@@ -77,7 +84,12 @@ WantedBy=multi-user.target
 /// Write service file atomically using tempfile
 /// Returns Ok(true) if file was changed, Ok(false) if no change needed
 fn write_service_file_atomic(content: &str) -> Result<bool> {
-    let service_path = Path::new(SERVICE_FILE);
+    write_file_atomic(Path::new(SERVICE_FILE), content, SERVICE_FILE_MODE)
+}
+
+/// Write a file atomically using tempfile
+/// Returns Ok(true) if file was changed, Ok(false) if no change needed
+fn write_file_atomic(service_path: &Path, content: &str, mode: u32) -> Result<bool> {
 
     // Check if content differs from existing
     if service_path.exists() {
@@ -92,26 +104,124 @@ fn write_service_file_atomic(content: &str) -> Result<bool> {
     let dir = service_path
         .parent()
         .unwrap_or(Path::new("/etc/systemd/system"));
-    let mut tmp = NamedTempFile::new_in(dir).context("Failed to create temporary service file")?;
+    let mut tmp = NamedTempFile::new_in(dir).context("Failed to create temporary file")?;
 
     tmp.write_all(content.as_bytes())
-        .context("Failed to write service content")?;
+        .context("Failed to write file content")?;
 
     tmp.as_file()
         .sync_all()
-        .context("Failed to sync service file to disk")?;
+        .context("Failed to sync file to disk")?;
 
     // Persist atomically (rename)
     let tmp_path = tmp.into_temp_path();
     tmp_path
         .persist(service_path)
-        .context("Failed to persist service file")?;
+        .context("Failed to persist file")?;
 
     // Set permissions explicitly
-    fs::set_permissions(service_path, Permissions::from_mode(SERVICE_FILE_MODE))
-        .context("Failed to set service file permissions")?;
+    fs::set_permissions(service_path, Permissions::from_mode(mode))
+        .context("Failed to set file permissions")?;
 
     Ok(true)
+}
+
+/// Systemd unit for m87-privileged (root daemon)
+fn generate_privileged_service_content() -> &'static str {
+    r#"[Unit]
+Description=m87 Privileged Execution Helper
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/m87-privileged
+Restart=on-failure
+RestartSec=3
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=strict
+ReadWritePaths=/etc/m87 /var/log/m87 /run/m87
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=m87-privileged
+
+[Install]
+WantedBy=multi-user.target
+"#
+}
+
+/// Set up the m87-privileged daemon alongside the runtime service.
+/// Copies the binary to /usr/local/bin, creates directories, writes
+/// service file, and enables the service. Failures warn but don't
+/// block the runtime setup.
+fn setup_privileged_service(exe_path: &Path) -> Result<()> {
+    // Locate m87-privileged binary next to the m87 binary
+    let bin_dir = exe_path
+        .parent()
+        .context("exe_path has no parent directory")?;
+    let privileged_src = bin_dir.join("m87-privileged");
+
+    if !privileged_src.exists() {
+        warn!(
+            "m87-privileged binary not found at {}; skipping privileged daemon setup",
+            privileged_src.display()
+        );
+        return Ok(());
+    }
+
+    info!("Setting up m87-privileged daemon");
+
+    // Create required directories
+    for dir in [PRIVILEGED_POLICY_DIR, PRIVILEGED_LOG_DIR] {
+        fs::create_dir_all(dir)
+            .with_context(|| format!("Failed to create directory: {dir}"))?;
+    }
+
+    // Write default policy if none exists
+    let policy_path = Path::new(PRIVILEGED_DEFAULT_POLICY);
+    if !policy_path.exists() {
+        let default_policy = r#"{"version":1,"grants":[]}"#;
+        fs::write(policy_path, default_policy).context("Failed to write default policy")?;
+        fs::set_permissions(policy_path, Permissions::from_mode(0o644))
+            .context("Failed to set policy file permissions")?;
+        info!("Created default policy at {}", PRIVILEGED_DEFAULT_POLICY);
+    }
+
+    // Copy binary to /usr/local/bin (atomic: write to temp, rename)
+    let dest = Path::new(PRIVILEGED_BINARY_DEST);
+    let dest_dir = dest.parent().unwrap_or(Path::new("/usr/local/bin"));
+    let tmp_dest = dest_dir.join(".m87-privileged.tmp");
+
+    fs::copy(&privileged_src, &tmp_dest).context("Failed to copy m87-privileged binary")?;
+    fs::set_permissions(&tmp_dest, Permissions::from_mode(0o755))
+        .context("Failed to set binary permissions")?;
+    fs::rename(&tmp_dest, dest).context("Failed to install m87-privileged binary")?;
+
+    info!("Installed m87-privileged to {}", PRIVILEGED_BINARY_DEST);
+
+    // Write systemd service file
+    let content = generate_privileged_service_content();
+    let file_changed = write_file_atomic(
+        Path::new(PRIVILEGED_SERVICE_FILE),
+        content,
+        SERVICE_FILE_MODE,
+    )?;
+
+    if file_changed {
+        info!("Service file updated at {}", PRIVILEGED_SERVICE_FILE);
+        run_systemctl_checked(&["daemon-reload"])?;
+    }
+
+    // Enable and start
+    run_systemctl_checked(&["enable", "--now", PRIVILEGED_SERVICE_NAME])?;
+    info!("Enabled and started m87-privileged service");
+
+    Ok(())
 }
 
 /// Internal function called by hidden subcommand after sudo re-exec
@@ -162,6 +272,11 @@ pub async fn internal_setup_privileged(
         info!("Restarted m87-runtime service");
     }
 
+    // Set up m87-privileged daemon (best-effort — don't fail the runtime setup)
+    if let Err(e) = setup_privileged_service(&exe_path) {
+        warn!("Failed to set up m87-privileged service: {e:#}");
+    }
+
     Ok(())
 }
 
@@ -173,6 +288,13 @@ pub async fn internal_stop_privileged() -> Result<()> {
 
     run_systemctl_checked(&["stop", SERVICE_NAME])?;
     info!("Stopped m87-runtime service");
+
+    if let Err(e) = run_systemctl_checked(&["stop", PRIVILEGED_SERVICE_NAME]) {
+        warn!("Failed to stop m87-privileged service: {e:#}");
+    } else {
+        info!("Stopped m87-privileged service");
+    }
+
     Ok(())
 }
 
@@ -185,9 +307,21 @@ pub async fn internal_disable_privileged(now: bool) -> Result<()> {
     if now {
         run_systemctl_checked(&["disable", "--now", SERVICE_NAME])?;
         info!("Disabled and stopped m87-runtime service");
+
+        if let Err(e) = run_systemctl_checked(&["disable", "--now", PRIVILEGED_SERVICE_NAME]) {
+            warn!("Failed to disable m87-privileged service: {e:#}");
+        } else {
+            info!("Disabled and stopped m87-privileged service");
+        }
     } else {
         run_systemctl_checked(&["disable", SERVICE_NAME])?;
         info!("Disabled m87-runtime service");
+
+        if let Err(e) = run_systemctl_checked(&["disable", PRIVILEGED_SERVICE_NAME]) {
+            warn!("Failed to disable m87-privileged service: {e:#}");
+        } else {
+            info!("Disabled m87-privileged service");
+        }
     }
     Ok(())
 }
@@ -307,6 +441,10 @@ pub async fn status() -> Result<()> {
             warn!("Service not installed. Run 'm87 runtime enable --now' to install and start.");
         }
     }
+
+    // Also show m87-privileged service status
+    println!();
+    let _ = run_systemctl(&["status", "--lines=0", PRIVILEGED_SERVICE_NAME]);
 
     Ok(())
 }

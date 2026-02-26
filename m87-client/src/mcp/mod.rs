@@ -550,7 +550,7 @@ impl M87McpServer {
 
     // Exec
 
-    #[tool(description = "Execute a command on a device and return output. Non-zero exit codes are returned as data, not errors. Supports batch: pass 'devices' array instead of 'device' to execute on multiple devices at once.")]
+    #[tool(description = "Execute a command on a device and return output. Non-zero exit codes are returned as data, not errors. Supports batch: pass 'devices' array instead of 'device' to execute on multiple devices at once. For commands requiring root privileges (e.g. apt-get, systemctl, docker), prefix with 'm87-sudo' instead of 'sudo' — example: ['m87-sudo', 'apt-get', 'update']. The m87-sudo binary delegates to a local privileged daemon that enforces policy grants. Commands run via m87-sudo must be non-interactive (use flags like -y), as stdin is not forwarded.")]
     async fn device_exec(&self, Parameters(req): Parameters<DeviceExecReq>) -> Result<CallToolResult, ErrorData> {
         let (devices, is_batch) = req.target.resolve()?;
         let timeout_secs = req.timeout_secs.unwrap_or(30);

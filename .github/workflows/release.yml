@@ -79,6 +79,9 @@ jobs:
       - name: Run m87-server unit tests
         run: cargo test --all-features --package m87-server
 
+      - name: Run m87-privileged tests
+        run: cargo test --package m87-privileged
+
   build:
     name: Build ${{ matrix.package }} (${{ inputs.build_profile }}) - ${{ matrix.os }}/${{ matrix.arch }}
     needs: [read-version, test]
@@ -121,6 +124,23 @@ jobs:
             dockerfile: m87-server/Dockerfile
             binary_name: m87-server
             use_docker: true
+          # m87-privileged builds (Linux musl, static — produces both m87-privileged and m87-sudo)
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            os: linux
+            arch: amd64
+            package: m87-privileged
+            dockerfile: m87-privileged/Dockerfile
+            binary_name: m87-privileged
+            use_docker: true
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            os: linux
+            arch: arm64
+            package: m87-privileged
+            dockerfile: m87-privileged/Dockerfile
+            binary_name: m87-privileged
+            use_docker: true
           # macOS builds (native cargo)
           - runner: macos-latest
             target: aarch64-apple-darwin
@@ -162,6 +182,15 @@ jobs:
           mkdir -p artifacts
           docker create --name tmp-extract ${{ matrix.package }}:build
           docker cp tmp-extract:/app/${{ matrix.binary_name }} artifacts/${{ matrix.binary_name }}-${{ matrix.target }}
+
+          # m87-privileged also produces m87-sudo
+          if [ "${{ matrix.package }}" = "m87-privileged" ]; then
+            docker cp tmp-extract:/app/m87-sudo artifacts/m87-sudo-${{ matrix.target }}
+            chmod +x artifacts/m87-sudo-${{ matrix.target }}
+            echo "Extra binary: m87-sudo-${{ matrix.target }}"
+            ls -lh artifacts/m87-sudo-${{ matrix.target }}
+          fi
+
           docker rm tmp-extract
 
           chmod +x artifacts/${{ matrix.binary_name }}-${{ matrix.target }}
@@ -220,6 +249,14 @@ jobs:
         with:
           name: ${{ matrix.binary_name }}-${{ matrix.target }}
           path: artifacts/${{ matrix.binary_name }}-${{ matrix.target }}
+          if-no-files-found: error
+
+      - name: Upload m87-sudo artifact
+        if: matrix.package == 'm87-privileged'
+        uses: actions/upload-artifact@v4
+        with:
+          name: m87-sudo-${{ matrix.target }}
+          path: artifacts/m87-sudo-${{ matrix.target }}
           if-no-files-found: error
 
   attribution:
@@ -355,7 +392,7 @@ jobs:
         run: |
           cd release-assets
           # Generate SHA256 checksums for all files (SHA256SUMS will be created after, so it won't include itself)
-          sha256sum m87-* install-client.sh > SHA256SUMS
+          sha256sum m87-* install-client.sh THIRDPARTY_LICENSES_*.html > SHA256SUMS
           echo "Generated checksums:"
           cat SHA256SUMS
 
@@ -423,6 +460,14 @@ jobs:
             **m87-server - Linux**
             - `m87-server-x86_64-unknown-linux-gnu` - x86_64/AMD64 architecture
             - `m87-server-aarch64-unknown-linux-gnu` - ARM64 architecture
+
+            **m87-privileged (privileged daemon) - Linux**
+            - `m87-privileged-x86_64-unknown-linux-musl` - x86_64/AMD64 (static binary)
+            - `m87-privileged-aarch64-unknown-linux-musl` - ARM64 (static binary)
+
+            **m87-sudo (privileged client) - Linux**
+            - `m87-sudo-x86_64-unknown-linux-musl` - x86_64/AMD64 (static binary)
+            - `m87-sudo-aarch64-unknown-linux-musl` - ARM64 (static binary)
 
             Download the appropriate binary for your system and architecture.
 

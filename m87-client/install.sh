@@ -291,6 +291,31 @@ main() {
     # Step 6: Install
     install_binary "$binary_path"
 
+    # Step 6b: Install m87-sudo and m87-privileged (Linux only)
+    if [ "$OS" = "linux" ]; then
+        for extra_bin in m87-sudo m87-privileged; do
+            extra_binary_name="${extra_bin}-${TARGET}"
+            extra_download_url="${DOWNLOAD_BASE_URL}/v${VERSION}/${extra_binary_name}"
+            extra_binary_path="$tmp_dir/$extra_binary_name"
+
+            info "Downloading ${extra_bin}..."
+            if download "$extra_download_url" "$extra_binary_path" 2>/dev/null; then
+                # Verify checksum if available
+                if [ -f "$checksums_file" ]; then
+                    expected_checksum=$(grep "$extra_binary_name" "$checksums_file" | awk '{print $1}')
+                    if [ -n "$expected_checksum" ]; then
+                        verify_checksum "$extra_binary_path" "$expected_checksum"
+                    fi
+                fi
+
+                install -m 755 "$extra_binary_path" "$INSTALL_DIR/$extra_bin"
+                success "Installed $extra_bin to $INSTALL_DIR/$extra_bin"
+            else
+                warning "Could not download ${extra_bin} (optional, skipping)"
+            fi
+        done
+    fi
+
     # Step 7: Check if PATH includes install directory
     check_path
 

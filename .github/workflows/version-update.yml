@@ -56,6 +56,13 @@ jobs:
           echo "Updated m87-shared/Cargo.toml to version $VERSION"
           cat m87-shared/Cargo.toml | grep "^version"
 
+      - name: Update version in m87-privileged/Cargo.toml
+        run: |
+          VERSION="${{ steps.extract-version.outputs.version }}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" m87-privileged/Cargo.toml
+          echo "Updated m87-privileged/Cargo.toml to version $VERSION"
+          cat m87-privileged/Cargo.toml | grep "^version"
+
       - name: Update version in tests/Cargo.toml
         run: |
           VERSION="${{ steps.extract-version.outputs.version }}"
@@ -87,6 +94,6 @@ jobs:
           VERSION="${{ steps.extract-version.outputs.version }}"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add m87-client/Cargo.toml m87-server/Cargo.toml m87-shared/Cargo.toml tests/Cargo.toml m87-client/install.sh m87-server/docker-compose.yml Cargo.lock
+          git add m87-client/Cargo.toml m87-server/Cargo.toml m87-shared/Cargo.toml m87-privileged/Cargo.toml tests/Cargo.toml m87-client/install.sh m87-server/docker-compose.yml Cargo.lock
           git commit -m "chore: bump version to $VERSION" || echo "No changes to commit"
           git push || echo "No changes to push"
