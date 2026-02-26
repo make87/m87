@@ -116,6 +116,11 @@ fn parse_args() -> Result<(String, Vec<String>), String> {
         i += 2;
     }
 
+    // Skip optional `--` separator.
+    if i < args.len() && args[i] == "--" {
+        i += 1;
+    }
+
     if i >= args.len() {
         return Err("usage: m87-sudo [--socket-path PATH] <command> [args...]".to_string());
     }
