@@ -58,7 +58,7 @@ async fn list_device_revisions(
 
     // Ensure caller can access the device
     let dev_opt = claims
-        .find_one_with_access(&state.db.devices(), doc! { "device_id": device_oid })
+        .find_one_with_access(&state.db.devices(), doc! { "_id": &device_oid })
         .await?;
     if dev_opt.is_none() {
         return Err(ServerError::not_found("Device not found"));
