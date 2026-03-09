@@ -45,10 +45,11 @@ async fn handle_connection_inner(
         };
 
         match msg {
-            PrivilegedMessage::Exec { id, argv, context } => {
+            PrivilegedMessage::Exec { id, argv, context, cwd } => {
                 handle_exec(
                     &id,
                     argv,
+                    cwd,
                     context,
                     &policy_store,
                     &audit,
@@ -57,6 +58,9 @@ async fn handle_connection_inner(
                     &mut lines,
                 )
                 .await?;
+            }
+            PrivilegedMessage::StdinData { .. } | PrivilegedMessage::StdinClose { .. } => {
+                warn!("unexpected StdinData/StdinClose outside of Exec context");
             }
             other => {
                 warn!("unexpected message type from client: {other:?}");
@@ -71,6 +75,7 @@ async fn handle_connection_inner(
 async fn handle_exec(
     id: &str,
     argv: Vec<String>,
+    cwd: String,
     context: ExecContext,
     policy_lock: &Arc<Mutex<PolicyStore>>,
     audit: &Arc<AuditLogger>,
@@ -98,7 +103,7 @@ async fn handle_exec(
         }
         drop(store);
 
-        let exit_code = execute_streaming(argv, id, writer).await?;
+        let exit_code = execute_streaming(argv, cwd, id, lines, writer).await?;
         audit.log_exec(id, exit_code).await;
         return Ok(());
     }
@@ -204,7 +209,7 @@ async fn handle_exec(
                     policy::save_policy(&store, policy_path).await?;
                     drop(store);
 
-                    let exit_code = execute_streaming(argv, id, writer).await?;
+                    let exit_code = execute_streaming(argv, cwd, id, lines, writer).await?;
                     audit.log_exec(id, exit_code).await;
                 }
             }

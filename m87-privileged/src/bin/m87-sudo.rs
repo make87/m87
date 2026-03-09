@@ -1,8 +1,11 @@
 use std::process::ExitCode;
+use std::io::BufRead;
 
 use m87_shared::privileged::{DenyReason, ExecContext, OutputStream, PrivilegedMessage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::sync::mpsc;
+use std::path::PathBuf;
 
 const DEFAULT_SOCKET_PATH: &str = "/run/m87/privileged.sock";
 
@@ -28,10 +31,15 @@ async fn main() -> ExitCode {
     let mut lines = BufReader::new(reader).lines();
 
     let id = format!("sudo-{}", std::process::id());
+    let cwd = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("/"))
+        .to_string_lossy()
+        .into_owned();
     let msg = PrivilegedMessage::Exec {
         id: id.clone(),
         argv,
         context: ExecContext::Unattended,
+        cwd,
     };
 
     let mut line = match serde_json::to_string(&msg) {
@@ -48,51 +56,116 @@ async fn main() -> ExitCode {
         return ExitCode::from(125);
     }
 
+    // Spawn a blocking task to read stdin and forward through a channel
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<Option<String>>(10);
+    let id_for_stdin = id.clone();
+    tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                match line {
+                    Ok(data) => {
+                        let _ = stdin_tx.blocking_send(Some(data));
+                    }
+                    Err(_) => {
+                        break;
+                    }
+                }
+            }
+            // Signal EOF
+            let _ = stdin_tx.blocking_send(None);
+        })
+    });
+
+    let mut stdin_closed = false;
+
     loop {
-        let resp = match lines.next_line().await {
-            Ok(Some(l)) => l,
-            Ok(None) => {
-                eprintln!("m87-sudo: connection closed unexpectedly");
-                return ExitCode::from(125);
-            }
-            Err(e) => {
-                eprintln!("m87-sudo: read error: {e}");
-                return ExitCode::from(125);
-            }
-        };
-
-        let msg: PrivilegedMessage = match serde_json::from_str(&resp) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("m87-sudo: invalid response: {e}");
-                return ExitCode::from(125);
-            }
-        };
-
-        match msg {
-            PrivilegedMessage::Output { stream, data, .. } => match stream {
-                OutputStream::Stdout => {
-                    println!("{data}");
+        tokio::select! {
+            // Read from stdin channel and forward to daemon
+            line = stdin_rx.recv(), if !stdin_closed => {
+                match line {
+                    Some(Some(data)) => {
+                        let msg = PrivilegedMessage::StdinData {
+                            id: id_for_stdin.clone(),
+                            data,
+                        };
+                        let mut json = match serde_json::to_string(&msg) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("m87-sudo: failed to serialize stdin: {e}");
+                                return ExitCode::from(125);
+                            }
+                        };
+                        json.push('\n');
+                        if let Err(e) = writer.write_all(json.as_bytes()).await {
+                            eprintln!("m87-sudo: failed to send stdin: {e}");
+                            return ExitCode::from(125);
+                        }
+                    }
+                    Some(None) | None => {
+                        // stdin EOF - send StdinClose
+                        let msg = PrivilegedMessage::StdinClose { id: id_for_stdin.clone() };
+                        let mut json = match serde_json::to_string(&msg) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("m87-sudo: failed to serialize stdin close: {e}");
+                                return ExitCode::from(125);
+                            }
+                        };
+                        json.push('\n');
+                        let _ = writer.write_all(json.as_bytes()).await;
+                        stdin_closed = true;
+                    }
                 }
-                OutputStream::Stderr => {
-                    eprintln!("{data}");
-                }
-            },
-            PrivilegedMessage::Result { exit_code, .. } => {
-                return ExitCode::from(exit_code as u8);
             }
-            PrivilegedMessage::Denied { reason, .. } => {
-                let reason_str = match reason {
-                    DenyReason::NoPolicy => "no matching policy grant",
-                    DenyReason::UserDenied => "request denied by user",
-                    DenyReason::Timeout => "approval timed out",
+            // Read responses from daemon
+            resp_result = lines.next_line() => {
+                let resp_line = match resp_result {
+                    Ok(Some(l)) => l,
+                    Ok(None) => {
+                        eprintln!("m87-sudo: connection closed unexpectedly");
+                        return ExitCode::from(125);
+                    }
+                    Err(e) => {
+                        eprintln!("m87-sudo: read error: {e}");
+                        return ExitCode::from(125);
+                    }
                 };
-                eprintln!("m87-sudo: denied — {reason_str}");
-                return ExitCode::from(126);
-            }
-            _ => {
-                eprintln!("m87-sudo: unexpected response from daemon");
-                return ExitCode::from(125);
+
+                let msg: PrivilegedMessage = match serde_json::from_str(&resp_line) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("m87-sudo: invalid response: {e}");
+                        return ExitCode::from(125);
+                    }
+                };
+
+                match msg {
+                    PrivilegedMessage::Output { stream, data, .. } => match stream {
+                        OutputStream::Stdout => {
+                            println!("{data}");
+                        }
+                        OutputStream::Stderr => {
+                            eprintln!("{data}");
+                        }
+                    },
+                    PrivilegedMessage::Result { exit_code, .. } => {
+                        return ExitCode::from(exit_code as u8);
+                    }
+                    PrivilegedMessage::Denied { reason, .. } => {
+                        let reason_str = match reason {
+                            DenyReason::NoPolicy => "no matching policy grant",
+                            DenyReason::UserDenied => "request denied by user",
+                            DenyReason::Timeout => "approval timed out",
+                        };
+                        eprintln!("m87-sudo: denied — {reason_str}");
+                        return ExitCode::from(126);
+                    }
+                    _ => {
+                        eprintln!("m87-sudo: unexpected response from daemon");
+                        return ExitCode::from(125);
+                    }
+                }
             }
         }
     }

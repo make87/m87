@@ -145,6 +145,7 @@ async fn policy_match_executes_immediately() {
             id: "req_1".into(),
             argv: vec!["echo".into(), "hello".into(), "world".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -177,6 +178,7 @@ async fn unattended_no_policy_denies() {
             id: "req_2".into(),
             argv: vec!["echo".into(), "test".into()],
             context: ExecContext::Unattended,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -201,6 +203,7 @@ async fn approval_allow_once_flow() {
             id: "req_3".into(),
             argv: vec!["echo".into(), "approved".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -247,6 +250,7 @@ async fn approval_allow_once_flow() {
             id: "req_3b".into(),
             argv: vec!["echo".into(), "approved".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -263,6 +267,7 @@ async fn approval_allow_once_flow() {
             id: "req_3c".into(),
             argv: vec!["echo".into(), "approved".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -284,6 +289,7 @@ async fn approval_deny_flow() {
             id: "req_4".into(),
             argv: vec!["echo".into(), "nope".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -323,6 +329,7 @@ async fn approval_allow_always_persists() {
             id: "req_5".into(),
             argv: vec!["echo".into(), "persist".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -349,6 +356,7 @@ async fn approval_allow_always_persists() {
             id: "req_5b".into(),
             argv: vec!["echo".into(), "second".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -377,6 +385,7 @@ async fn timed_grant_expires() {
             id: "req_6".into(),
             argv: vec!["echo".into(), "timed".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -405,6 +414,7 @@ async fn timed_grant_expires() {
             id: "req_6b".into(),
             argv: vec!["echo".into(), "timed".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -427,6 +437,7 @@ async fn failed_command_returns_exit_code() {
             id: "req_7".into(),
             argv: vec!["false".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -450,6 +461,7 @@ async fn tty_context_triggers_approval() {
             id: "req_8".into(),
             argv: vec!["echo".into(), "tty".into()],
             context: ExecContext::Tty,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -477,6 +489,7 @@ async fn multiple_connections() {
             id: "req_a".into(),
             argv: vec!["echo".into(), "from_client_1".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -485,6 +498,7 @@ async fn multiple_connections() {
             id: "req_b".into(),
             argv: vec!["echo".into(), "from_client_2".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -512,6 +526,7 @@ async fn m87_sudo_policy_match() {
             id: "sudo_1".into(),
             argv: vec!["echo".into(), "hello".into(), "from".into(), "sudo".into()],
             context: ExecContext::Unattended,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -543,6 +558,7 @@ async fn m87_sudo_no_policy_denied() {
             id: "sudo_2".into(),
             argv: vec!["rm".into(), "-rf".into(), "/".into()],
             context: ExecContext::Unattended,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -568,6 +584,7 @@ async fn m87_sudo_failed_command() {
             id: "sudo_3".into(),
             argv: vec!["false".into()],
             context: ExecContext::Unattended,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -598,6 +615,7 @@ async fn stderr_is_streamed() {
             id: "req_9".into(),
             argv: vec!["ls".into(), "/nonexistent_path_xyz_12345".into()],
             context: ExecContext::Agent,
+            cwd: "/tmp".into(),
         })
         .await;
 
@@ -614,6 +632,104 @@ async fn stderr_is_streamed() {
     match result {
         PrivilegedMessage::Result { exit_code, .. } => {
             assert_ne!(exit_code, 0);
+        }
+        other => panic!("expected Result, got: {other:?}"),
+    }
+}
+
+/// Test: working directory is respected.
+#[tokio::test]
+async fn cwd_is_respected() {
+    let daemon = TestDaemon::start_with_grants(vec![make_grant("pwd", GrantType::Always)]).await;
+    let mut client = daemon.connect().await;
+
+    // Send pwd command with cwd set to /tmp
+    client
+        .send(&PrivilegedMessage::Exec {
+            id: "cwd_test".into(),
+            argv: vec!["pwd".into()],
+            context: ExecContext::Agent,
+            cwd: "/tmp".into(),
+        })
+        .await;
+
+    let (outputs, result) = client.recv_until_result().await;
+
+    // Should have stdout output from pwd.
+    let pwd_output = outputs
+        .iter()
+        .find_map(|m| {
+            if let PrivilegedMessage::Output { data, stream, .. } = m {
+                if *stream == OutputStream::Stdout {
+                    return Some(data);
+                }
+            }
+            None
+        })
+        .expect("expected pwd output");
+
+    assert_eq!(pwd_output.trim(), "/tmp", "pwd should output /tmp");
+
+    match result {
+        PrivilegedMessage::Result { exit_code, .. } => {
+            assert_eq!(exit_code, 0);
+        }
+        other => panic!("expected Result, got: {other:?}"),
+    }
+}
+
+/// Test: stdin is forwarded from client to command.
+#[tokio::test]
+async fn stdin_is_forwarded() {
+    let daemon = TestDaemon::start_with_grants(vec![make_grant("cat", GrantType::Always)]).await;
+    let mut client = daemon.connect().await;
+
+    // Send cat command (reads stdin, outputs to stdout)
+    client
+        .send(&PrivilegedMessage::Exec {
+            id: "stdin_test".into(),
+            argv: vec!["cat".into()],
+            context: ExecContext::Agent,
+            cwd: "/tmp".into(),
+        })
+        .await;
+
+    // Send some input via StdinData
+    client
+        .send(&PrivilegedMessage::StdinData {
+            id: "stdin_test".into(),
+            data: "hello world".into(),
+        })
+        .await;
+
+    // Signal EOF
+    client
+        .send(&PrivilegedMessage::StdinClose {
+            id: "stdin_test".into(),
+        })
+        .await;
+
+    let (outputs, result) = client.recv_until_result().await;
+
+    // Should have stdout output containing the input we sent.
+    let output_text = outputs
+        .iter()
+        .filter_map(|m| {
+            if let PrivilegedMessage::Output { data, stream, .. } = m {
+                if *stream == OutputStream::Stdout {
+                    return Some(data.as_str());
+                }
+            }
+            None
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(output_text, "hello world", "cat should output the input we sent");
+
+    match result {
+        PrivilegedMessage::Result { exit_code, .. } => {
+            assert_eq!(exit_code, 0);
         }
         other => panic!("expected Result, got: {other:?}"),
     }

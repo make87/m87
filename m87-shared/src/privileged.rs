@@ -12,6 +12,14 @@ pub enum PrivilegedMessage {
         id: String,
         argv: Vec<String>,
         context: ExecContext,
+        cwd: String,
+    },
+    StdinData {
+        id: String,
+        data: String,
+    },
+    StdinClose {
+        id: String,
     },
     ApprovalNeeded {
         id: String,
