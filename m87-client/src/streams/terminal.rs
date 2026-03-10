@@ -53,15 +53,17 @@ pub async fn handle_terminal_io(term: Option<String>, io: &mut QuicIo) {
     // --------------------------------------------------------------------
     let detected_shell = shell::detect_shell();
     let args = shell::build_shell_args(&detected_shell, ShellMode::InteractiveLogin);
-    let path = shell::ensure_minimal_path();
-
     let mut cmd = CommandBuilder::new(&detected_shell);
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     cmd.args(&args_refs);
     let term = term.as_deref().unwrap_or("xterm-256color");
     cmd.env("TERM", term);
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("PATH", &path);
+    // Only set PATH explicitly for shells that don't support -l (ash/dash/sh),
+    // since login shells source profile files which set up the user's full PATH.
+    if !shell::supports_login_flag(&detected_shell) {
+        cmd.env("PATH", shell::ensure_minimal_path());
+    }
 
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,

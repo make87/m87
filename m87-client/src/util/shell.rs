@@ -87,7 +87,7 @@ fn shell_from_passwd() -> Option<String> {
 ///
 /// BusyBox `ash`, `dash`, and generic `sh` do NOT reliably support `-l`,
 /// so we only enable it for shells known to handle it.
-fn supports_login_flag(shell: &str) -> bool {
+pub fn supports_login_flag(shell: &str) -> bool {
     let basename = Path::new(shell)
         .file_name()
         .and_then(|n| n.to_str())
@@ -118,8 +118,13 @@ pub fn build_shell_args(shell: &str, mode: ShellMode) -> Vec<String> {
             }
         }
         ShellMode::ExecPty { command } => {
-            // No -i (causes prompt/MOTD noise), no -l (breaks ash/dash)
-            vec!["-c".to_string(), command]
+            // No -i (causes prompt/MOTD noise).
+            // Use -l for shells that support it so profile files are sourced (PATH setup).
+            if supports_login_flag(shell) {
+                vec!["-l".to_string(), "-c".to_string(), command]
+            } else {
+                vec!["-c".to_string(), command]
+            }
         }
     }
 }
@@ -236,15 +241,16 @@ mod tests {
 
     #[test]
     fn test_build_shell_args_exec_pty() {
-        // PTY mode should never pass -l or -i regardless of shell
+        // PTY mode uses -l for shells that support it (for PATH via profiles)
         let args = build_shell_args(
             "/bin/bash",
             ShellMode::ExecPty {
                 command: "htop".to_string(),
             },
         );
-        assert_eq!(args, vec!["-c", "htop"]);
+        assert_eq!(args, vec!["-l", "-c", "htop"]);
 
+        // ash/dash/sh don't support -l
         let args = build_shell_args(
             "/bin/ash",
             ShellMode::ExecPty {
