@@ -6,8 +6,9 @@ use crate::{
 use argon2::password_hash::{Error as PasswordHashError, SaltString};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use mongodb::bson::{doc, oid::ObjectId, DateTime};
-use rand::{distributions::Alphanumeric, Rng};
-use rand_core::OsRng; // secure random salt source
+use argon2::password_hash::rand_core::OsRng; // secure random salt source (rand_core 0.6, matching password-hash)
+use rand::distr::Alphanumeric;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
@@ -140,14 +141,14 @@ fn verify_api_key(key: &str, hash: &str) -> bool {
 fn generate_api_key() -> Result<(String, String, String), PasswordHashError> {
     let key_id: String = format!(
         "m87_{}",
-        rand::thread_rng()
+        rand::rng()
             .sample_iter(&Alphanumeric)
             .take(8)
             .map(char::from)
             .collect::<String>()
     );
 
-    let secret: String = rand::thread_rng()
+    let secret: String = rand::rng()
         .sample_iter(&Alphanumeric)
         .take(40)
         .map(char::from)
