@@ -56,7 +56,8 @@ headers = "0.4.1"
 # Server-specific cryptography
 hmac = "0.12"
 argon2 = "0.5"
-password-hash = { version = "0.6", features = ["getrandom"] }
+# Must match argon2 0.5's password-hash version so Cargo unifies them and enables getrandom on rand_core 0.6
+password-hash = { version = "0.5", features = ["getrandom"] }
 
 # Server-specific utilities
 uuid = "1.18.1"
