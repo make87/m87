@@ -878,11 +878,18 @@ impl M87McpServer {
 #[tool_handler]
 impl ServerHandler for M87McpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("m87-mcp", env!("CARGO_PKG_VERSION")))
-            .with_instructions(
-                "m87 platform CLI — device management, deployments, file ops, exec, port forwarding, docker, and org management. Use forward_start/forward_stop to manage persistent port forwards. Use docker_exec to run docker commands on devices (use -d for long-running containers).",
-            )
+        ServerInfo {
+            server_info: Implementation {
+                name: "m87-mcp".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                ..Default::default()
+            },
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            instructions: Some(
+                "m87 platform CLI — device management, deployments, file ops, exec, port forwarding, docker, and org management. Use forward_start/forward_stop to manage persistent port forwards. Use docker_exec to run docker commands on devices (use -d for long-running containers).".into(),
+            ),
+            ..Default::default()
+        }
     }
 }
 

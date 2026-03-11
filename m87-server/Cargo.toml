@@ -27,11 +27,15 @@ chrono.workspace = true
 reqwest.workspace = true
 jsonwebtoken.workspace = true
 rustls.workspace = true
+tokio-rustls.workspace = true
+socket2.workspace = true
 
 # Server-specific dependencies
 # add feature "chrono-0_4"
 mongodb = "3"
 rcgen = "0.14.5"
+arc-swap = "=1.7.1"
+pem-rfc7468 = { version = "1.0.0", features = ["alloc"] }
 pem = "3.0.6"
 # http3 and quic
 quinn.workspace = true
@@ -39,6 +43,7 @@ quinn-proto.workspace = true
 h3 = { version = "0.0.8" }
 h3-quinn = { version = "0.0.10", features = [ "datagram"] }
 h3-webtransport = "0.1.2"
+h3-datagram = "0.0.2"
 # for rate limiting
 governor = "0.10.2"
 
@@ -54,10 +59,9 @@ tower-http = { version = "0.6.1", features = ["cors", "trace", "timeout", "sensi
 headers = "0.4.1"
 
 # Server-specific cryptography
+sha2 = "0.10"
 hmac = "0.12"
 argon2 = "0.5"
-# Must match argon2 0.5's password-hash version so Cargo unifies them and enables getrandom on rand_core 0.6
-password-hash = { version = "0.5", features = ["getrandom"] }
 
 # Server-specific utilities
 uuid = "1.18.1"
