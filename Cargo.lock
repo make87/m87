@@ -170,7 +170,7 @@ dependencies = [
  "base64ct",
  "blake2",
  "cpufeatures",
- "password-hash 0.5.0",
+ "password-hash",
 ]
 
 [[package]]
@@ -751,15 +751,9 @@ dependencies = [
 
 [[package]]
 name = "cmov"
-version = "0.4.6"
+version = "0.5.0-pre.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d5ce5728ecb5285a5dd35f02a6a8e34e0828e0b38e8e632e249a3fe3f320211"
-
-[[package]]
-name = "cmov"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de0758edba32d61d1fd9f4d69491b47604b91ee2f7e6b33de7e54ca4ebe55dc3"
+checksum = "5417da527aa9bf6a1e10a781231effd1edd3ee82f27d5f8529ac9b279babce96"
 
 [[package]]
 name = "colorchoice"
@@ -1006,7 +1000,7 @@ version = "0.7.0-rc.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37387ceb32048ff590f2cbd24d8b05fffe63c3f69a5cfa089d4f722ca4385a19"
 dependencies = [
- "ctutils 0.3.1",
+ "ctutils",
  "num-traits",
  "rand_core 0.10.0-rc-3",
  "serdect",
@@ -1064,20 +1058,11 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c67c81499f542d1dd38c6a2a2fe825f4dd4bca5162965dd2eea0c8119873d3c"
+checksum = "758e5ed90be3c8abff7f9a6f37ab7f6d8c59c2210d448b81f3f508134aec84e4"
 dependencies = [
- "cmov 0.4.6",
-]
-
-[[package]]
-name = "ctutils"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1005a6d4446f5120ef475ad3d2af2b30c49c2c9c6904258e3bb30219bebed5e4"
-dependencies = [
- "cmov 0.5.2",
+ "cmov",
 ]
 
 [[package]]
@@ -2801,7 +2786,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "m87-client"
-version = "0.7.8"
+version = "0.0.0-dev0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2846,7 +2831,7 @@ dependencies = [
 
 [[package]]
 name = "m87-server"
-version = "0.7.8"
+version = "0.0.0-dev0"
 dependencies = [
  "argon2",
  "axum",
@@ -2867,7 +2852,7 @@ dependencies = [
  "jsonwebtoken",
  "m87-shared",
  "mongodb",
- "password-hash 0.6.0",
+ "password-hash",
  "pem",
  "quinn",
  "quinn-proto",
@@ -2889,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "m87-shared"
-version = "0.7.8"
+version = "0.0.0-dev0"
 dependencies = [
  "hex",
  "serde",
@@ -3592,16 +3577,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "password-hash"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccbd25f71dd5249dba9ed843d52500c8757a25511560d01a94f4abf56b52a1d5"
-dependencies = [
- "getrandom 0.4.2",
- "phc",
-]
-
-[[package]]
 name = "pastey"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3698,17 +3673,6 @@ checksum = "89815c69d36021a140146f26659a81d6c2afa33d216d736dd4be5381a7362220"
 dependencies = [
  "pest",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "phc"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44dc769b75f93afdddd8c7fa12d685292ddeff1e66f7f0f3a234cf1818afe892"
-dependencies = [
- "base64ct",
- "ctutils 0.4.0",
- "getrandom 0.4.2",
 ]
 
 [[package]]
