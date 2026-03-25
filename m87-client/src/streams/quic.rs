@@ -92,7 +92,7 @@ pub async fn get_quic_connection(
         .enable_segmentation_offload(false);
     transport.max_idle_timeout(Some(
         IdleTimeout::try_from(Duration::from_secs(180)).unwrap(),
-    )); // 10 seconds
+    ));
     client_cfg.transport_config(Arc::new(transport));
 
     // 6. Create QUIC client endpoint (local ephemeral port)
@@ -104,8 +104,12 @@ pub async fn get_quic_connection(
         .connect(server_addr, port_free_host_name)
         .context("QUIC connect() failed")?;
 
-    let conn = connecting
+    let conn = tokio::time::timeout(Duration::from_secs(30), connecting)
         .await
+        .map_err(|_| {
+            error!("QUIC handshake timed out after 30s");
+            anyhow::anyhow!("QUIC handshake timed out")
+        })?
         .map_err(|e| {
             error!("QUIC connect failed: {}", e);
             e

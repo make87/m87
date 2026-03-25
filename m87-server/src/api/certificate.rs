@@ -1,5 +1,6 @@
 use axum::{Extension, Json, extract::State};
 use pem::parse_many;
+use quinn::IdleTimeout;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer};
 use rustls::{
     ServerConfig as RustlsServerConfig, crypto::ring::default_provider, pki_types::CertificateDer,
@@ -164,6 +165,9 @@ pub async fn create_quic_server_config(cfg: &AppConfig) -> ServerResult<QuicServ
         .mtu_discovery_config(None)
         .enable_segmentation_offload(false);
     t.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
+    t.max_idle_timeout(Some(
+        IdleTimeout::try_from(std::time::Duration::from_secs(180)).unwrap(),
+    ));
 
     cfg.transport = Arc::new(t);
     Ok(cfg)
