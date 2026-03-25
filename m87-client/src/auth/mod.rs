@@ -220,11 +220,22 @@ impl AuthManager {
     }
 
     pub async fn get_cli_token() -> Result<String> {
-        APIConfig::load_or_create()?
+        let mut config = APIConfig::load_or_create()?;
+        let credentials = config
             .credentials
-            .ok_or_else(|| anyhow!("cli credentials not found"))?
-            .get_token()
-            .await
+            .as_mut()
+            .ok_or_else(|| anyhow!("cli credentials not found"))?;
+
+        // Detect if a refresh will be needed before calling get_token()
+        let needs_refresh = matches!(credentials, Credentials::OAuth2Token(t) if !t.is_valid());
+        let token = credentials.get_token().await?;
+
+        // If a refresh happened, persist the updated credentials to disk
+        if needs_refresh {
+            config.save()?;
+        }
+
+        Ok(token)
     }
 
     pub fn get_device_token() -> Result<String> {

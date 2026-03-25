@@ -84,14 +84,17 @@ where
             command: config.command.clone(),
         },
     );
-    let path = shell::ensure_minimal_path();
-
     let mut cmd = Command::new(&shell);
     cmd.args(&args)
-        .env("PATH", &path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // Only set PATH explicitly for shells that don't support -l (ash/dash/sh),
+    // since login shells source profile files which set up the user's full PATH.
+    if !shell::supports_login_flag(&shell) {
+        cmd.env("PATH", shell::ensure_minimal_path());
+    }
 
     // Create a new session so the child has no controlling terminal.
     // This ensures programs like `sudo` that open /dev/tty will fall back
@@ -239,8 +242,6 @@ where
             command: config.command.clone(),
         },
     );
-    let path = shell::ensure_minimal_path();
-
     let rows = config.rows.unwrap_or(24);
     let cols = config.cols.unwrap_or(80);
 
@@ -267,7 +268,9 @@ where
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     cmd.args(&args_refs);
     cmd.env("TERM", "xterm-256color");
-    cmd.env("PATH", &path);
+    if !shell::supports_login_flag(&shell) {
+        cmd.env("PATH", shell::ensure_minimal_path());
+    }
 
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
