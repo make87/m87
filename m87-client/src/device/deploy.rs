@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use m87_shared::deploy_spec::{
     CommandSpec, CreateDeployRevisionBody, DeployReport, DeploymentRevision,
-    DeploymentStatusSnapshot, JobDef, Lifecycle, LogSpec, ObserveHooks, ObserveSpec, OnFailure,
-    RebootMode, RetrySpec, ServiceSpec, Step, StopSpec, Undo, UndoMode, UpdateDeployRevisionBody,
-    Workdir, WorkdirMode,
+    DeploymentStatusSnapshot, JobDef, JobRun, Lifecycle, LogSpec, ObserveHooks, ObserveSpec,
+    OnFailure, RebootMode, RetrySpec, ServiceSpec, Step, StopSpec, TriggerJobBody, Undo, UndoMode,
+    UpdateDeployRevisionBody, Workdir, WorkdirMode,
 };
 use serde_yaml::Value;
 use std::collections::BTreeMap;
@@ -727,4 +727,133 @@ pub async fn get_deployment_snapshot(
     .context("failed to fetch source deployment")?;
 
     Ok(snapshot)
+}
+
+// ---------------------------------------------------------------------------
+// get_active_revision – fetch the active DeploymentRevision for a device
+// ---------------------------------------------------------------------------
+
+pub async fn get_active_revision(device_name: &str) -> Result<DeploymentRevision> {
+    let id = get_active_deployment_id(device_name)
+        .await?
+        .context("no active deployment on device")?;
+    get_deployment(device_name, &id).await
+}
+
+// ---------------------------------------------------------------------------
+// deploy_file_replace_all – atomically replace the whole device state
+// ---------------------------------------------------------------------------
+
+pub async fn deploy_file_replace_all(device_name: &str, file: PathBuf) -> Result<()> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+
+    let target_dep_id =
+        resolve_target_deployment_id(&device_id, &api_url, &token, trust_invalid, None).await?;
+    let target_dep_id = match target_dep_id {
+        Some(id) => id,
+        None => {
+            let new = create_deployment(device_name, true).await?;
+            new.id.unwrap()
+        }
+    };
+
+    let base_dir = file.parent().map(|f| f.to_path_buf());
+    let s = load_file_to_string(&file)?;
+    let mut dr = DeploymentRevision::from_yaml(&s).context("failed to parse revision YAML")?;
+    dr.resolve_file_references(base_dir)?;
+
+    server::update_deployment(
+        &api_url,
+        &token,
+        trust_invalid,
+        &device_id,
+        &target_dep_id,
+        UpdateDeployRevisionBody {
+            revision: Some(dr.to_yaml()?),
+            ..Default::default()
+        },
+    )
+    .await
+    .context("failed to replace deployment state")?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// send_lifecycle – send a runtime lifecycle update for a unit
+// ---------------------------------------------------------------------------
+
+pub async fn send_lifecycle(device_name: &str, unit_id: &str, lifecycle: Lifecycle) -> Result<()> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+    server::send_lifecycle_update(
+        &api_url,
+        &token,
+        trust_invalid,
+        &device_id,
+        unit_id,
+        lifecycle,
+    )
+    .await
+    .with_context(|| format!("failed to send lifecycle update for '{unit_id}'"))
+}
+
+// ---------------------------------------------------------------------------
+// trigger_job – create a new JobRun for a job definition
+// ---------------------------------------------------------------------------
+
+pub async fn trigger_job(
+    device_name: &str,
+    job_id: &str,
+    env_overrides: BTreeMap<String, String>,
+) -> Result<JobRun> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+
+    // We need the active revision id
+    let revision_id = server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id)
+        .await
+        .context("failed to get active deployment id")?
+        .context("no active deployment — deploy a revision first")?;
+
+    let body = TriggerJobBody { env_overrides };
+
+    server::trigger_job(
+        &api_url,
+        &token,
+        trust_invalid,
+        &device_id,
+        &revision_id,
+        job_id,
+        body,
+    )
+    .await
+    .with_context(|| format!("failed to trigger job '{job_id}'"))
+}
+
+// ---------------------------------------------------------------------------
+// list_job_runs / get_job_run
+// ---------------------------------------------------------------------------
+
+pub async fn list_job_runs(device_name: &str, job_id: Option<&str>) -> Result<Vec<JobRun>> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+    server::list_job_runs(&api_url, &token, trust_invalid, &device_id, job_id)
+        .await
+        .context("failed to list job runs")
+}
+
+pub async fn get_job_run(device_name: &str, run_id: &str) -> Result<JobRun> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+    server::get_job_run(&api_url, &token, trust_invalid, &device_id, run_id)
+        .await
+        .with_context(|| format!("failed to get job run '{run_id}'"))
+}
+
+// ---------------------------------------------------------------------------
+// rollback_device
+// ---------------------------------------------------------------------------
+
+pub async fn rollback_device(device_name: &str) -> Result<()> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+    server::rollback_device(&api_url, &token, trust_invalid, &device_id)
+        .await
+        .context("failed to rollback device")
 }

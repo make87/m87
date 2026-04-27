@@ -7,9 +7,9 @@ use futures::TryStreamExt;
 use m87_shared::{
     deploy_spec::{
         BucketRow, BucketTotals, DeployReport, DeployReportKind, DeploymentRevision,
-        DeploymentStatusSnapshot, FailureAggResponse, JobDef, ObserveStatusItem, Outcome,
-        RollbackStatus, RunStatus, ServiceSpec, SliceLevel, Step, StepAttemptStatus, StepState,
-        StepStatus, UnitKind, UpdateDeployRevisionBody,
+        DeploymentStatusSnapshot, FailureAggResponse, JobDef, JobRun, JobRunStatus,
+        ObserveStatusItem, Outcome, RollbackStatus, RunStatus, ServiceSpec, SliceLevel, Step,
+        StepAttemptStatus, StepState, StepStatus, UnitKind, UpdateDeployRevisionBody,
     },
     device::ObserveStatus,
 };
@@ -1220,5 +1220,151 @@ impl CurrentRunStateDoc {
                 ))),
             },
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JobRunDoc
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobRunDoc {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub run_id: String,
+    pub device_id: ObjectId,
+    pub revision_id: String,
+    pub job_def_id: String,
+    #[serde(default)]
+    pub env_overrides: BTreeMap<String, String>,
+    pub status: JobRunStatus,
+    pub enqueued_at: BsonDateTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<BsonDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<BsonDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub owner_scope: String,
+    pub allowed_scopes: Vec<String>,
+}
+
+impl JobRunDoc {
+    pub fn to_pub_job_run(&self) -> JobRun {
+        JobRun {
+            run_id: self.run_id.clone(),
+            job_def_id: self.job_def_id.clone(),
+            revision_id: self.revision_id.clone(),
+            env_overrides: self.env_overrides.clone(),
+            status: self.status.clone(),
+            enqueued_at: self.enqueued_at.timestamp_millis() as u64,
+            started_at: self.started_at.map(|t| t.timestamp_millis() as u64),
+            completed_at: self.completed_at.map(|t| t.timestamp_millis() as u64),
+            error: self.error.clone(),
+        }
+    }
+
+    pub async fn create(
+        db: &Arc<Mongo>,
+        device_id: ObjectId,
+        revision_id: String,
+        job_def_id: String,
+        env_overrides: BTreeMap<String, String>,
+        owner_scope: String,
+        allowed_scopes: Vec<String>,
+    ) -> ServerResult<Self> {
+        let doc = Self {
+            id: None,
+            run_id: uuid::Uuid::new_v4().to_string(),
+            device_id,
+            revision_id,
+            job_def_id,
+            env_overrides,
+            status: JobRunStatus::Queued,
+            enqueued_at: BsonDateTime::now(),
+            started_at: None,
+            completed_at: None,
+            error: None,
+            owner_scope,
+            allowed_scopes,
+        };
+        db.job_runs().insert_one(doc.clone()).await?;
+        Ok(doc)
+    }
+
+    pub async fn get_pending_for_device(
+        db: &Arc<Mongo>,
+        device_id: ObjectId,
+    ) -> ServerResult<Vec<JobRun>> {
+        let docs: Vec<JobRunDoc> = db
+            .job_runs()
+            .find(doc! { "device_id": device_id, "status": "queued" })
+            .await?
+            .try_collect()
+            .await?;
+        Ok(docs.into_iter().map(|d| d.to_pub_job_run()).collect())
+    }
+
+    pub async fn mark_running(db: &Arc<Mongo>, run_id: &str) -> ServerResult<()> {
+        db.job_runs()
+            .update_one(
+                doc! { "run_id": run_id },
+                doc! { "$set": {
+                    "status": "running",
+                    "started_at": BsonDateTime::now(),
+                }},
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_status(
+        db: &Arc<Mongo>,
+        run_id: &str,
+        status: JobRunStatus,
+        error: Option<String>,
+    ) -> ServerResult<()> {
+        let status_str = match status {
+            JobRunStatus::Success => "success",
+            JobRunStatus::Failed => "failed",
+            JobRunStatus::Running => "running",
+            JobRunStatus::Queued => "queued",
+        };
+        let mut set_doc = doc! {
+            "status": status_str,
+            "completed_at": BsonDateTime::now(),
+        };
+        if let Some(e) = error {
+            set_doc.insert("error", e);
+        }
+        db.job_runs()
+            .update_one(doc! { "run_id": run_id }, doc! { "$set": set_doc })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_for_device(
+        db: &Arc<Mongo>,
+        device_id: &ObjectId,
+        job_def_id: Option<&str>,
+    ) -> ServerResult<Vec<JobRunDoc>> {
+        let mut filter = doc! { "device_id": device_id };
+        if let Some(id) = job_def_id {
+            filter.insert("job_def_id", id);
+        }
+        let docs: Vec<JobRunDoc> = db.job_runs().find(filter).await?.try_collect().await?;
+        Ok(docs)
+    }
+
+    pub async fn get_by_run_id(
+        db: &Arc<Mongo>,
+        device_id: &ObjectId,
+        run_id: &str,
+    ) -> ServerResult<Option<JobRunDoc>> {
+        let doc = db
+            .job_runs()
+            .find_one(doc! { "device_id": device_id, "run_id": run_id })
+            .await?;
+        Ok(doc)
     }
 }

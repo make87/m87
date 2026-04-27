@@ -4,7 +4,7 @@ use crate::{
     models::{
         api_key::ApiKeyDoc,
         audit_logs::AuditLogDoc,
-        deploy_spec::{CurrentRunStateDoc, DeployReportDoc, DeployRevisionDoc},
+        deploy_spec::{CurrentRunStateDoc, DeployReportDoc, DeployRevisionDoc, JobRunDoc},
         device::DeviceDoc,
         device_auth_request::DeviceAuthRequestDoc,
         roles::RoleDoc,
@@ -66,6 +66,10 @@ impl Mongo {
 
     pub fn current_run_states(&self) -> Collection<CurrentRunStateDoc> {
         self.col("current_run_states")
+    }
+
+    pub fn job_runs(&self) -> Collection<JobRunDoc> {
+        self.col("job_runs")
     }
 
     pub fn audit_logs(&self) -> Collection<AuditLogDoc> {
@@ -293,6 +297,22 @@ impl Mongo {
 
         self.audit_logs()
             .create_index(IndexModel::builder().keys(doc! { "device_id": 1 }).build())
+            .await?;
+
+        self.job_runs()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "device_id": 1, "status": 1 })
+                    .build(),
+            )
+            .await?;
+        self.job_runs()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "run_id": 1 })
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+            )
             .await?;
 
         Ok(())

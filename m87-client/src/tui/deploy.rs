@@ -1,5 +1,6 @@
 use m87_shared::deploy_spec::{
-    DeploymentRevision, DeploymentStatusSnapshot, Outcome, RunStatus, StepState, UnitKind,
+    DeploymentRevision, DeploymentStatusSnapshot, JobRun, JobRunStatus, Outcome, RunStatus,
+    StepState, UnitKind,
 };
 
 use crate::tui::helper;
@@ -32,6 +33,19 @@ pub fn print_revision_verbose(rev: &DeploymentRevision) {
 }
 
 pub fn print_revision_short_detail(rev: &DeploymentRevision) {
+    // Delegate to the typed listing functions for a unified view
+    print_services_list(rev);
+    if !rev.observers.is_empty() {
+        println!();
+        print_observers_list(rev);
+    }
+    if !rev.jobs.is_empty() {
+        println!();
+        print_job_defs_list(rev);
+    }
+}
+
+fn _print_revision_short_detail_old(rev: &DeploymentRevision) {
     if !rev.services.is_empty() {
         println!(
             "{:<36} {:>8} {:>8} {:>8} {:>8}",
@@ -77,6 +91,178 @@ pub fn print_revision_short_detail(rev: &DeploymentRevision) {
                 job.files.len()
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Services / observers / job defs listing
+// ---------------------------------------------------------------------------
+
+pub fn print_services_list(rev: &DeploymentRevision) {
+    if rev.services.is_empty() {
+        println!("No services in active deployment.");
+        return;
+    }
+    println!(
+        "{:<36} {:>10} {:>6} {:>8} {:>6}",
+        "SERVICE ID", "LIFECYCLE", "STEPS", "OBSERVE", "FILES"
+    );
+    for svc in &rev.services {
+        println!(
+            "  {:<36} {:>10} {:>6} {:>8} {:>6}",
+            svc.id,
+            svc.lifecycle,
+            svc.steps.len(),
+            svc.observe.is_some(),
+            svc.files.len()
+        );
+    }
+}
+
+pub fn print_observers_list(rev: &DeploymentRevision) {
+    if rev.observers.is_empty() {
+        println!("No observers in active deployment.");
+        return;
+    }
+    println!(
+        "{:<36} {:>10} {:>8} {:>6}",
+        "OBSERVER ID", "LIFECYCLE", "OBSERVE", "FILES"
+    );
+    for obs in &rev.observers {
+        println!(
+            "  {:<36} {:>10} {:>8} {:>6}",
+            obs.id,
+            obs.lifecycle,
+            obs.observe.is_some(),
+            obs.files.len()
+        );
+    }
+}
+
+pub fn print_job_defs_list(rev: &DeploymentRevision) {
+    if rev.jobs.is_empty() {
+        println!("No job definitions in active deployment.");
+        return;
+    }
+    println!(
+        "{:<36} {:>10} {:>6} {:>6}",
+        "JOB ID", "LIFECYCLE", "STEPS", "FILES"
+    );
+    for jd in &rev.jobs {
+        println!(
+            "  {:<36} {:>10} {:>6} {:>6}",
+            jd.id,
+            jd.lifecycle,
+            jd.steps.len(),
+            jd.files.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Job run display
+// ---------------------------------------------------------------------------
+
+fn job_run_status_str(s: &JobRunStatus) -> &'static str {
+    match s {
+        JobRunStatus::Queued => "queued",
+        JobRunStatus::Running => "running",
+        JobRunStatus::Success => "✓ success",
+        JobRunStatus::Failed => "✗ failed",
+    }
+}
+
+fn job_run_status_color(s: &JobRunStatus) -> helper::AnsiColor {
+    match s {
+        JobRunStatus::Queued => helper::AnsiColor::Dim,
+        JobRunStatus::Running => helper::AnsiColor::Yellow,
+        JobRunStatus::Success => helper::AnsiColor::Green,
+        JobRunStatus::Failed => helper::AnsiColor::Red,
+    }
+}
+
+pub fn print_job_run(run: &JobRun) {
+    let opts = helper::RenderOpts::default();
+    let term_w = helper::terminal_width().unwrap_or(96).max(60);
+    let status = job_run_status_str(&run.status);
+    let status_colored =
+        helper::colorize(opts.use_color, status, job_run_status_color(&run.status));
+
+    println!("{}", helper::kv_line(term_w, "run_id", &run.run_id, &opts));
+    println!("{}", helper::kv_line(term_w, "job", &run.job_def_id, &opts));
+    println!(
+        "{}",
+        helper::kv_line(term_w, "revision", &run.revision_id, &opts)
+    );
+    println!(
+        "{}",
+        helper::kv_line(term_w, "status", &status_colored, &opts)
+    );
+
+    let enqueued = helper::format_time(run.enqueued_at, false);
+    println!("{}", helper::kv_line(term_w, "enqueued", &enqueued, &opts));
+
+    if let Some(started) = run.started_at {
+        println!(
+            "{}",
+            helper::kv_line(
+                term_w,
+                "started",
+                &helper::format_time(started, false),
+                &opts
+            )
+        );
+    }
+    if let Some(completed) = run.completed_at {
+        println!(
+            "{}",
+            helper::kv_line(
+                term_w,
+                "completed",
+                &helper::format_time(completed, false),
+                &opts
+            )
+        );
+    }
+    if let Some(err) = &run.error {
+        println!("{}", helper::kv_line(term_w, "error", err, &opts));
+    }
+    if !run.env_overrides.is_empty() {
+        let pairs: Vec<String> = run
+            .env_overrides
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        println!(
+            "{}",
+            helper::kv_line(term_w, "env", &pairs.join("  "), &opts)
+        );
+    }
+}
+
+pub fn print_job_run_list(runs: &[JobRun]) {
+    if runs.is_empty() {
+        println!("No job runs found.");
+        return;
+    }
+
+    let opts = helper::RenderOpts::default();
+    println!(
+        "{:<36} {:<20} {:>10} {:>24}",
+        "RUN ID", "JOB", "STATUS", "ENQUEUED"
+    );
+    for run in runs {
+        let status = job_run_status_str(&run.status);
+        let status_colored =
+            helper::colorize(opts.use_color, status, job_run_status_color(&run.status));
+        let enqueued = helper::format_time(run.enqueued_at, false);
+        println!(
+            "  {:<36} {:<20} {:>10} {:>24}",
+            run.run_id,
+            helper::truncate_visible(&run.job_def_id, 18),
+            status_colored,
+            enqueued
+        );
     }
 }
 

@@ -350,18 +350,137 @@ pub enum DeviceCommand {
         details: bool,
     },
 
-    /// Add a run spec to a deployment (defaults to active deployment)
+    /// Deploy a service, observer, or job definition (upsert by id).
+    /// Pass --replace-all to atomically replace the entire state.
     Deploy(DeployArgs),
 
-    /// Remove a run spec from a deployment (defaults to active deployment)
+    /// Remove a unit from the active deployment by id
     Undeploy(UndeployArgs),
 
     /// Manage deployments on the device
     #[command(subcommand)]
     Deployment(DeploymentCommand),
 
+    /// Control a service's runtime lifecycle (start / stop / pause / restart)
+    #[command(subcommand)]
+    Service(ServiceCommand),
+
+    /// Control an observer's runtime lifecycle (pause / resume)
+    #[command(subcommand)]
+    Observer(ObserverCommand),
+
+    /// Trigger and inspect job runs
+    #[command(subcommand)]
+    Job(JobCommand),
+
+    /// Roll back to the previous revision
+    Rollback {
+        /// List revision history instead of rolling back
+        #[arg(long, conflicts_with = "to")]
+        list: bool,
+        /// Roll back to a specific revision id
+        #[arg(long)]
+        to: Option<String>,
+    },
+
     #[clap(subcommand)]
     Access(AccessAction),
+}
+
+// ---------------------------------------------------------------------------
+// Service commands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand, Debug)]
+pub enum ServiceCommand {
+    /// Start a service (runs startup steps if not already running)
+    Start {
+        /// Service id
+        id: String,
+    },
+    /// Stop a service (runs stop steps)
+    Stop {
+        /// Service id
+        id: String,
+        /// Skip stop steps and tear down immediately
+        #[arg(long)]
+        force: bool,
+    },
+    /// Pause a service (suspends observe polling; process keeps running)
+    Pause {
+        /// Service id
+        id: String,
+    },
+    /// Resume a paused or stopped service
+    Resume {
+        /// Service id
+        id: String,
+    },
+    /// Restart a service (stop then start)
+    Restart {
+        /// Service id
+        id: String,
+        /// Skip stop steps
+        #[arg(long)]
+        force: bool,
+    },
+    /// List all services in the active deployment
+    List,
+}
+
+// ---------------------------------------------------------------------------
+// Observer commands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand, Debug)]
+pub enum ObserverCommand {
+    /// Pause an observer (suspend polling)
+    Pause {
+        /// Observer id
+        id: String,
+    },
+    /// Resume a paused observer
+    Resume {
+        /// Observer id
+        id: String,
+    },
+    /// List all observers in the active deployment
+    List,
+}
+
+// ---------------------------------------------------------------------------
+// Job commands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand, Debug)]
+pub enum JobCommand {
+    /// Trigger a run of a job definition
+    Trigger {
+        /// Job definition id
+        id: String,
+        /// Environment variable overrides in KEY=value format
+        #[arg(long = "env", value_parser = parse_kv_pair, action = clap::ArgAction::Append)]
+        env: Vec<(String, String)>,
+    },
+    /// List job runs (all jobs or a specific one)
+    List {
+        /// Filter by job definition id
+        #[arg(long)]
+        job: Option<String>,
+    },
+    /// Show status of a specific job run
+    Status {
+        /// Job run id
+        run_id: String,
+    },
+    /// List all job definitions in the active deployment
+    Defs,
+}
+
+fn parse_kv_pair(s: &str) -> Result<(String, String), String> {
+    s.split_once('=')
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .ok_or_else(|| format!("expected KEY=value, got '{s}'"))
 }
 
 fn parse_role(s: &str) -> Result<Role, String> {
@@ -388,7 +507,8 @@ pub enum AccessAction {
 
 #[derive(Parser, Debug)]
 pub struct DeployArgs {
-    /// File to add (docker-compose.yml or run spec yaml)
+    /// File to deploy (docker-compose.yml, service YAML, observer YAML, job YAML,
+    /// or a full revision YAML with services/observers/jobs sections)
     pub file: PathBuf,
 
     /// Spec type (auto detects by default)
@@ -402,6 +522,10 @@ pub struct DeployArgs {
     /// Add to a specific deployment (otherwise active deployment)
     #[arg(long)]
     pub deployment_id: Option<String>,
+
+    /// Atomically replace the entire device state with this file
+    #[arg(long)]
+    pub replace_all: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -973,6 +1097,9 @@ pub async fn cli() -> anyhow::Result<()> {
 }
 
 async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
+    use device::deploy as dp;
+    use m87_shared::deploy_spec::Lifecycle;
+
     let device = cmd.device;
 
     match cmd.command {
@@ -1066,23 +1193,25 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
         },
 
         DeviceCommand::Deploy(args) => {
-            let _ = device::deploy::deploy_file(
-                &device,
-                args.file,
-                args.r#type,
-                args.name,
-                args.deployment_id,
-            )
-            .await?;
-
-            tracing::info!("Added job spec to deployment");
+            if args.replace_all {
+                dp::deploy_file_replace_all(&device, args.file).await?;
+                tracing::info!("Replaced entire deployment state");
+            } else {
+                dp::deploy_file(
+                    &device,
+                    args.file,
+                    args.r#type,
+                    args.name,
+                    args.deployment_id,
+                )
+                .await?;
+                tracing::info!("Deployed unit to device");
+            }
             Ok(())
         }
 
         DeviceCommand::Undeploy(args) => {
-            let _ = device::deploy::undeploy_file(&device, args.job_id.clone(), args.deployment_id)
-                .await?;
-
+            dp::undeploy_file(&device, args.job_id.clone(), args.deployment_id).await?;
             tracing::info!("Removed {} from deployment", args.job_id);
             Ok(())
         }
@@ -1215,9 +1344,6 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             }
 
             DeploymentCommand::Update(args) => {
-                // Validate intent: require at least one operation flag
-                //
-
                 let deployment = device::deploy::deployment_update(&device, args).await?;
                 tracing::info!(
                     "Successfully updated deployment. New ID {}",
@@ -1227,5 +1353,103 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
                 Ok(())
             }
         },
+
+        // ── Service lifecycle ──────────────────────────────────────────────
+        DeviceCommand::Service(cmd) => match cmd {
+            ServiceCommand::Start { id } => {
+                dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
+                tracing::info!("Start requested for service '{id}'");
+                Ok(())
+            }
+            ServiceCommand::Stop { id, force: _ } => {
+                dp::send_lifecycle(&device, &id, Lifecycle::Stopped).await?;
+                tracing::info!("Stop requested for service '{id}'");
+                Ok(())
+            }
+            ServiceCommand::Pause { id } => {
+                dp::send_lifecycle(&device, &id, Lifecycle::Paused).await?;
+                tracing::info!("Pause requested for service '{id}'");
+                Ok(())
+            }
+            ServiceCommand::Resume { id } => {
+                dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
+                tracing::info!("Resume requested for service '{id}'");
+                Ok(())
+            }
+            ServiceCommand::Restart { id, force: _ } => {
+                dp::send_lifecycle(&device, &id, Lifecycle::Stopped).await?;
+                dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
+                tracing::info!("Restart requested for service '{id}'");
+                Ok(())
+            }
+            ServiceCommand::List => {
+                let rev = dp::get_active_revision(&device).await?;
+                tui::deploy::print_services_list(&rev);
+                Ok(())
+            }
+        },
+
+        // ── Observer lifecycle ─────────────────────────────────────────────
+        DeviceCommand::Observer(cmd) => match cmd {
+            ObserverCommand::Pause { id } => {
+                dp::send_lifecycle(&device, &id, Lifecycle::Paused).await?;
+                tracing::info!("Pause requested for observer '{id}'");
+                Ok(())
+            }
+            ObserverCommand::Resume { id } => {
+                dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
+                tracing::info!("Resume requested for observer '{id}'");
+                Ok(())
+            }
+            ObserverCommand::List => {
+                let rev = dp::get_active_revision(&device).await?;
+                tui::deploy::print_observers_list(&rev);
+                Ok(())
+            }
+        },
+
+        // ── Job commands ───────────────────────────────────────────────────
+        DeviceCommand::Job(cmd) => match cmd {
+            JobCommand::Trigger { id, env } => {
+                use std::collections::BTreeMap;
+                let env_overrides: BTreeMap<String, String> = env.into_iter().collect();
+                let run = dp::trigger_job(&device, &id, env_overrides).await?;
+                tracing::info!("Triggered job '{}' → run id: {}", id, run.run_id);
+                tui::deploy::print_job_run(&run);
+                Ok(())
+            }
+            JobCommand::List { job } => {
+                let runs = dp::list_job_runs(&device, job.as_deref()).await?;
+                tui::deploy::print_job_run_list(&runs);
+                Ok(())
+            }
+            JobCommand::Status { run_id } => {
+                let run = dp::get_job_run(&device, &run_id).await?;
+                tui::deploy::print_job_run(&run);
+                Ok(())
+            }
+            JobCommand::Defs => {
+                let rev = dp::get_active_revision(&device).await?;
+                tui::deploy::print_job_defs_list(&rev);
+                Ok(())
+            }
+        },
+
+        // ── Rollback ───────────────────────────────────────────────────────
+        DeviceCommand::Rollback { list, to } => {
+            if list {
+                let revisions = dp::get_deployments(&device).await?;
+                tui::deploy::print_revision_list_short(&revisions);
+                Ok(())
+            } else if let Some(rev_id) = to {
+                dp::deployment_active_set(&device, rev_id.clone()).await?;
+                tracing::info!("Rolled back to revision {rev_id}");
+                Ok(())
+            } else {
+                dp::rollback_device(&device).await?;
+                tracing::info!("Rolled back to previous revision");
+                Ok(())
+            }
+        }
     }
 }

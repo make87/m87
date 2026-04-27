@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use m87_shared::deploy_spec::{
-    CreateDeployRevisionBody, DeployReport, DeploymentRevision, DeploymentStatusSnapshot,
-    UpdateDeployRevisionBody,
+    CreateDeployRevisionBody, DeployReport, DeploymentRevision, DeploymentStatusSnapshot, JobRun,
+    Lifecycle, LifecycleUpdate, TriggerJobBody, UpdateDeployRevisionBody,
 };
 use m87_shared::device::{AddDeviceAccessBody, AuditLog, DeviceStatus, UpdateDeviceBody};
 use m87_shared::org::{
@@ -502,6 +502,120 @@ pub async fn get_device_revision_snapshot(
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
+        Err(e) => Err(anyhow!(e)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle updates
+// ---------------------------------------------------------------------------
+
+pub async fn send_lifecycle_update(
+    api_url: &str,
+    token: &str,
+    trust_invalid_server_cert: bool,
+    device_id: &str,
+    unit_id: &str,
+    lifecycle: Lifecycle,
+) -> Result<()> {
+    let url = format!(
+        "{}/device/{}/units/{}/lifecycle",
+        api_url, device_id, unit_id
+    );
+    let client = get_client(trust_invalid_server_cert)?;
+    let body = serde_json::json!({ "lifecycle": lifecycle });
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
+    match res.error_for_status() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(anyhow!(e)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Job runs
+// ---------------------------------------------------------------------------
+
+pub async fn trigger_job(
+    api_url: &str,
+    token: &str,
+    trust_invalid_server_cert: bool,
+    device_id: &str,
+    revision_id: &str,
+    job_id: &str,
+    body: TriggerJobBody,
+) -> Result<JobRun> {
+    let url = format!(
+        "{}/device/{}/revisions/{}/jobs/{}/trigger",
+        api_url, device_id, revision_id, job_id
+    );
+    let client = get_client(trust_invalid_server_cert)?;
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?;
+    match res.error_for_status() {
+        Ok(r) => Ok(r.json().await?),
+        Err(e) => Err(anyhow!(e)),
+    }
+}
+
+pub async fn list_job_runs(
+    api_url: &str,
+    token: &str,
+    trust_invalid_server_cert: bool,
+    device_id: &str,
+    job_id: Option<&str>,
+) -> Result<Vec<JobRun>> {
+    let mut url = format!("{}/device/{}/job-runs", api_url, device_id);
+    if let Some(id) = job_id {
+        url = format!("{}?job_id={}", url, id);
+    }
+    let client = get_client(trust_invalid_server_cert)?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
+    match res.error_for_status() {
+        Ok(r) => Ok(r.json().await?),
+        Err(e) => Err(anyhow!(e)),
+    }
+}
+
+pub async fn get_job_run(
+    api_url: &str,
+    token: &str,
+    trust_invalid_server_cert: bool,
+    device_id: &str,
+    run_id: &str,
+) -> Result<JobRun> {
+    let url = format!("{}/device/{}/job-runs/{}", api_url, device_id, run_id);
+    let client = get_client(trust_invalid_server_cert)?;
+    let res = client.get(&url).bearer_auth(token).send().await?;
+    match res.error_for_status() {
+        Ok(r) => Ok(r.json().await?),
+        Err(e) => Err(anyhow!(e)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rollback
+// ---------------------------------------------------------------------------
+
+pub async fn rollback_device(
+    api_url: &str,
+    token: &str,
+    trust_invalid_server_cert: bool,
+    device_id: &str,
+) -> Result<()> {
+    let url = format!("{}/device/{}/rollback", api_url, device_id);
+    let client = get_client(trust_invalid_server_cert)?;
+    let res = client.post(&url).bearer_auth(token).send().await?;
+    match res.error_for_status() {
+        Ok(_) => Ok(()),
         Err(e) => Err(anyhow!(e)),
     }
 }

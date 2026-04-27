@@ -3,11 +3,13 @@ use std::fmt::Display;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use m87_shared::deploy_spec::{DeployReportKind, DeploymentRevision, build_instruction_hash};
+use m87_shared::deploy_spec::{
+    DeployReportKind, DeploymentRevision, LifecycleUpdate, build_instruction_hash,
+};
 use m87_shared::device::DeviceStatus;
 use m87_shared::roles::Role;
 use m87_shared::users::User;
-use mongodb::bson::{DateTime, Document, doc, oid::ObjectId};
+use mongodb::bson::{DateTime, Document, doc, oid::ObjectId, to_bson};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +21,9 @@ use tokio_stream::StreamExt;
 
 use crate::config::AppConfig;
 use crate::models::audit_logs::AuditLogDoc;
-use crate::models::deploy_spec::{CreateDeployReportBody, DeployReportDoc, DeployRevisionDoc};
+use crate::models::deploy_spec::{
+    CreateDeployReportBody, DeployReportDoc, DeployRevisionDoc, JobRunDoc,
+};
 use crate::models::org;
 use crate::models::roles::{CreateRoleBinding, RoleDoc};
 use crate::models::user::UserDoc;
@@ -124,6 +128,8 @@ pub struct DeviceDoc {
     pub last_config_hash: String,
     #[serde(default)]
     pub last_deployment_hash: String,
+    #[serde(default)]
+    pub pending_lifecycle_updates: Vec<LifecycleUpdate>,
 }
 
 impl DeviceDoc {
@@ -167,6 +173,7 @@ impl DeviceDoc {
             api_key_id: create_body.api_key_id,
             last_config_hash: "".to_string(),
             last_deployment_hash: "".to_string(),
+            pending_lifecycle_updates: vec![],
         };
         let _ = db.devices().insert_one(node.clone()).await?;
         Ok(())
@@ -183,6 +190,21 @@ impl DeviceDoc {
                 doc! { "$set": { "last_deployment_hash": "" } },
             )
             .await?;
+        Ok(())
+    }
+
+    pub async fn push_lifecycle_update(
+        db: &Arc<Mongo>,
+        device_oid: &ObjectId,
+        update: LifecycleUpdate,
+    ) -> ServerResult<()> {
+        db.devices()
+            .update_one(
+                doc! { "_id": device_oid },
+                doc! { "$push": { "pending_lifecycle_updates": to_bson(&update).map_err(|e| ServerError::internal_error(&e.to_string()))? } },
+            )
+            .await?;
+        DeviceDoc::invalidate_deployment_hash(db, device_oid).await?;
         Ok(())
     }
 
@@ -266,44 +288,57 @@ impl DeviceDoc {
             }
             ack_report_hash = Some(deploy_report.get_hash().to_string());
 
-            if let DeployReportKind::RollbackReport(rollback) = deploy_report {
-                // change active deplotment to rollback.new_revision_id
-                let device_oid = self.id.clone().unwrap();
-                let out = DeployRevisionDoc::get_active_device_deployment(&db, device_oid.clone())
-                    .await?;
+            match deploy_report {
+                DeployReportKind::RollbackReport(rollback) => {
+                    // change active deployment to rollback.new_revision_id
+                    let device_oid = self.id.clone().unwrap();
+                    let out =
+                        DeployRevisionDoc::get_active_device_deployment(&db, device_oid.clone())
+                            .await?;
 
-                if let Some(new_id) = &rollback.new_revision_id {
-                    let _ = db
-                        .deploy_revisions()
-                        .update_one(
-                            doc! { "revision.id": new_id, "device_id": &device_oid },
-                            doc! { "$set": { "active": true } },
-                        )
-                        .await?;
-                }
-
-                match out {
-                    Some(doc) => {
-                        let filter = doc! { "revision.id": &doc.id, "device_id": &device_oid };
-                        let update_doc = doc! { "active": false };
-                        let _ = db.deploy_revisions().update_one(filter, update_doc).await?;
+                    if let Some(new_id) = &rollback.new_revision_id {
+                        let _ = db
+                            .deploy_revisions()
+                            .update_one(
+                                doc! { "revision.id": new_id, "device_id": &device_oid },
+                                doc! { "$set": { "active": true } },
+                            )
+                            .await?;
                     }
-                    None => {}
-                };
 
-                let _ = AuditLogDoc::add(
-                    &db,
-                    &claims,
-                    &config,
-                    &format!(
-                        "Rolled back deployment to {} for device {}",
-                        &rollback.new_revision_id.unwrap_or("None".to_string()),
-                        &device_oid
-                    ),
-                    "",
-                    Some(device_oid.clone()),
-                )
-                .await;
+                    match out {
+                        Some(doc) => {
+                            let filter = doc! { "revision.id": &doc.id, "device_id": &device_oid };
+                            let update_doc = doc! { "active": false };
+                            let _ = db.deploy_revisions().update_one(filter, update_doc).await?;
+                        }
+                        None => {}
+                    };
+
+                    let _ = AuditLogDoc::add(
+                        &db,
+                        &claims,
+                        &config,
+                        &format!(
+                            "Rolled back deployment to {} for device {}",
+                            &rollback.new_revision_id.unwrap_or("None".to_string()),
+                            &device_oid
+                        ),
+                        "",
+                        Some(device_oid.clone()),
+                    )
+                    .await;
+                }
+                DeployReportKind::JobRunReport(report) => {
+                    let _ = JobRunDoc::update_status(
+                        db,
+                        &report.run_id,
+                        report.status.clone(),
+                        report.error.clone(),
+                    )
+                    .await;
+                }
+                _ => {}
             }
         }
 
@@ -311,6 +346,26 @@ impl DeviceDoc {
             Some(hash) => Some(vec![hash]),
             None => None,
         };
+
+        // Load and clear pending lifecycle updates
+        let pending_updates = self.pending_lifecycle_updates.clone();
+        if !pending_updates.is_empty() {
+            let _ = db
+                .devices()
+                .update_one(
+                    doc! { "_id": self.id.unwrap() },
+                    doc! { "$set": { "pending_lifecycle_updates": [] } },
+                )
+                .await;
+        }
+
+        // Load pending job runs and mark them as running
+        let pending_job_runs = JobRunDoc::get_pending_for_device(db, self.id.unwrap())
+            .await
+            .unwrap_or_default();
+        for run in &pending_job_runs {
+            let _ = JobRunDoc::mark_running(db, &run.run_id).await;
+        }
 
         let target_hash =
             build_instruction_hash(&self.last_deployment_hash, &self.last_config_hash);
@@ -321,8 +376,8 @@ impl DeviceDoc {
                 instruction_hash: target_hash.clone(),
                 target_revision: None,
                 received_report_hashes: ack_hash_list,
-                lifecycle_updates: vec![],
-                pending_job_runs: vec![],
+                lifecycle_updates: pending_updates.clone(),
+                pending_job_runs: pending_job_runs.clone(),
             });
         }
 
@@ -360,8 +415,8 @@ impl DeviceDoc {
             instruction_hash: build_instruction_hash(&new_deployment_hash, &config_hash),
             target_revision,
             received_report_hashes: ack_hash_list,
-            lifecycle_updates: vec![],
-            pending_job_runs: vec![],
+            lifecycle_updates: pending_updates,
+            pending_job_runs,
         };
         Ok(resp)
     }
