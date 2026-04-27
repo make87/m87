@@ -1,5 +1,5 @@
 use m87_shared::deploy_spec::{
-    DeploymentRevision, DeploymentStatusSnapshot, Outcome, RunStatus, StepState,
+    DeploymentRevision, DeploymentStatusSnapshot, Outcome, RunStatus, StepState, UnitKind,
 };
 
 use crate::tui::helper;
@@ -32,20 +32,51 @@ pub fn print_revision_verbose(rev: &DeploymentRevision) {
 }
 
 pub fn print_revision_short_detail(rev: &DeploymentRevision) {
-    // print header
-    println!(
-        "{:<36} {:>8} {:>8} {:>8} {:>8}",
-        "JOB ID", "ENABLED", "STEPS", "OBSERVE", "FILES"
-    );
-    for job in &rev.jobs {
+    if !rev.services.is_empty() {
         println!(
-            "  {:<36} {:>8} {:>8} {:>8} {:>8}",
-            job.id,
-            job.enabled,
-            job.steps.len(),
-            job.observe.is_some(),
-            job.files.len()
+            "{:<36} {:>8} {:>8} {:>8} {:>8}",
+            "SERVICE ID", "LIFECYCLE", "STEPS", "OBSERVE", "FILES"
         );
+        for svc in &rev.services {
+            println!(
+                "  {:<36} {:>8} {:>8} {:>8} {:>8}",
+                svc.id,
+                svc.lifecycle,
+                svc.steps.len(),
+                svc.observe.is_some(),
+                svc.files.len()
+            );
+        }
+    }
+    if !rev.observers.is_empty() {
+        println!(
+            "{:<36} {:>8} {:>8} {:>8}",
+            "OBSERVER ID", "LIFECYCLE", "OBSERVE", "FILES"
+        );
+        for obs in &rev.observers {
+            println!(
+                "  {:<36} {:>8} {:>8} {:>8}",
+                obs.id,
+                obs.lifecycle,
+                obs.observe.is_some(),
+                obs.files.len()
+            );
+        }
+    }
+    if !rev.jobs.is_empty() {
+        println!(
+            "{:<36} {:>8} {:>8} {:>8}",
+            "JOB ID", "LIFECYCLE", "STEPS", "FILES"
+        );
+        for job in &rev.jobs {
+            println!(
+                "  {:<36} {:>8} {:>8} {:>8}",
+                job.id,
+                job.lifecycle,
+                job.steps.len(),
+                job.files.len()
+            );
+        }
     }
 }
 
@@ -151,6 +182,11 @@ pub fn print_deployment_status_snapshot(
             helper::colorize(opts.use_color, "✗ disabled", helper::AnsiColor::Red)
         };
 
+        let kind_txt = match run.unit_kind {
+            UnitKind::Service => "service",
+            UnitKind::Observer => "observer",
+            UnitKind::Job => "job",
+        };
         let outcome_txt = match run.outcome {
             Outcome::Success => "✓ success",
             Outcome::Failed => "✗ failure",
@@ -168,8 +204,9 @@ pub fn print_deployment_status_snapshot(
         let (steps_ok, steps_total, max_attempts, undone_steps) = step_stats_from_snapshot(run);
 
         let mut run_info = format!(
-            "{}  {}   last update {}   steps {}/{}  max attempts {}  undone {}",
+            "{}  [{}]  {}   last update {}   steps {}/{}  max attempts {}  undone {}",
             helper::bold(&run.run_id),
+            kind_txt,
             enabled,
             last,
             steps_ok,

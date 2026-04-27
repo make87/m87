@@ -110,7 +110,8 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                         }
                         if let Some(target_units_config) = resp.target_revision {
                             tracing::info!("Received new target deployment");
-                            let res = manager_clone.set_desired_units(target_units_config).await;
+                            let lifecycle_updates = resp.lifecycle_updates.clone();
+                            let res = manager_clone.set_desired_units(target_units_config, lifecycle_updates).await;
                             if let Err(e) = res {
                                 tracing::error!("Failed to set target deployment: {}", e);
                                 continue;

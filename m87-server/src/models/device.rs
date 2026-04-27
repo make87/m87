@@ -250,7 +250,10 @@ impl DeviceDoc {
         if let Some(deploy_report) = payload.deploy_report {
             let body = CreateDeployReportBody {
                 device_id: self.id.clone().unwrap(),
-                revision_id: deploy_report.get_revision_id().to_string(),
+                revision_id: deploy_report
+                    .get_revision_id()
+                    .unwrap_or_default()
+                    .to_string(),
                 kind: deploy_report.clone(),
                 expires_at: Some(DateTime::from_system_time(
                     SystemTime::now()
@@ -318,6 +321,8 @@ impl DeviceDoc {
                 instruction_hash: target_hash.clone(),
                 target_revision: None,
                 received_report_hashes: ack_hash_list,
+                lifecycle_updates: vec![],
+                pending_job_runs: vec![],
             });
         }
 
@@ -355,6 +360,8 @@ impl DeviceDoc {
             instruction_hash: build_instruction_hash(&new_deployment_hash, &config_hash),
             target_revision,
             received_report_hashes: ack_hash_list,
+            lifecycle_updates: vec![],
+            pending_job_runs: vec![],
         };
         Ok(resp)
     }

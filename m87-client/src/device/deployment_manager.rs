@@ -1,15 +1,16 @@
 use anyhow::{Context, Result, anyhow};
 use m87_shared::deploy_spec::{
-    DeployReportKind, DeploymentRevision, DeploymentRevisionReport, ObserveHooks, OnFailure,
-    Outcome, RetrySpec, RollbackPolicy, RollbackReport, RunReport, RunSpec, RunState, RunType,
-    Step, StepReport, Undo, UndoMode, WorkdirMode,
+    DeployReportKind, DeploymentRevision, DeploymentRevisionReport, JobDef, JobRun, JobRunReport,
+    JobRunStatus, Lifecycle, LifecycleUpdate, ObserveHooks, OnFailure, Outcome, RestartPolicy,
+    RollbackPolicy, RollbackReport, RunReport, RunState, ServiceSpec, Step, StepReport, UndoMode,
+    WorkdirMode,
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Display,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 use tokio::{fs, io::AsyncWriteExt, sync::RwLock, time::sleep};
 
@@ -20,13 +21,18 @@ use crate::{
         shutdown::SHUTDOWN,
     },
 };
-const MAX_TAIL_BYTES: usize = 4 * 1024; // 4KB
+
+const MAX_TAIL_BYTES: usize = 4 * 1024; // 4 KB
+
+// ---------------------------------------------------------------------------
+// Directory helpers
+// ---------------------------------------------------------------------------
 
 fn data_dir(dir_path: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = dir_path {
         return Ok(path);
     }
-    Ok(dirs::data_dir().context("data_dir")?.join("m87"))
+    Ok(dirs::data_dir().context("data_dir missing")?.join("m87"))
 }
 
 fn events_dir(dir_path: Option<PathBuf>) -> Result<PathBuf> {
@@ -36,6 +42,7 @@ fn events_dir(dir_path: Option<PathBuf>) -> Result<PathBuf> {
 fn pending_dir(dir_path: Option<PathBuf>) -> Result<PathBuf> {
     Ok(events_dir(dir_path)?.join("pending"))
 }
+
 fn inflight_dir(dir_path: Option<PathBuf>) -> Result<PathBuf> {
     Ok(events_dir(dir_path)?.join("inflight"))
 }
@@ -46,13 +53,31 @@ async fn ensure_dirs(dir_path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// LocalRunState – per-unit persistent state stored in the workdir
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LocalRunState {
+    /// Hash of the `ServiceSpec` whose startup steps last ran successfully.
+    /// `None`  → startup has not yet completed for the current spec.
+    /// `Some(h)` → startup ran successfully for spec with hash `h`.
+    #[serde(default)]
+    pub last_run_hash: Option<String>,
+
+    /// How many times startup has failed consecutively (drives backoff).
+    #[serde(default)]
+    pub startup_failures: u32,
+
+    /// Timestamp (ms since epoch) of the last startup attempt.
+    #[serde(default)]
+    pub last_attempt_ms: Option<u64>,
+
+    // Observe tracking -------------------------------------------------------
+    #[serde(default)]
     pub consecutive_health_failures: u32,
     #[serde(default)]
     pub consecutive_alive_failures: u32,
-    #[serde(default)]
-    pub ran_successful: bool,
     #[serde(default)]
     pub reported_health_once: bool,
     #[serde(default)]
@@ -61,7 +86,62 @@ pub struct LocalRunState {
     pub last_health: bool,
     #[serde(default)]
     pub last_alive: bool,
+
+    /// Runtime lifecycle override sent from the server via heartbeat.
+    #[serde(default)]
+    pub lifecycle: Lifecycle,
 }
+
+impl LocalRunState {
+    fn state_file_path(work_dir: &Path) -> PathBuf {
+        work_dir.join("run_state.json")
+    }
+
+    pub fn load(work_dir: &Path) -> Result<Self> {
+        let path = Self::state_file_path(work_dir);
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let contents = std::fs::read_to_string(&path)
+            .with_context(|| format!("read run_state.json in {}", work_dir.display()))?;
+        serde_json::from_str(&contents)
+            .with_context(|| format!("parse run_state.json in {}", work_dir.display()))
+    }
+
+    pub fn save(work_dir: &Path, st: &Self) -> Result<()> {
+        let path = Self::state_file_path(work_dir);
+        let contents = serde_json::to_string_pretty(st).context("serialize LocalRunState")?;
+        std::fs::write(&path, contents)
+            .with_context(|| format!("write run_state.json in {}", work_dir.display()))
+    }
+
+    pub fn delete(work_dir: &Path) -> Result<()> {
+        let path = Self::state_file_path(work_dir);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("delete run_state.json in {}", work_dir.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Clear `last_run_hash` so the next reconcile re-runs startup steps.
+    pub fn clear_run_hash(work_dir: &Path) -> Result<()> {
+        let mut st = Self::load(work_dir)?;
+        st.last_run_hash = None;
+        Self::save(work_dir, &st)
+    }
+
+    fn failures_mut(&mut self, kind: ObserveKind) -> &mut u32 {
+        match kind {
+            ObserveKind::Liveness => &mut self.consecutive_alive_failures,
+            ObserveKind::Health => &mut self.consecutive_health_failures,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ObserveKind helpers
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
 enum ObserveKind {
@@ -98,19 +178,12 @@ impl ObserveKind {
     }
 
     fn decide_on_success(&self, st: &LocalRunState) -> bool {
-        // return true;
         match self {
             ObserveKind::Liveness => {
-                st.last_alive == false
-                    || st.last_health == false
-                    || !st.reported_alive_once
-                    || st.consecutive_alive_failures > 0
+                !st.reported_alive_once || !st.last_alive || st.consecutive_alive_failures > 0
             }
             ObserveKind::Health => {
-                st.last_health != true
-                    || st.last_alive != true
-                    || !st.reported_health_once
-                    || st.consecutive_health_failures > 0
+                !st.reported_health_once || !st.last_health || st.consecutive_health_failures > 0
             }
         }
     }
@@ -122,29 +195,16 @@ impl ObserveKind {
         consecutive: u32,
     ) -> ObserveDecision {
         let fails_after = hooks.fails_after.unwrap_or(1);
-        let is_failure = consecutive > 0 && (consecutive % fails_after == 0);
-        let needs_send = is_failure;
-        // let needs_send = match self {
-        //     ObserveKind::Liveness => {
-        //         (st.last_alive == false || !st.reported_alive_once) && is_failure
-        //     }
-        //     ObserveKind::Health => {
-        //         (st.last_health == true || !st.reported_health_once) && is_failure
-        //     }
-        // };
-        // consecutive here is consecutive / fails after since we care about consecutive crashes we consider consecutive failures
-        // round down
-
-        let consecutive = if fails_after == 0 {
+        let is_failure = consecutive > 0 && fails_after > 0 && (consecutive % fails_after == 0);
+        let consecutive_out = if fails_after == 0 {
             0
         } else {
             consecutive / fails_after
         };
-
         ObserveDecision {
             is_failure,
-            needs_send,
-            consecutive,
+            needs_send: is_failure,
+            consecutive: consecutive_out,
         }
     }
 
@@ -155,225 +215,129 @@ impl ObserveKind {
         ok: bool,
         log_tail: Option<String>,
     ) -> RunState {
-        match self {
-            ObserveKind::Liveness => {
-                if ok {
-                    RunState {
-                        run_id: run_id.to_string(),
-                        revision_id: revision_id.to_string(),
-                        healthy: None,
-                        alive: Some(true),
-                        report_time: now_ms_u64(),
-                        log_tail: None,
-                    }
-                } else {
-                    RunState {
-                        run_id: run_id.to_string(),
-                        revision_id: revision_id.to_string(),
-                        healthy: Some(false),
-                        alive: Some(false),
-                        report_time: now_ms_u64(),
-                        log_tail,
-                    }
-                }
-            }
-            ObserveKind::Health => {
-                if ok {
-                    RunState {
-                        run_id: run_id.to_string(),
-                        revision_id: revision_id.to_string(),
-                        healthy: Some(true),
-                        alive: Some(true),
-                        report_time: now_ms_u64(),
-                        log_tail: None,
-                    }
-                } else {
-                    RunState {
-                        run_id: run_id.to_string(),
-                        revision_id: revision_id.to_string(),
-                        healthy: Some(false),
-                        alive: None,
-                        report_time: now_ms_u64(),
-                        log_tail,
-                    }
-                }
-            }
+        let t = now_ms_u64();
+        match (self, ok) {
+            (ObserveKind::Liveness, true) => RunState {
+                run_id: run_id.to_string(),
+                revision_id: revision_id.to_string(),
+                healthy: None,
+                alive: Some(true),
+                report_time: t,
+                log_tail: None,
+            },
+            (ObserveKind::Liveness, false) => RunState {
+                run_id: run_id.to_string(),
+                revision_id: revision_id.to_string(),
+                healthy: Some(false),
+                alive: Some(false),
+                report_time: t,
+                log_tail,
+            },
+            (ObserveKind::Health, true) => RunState {
+                run_id: run_id.to_string(),
+                revision_id: revision_id.to_string(),
+                healthy: Some(true),
+                alive: Some(true),
+                report_time: t,
+                log_tail: None,
+            },
+            (ObserveKind::Health, false) => RunState {
+                run_id: run_id.to_string(),
+                revision_id: revision_id.to_string(),
+                healthy: Some(false),
+                alive: None,
+                report_time: t,
+                log_tail,
+            },
         }
     }
 }
 
-impl LocalRunState {
-    fn state_file_path(work_dir: &Path) -> Result<PathBuf> {
-        Ok(work_dir.join("run_state.json"))
-    }
+// ---------------------------------------------------------------------------
+// RevisionStore – current + previous revision on disk
+// ---------------------------------------------------------------------------
 
-    fn load(work_dir: &Path) -> Result<LocalRunState> {
-        let path = LocalRunState::state_file_path(work_dir)?;
-
-        if !path.exists() {
-            return Ok(LocalRunState::default());
-        }
-
-        let display_name = work_dir.display();
-        let contents = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read state file for dir {}", &display_name))?;
-
-        let state: LocalRunState = serde_json::from_str(&contents)
-            .with_context(|| format!("Failed to parse state file for dir {}", &display_name))?;
-
-        Ok(state)
-    }
-
-    fn save(work_dir: &Path, st: &LocalRunState) -> Result<()> {
-        let path = LocalRunState::state_file_path(work_dir)?;
-
-        let contents =
-            serde_json::to_string_pretty(st).context("Failed to serialize unit state")?;
-        let display_name = work_dir.display();
-
-        std::fs::write(&path, contents)
-            .with_context(|| format!("Failed to write state file for dir {}", &display_name))?;
-
-        Ok(())
-    }
-
-    fn delete(work_dir: &Path) -> Result<()> {
-        let path = LocalRunState::state_file_path(work_dir)?;
-
-        let display_name = work_dir.display();
-        std::fs::remove_file(path)
-            .with_context(|| format!("Failed to delete state file for dir {}", &display_name))?;
-
-        Ok(())
-    }
-
-    fn failures_mut(&mut self, kind: ObserveKind) -> &mut u32 {
-        match kind {
-            ObserveKind::Liveness => &mut self.consecutive_alive_failures,
-            ObserveKind::Health => &mut self.consecutive_health_failures,
-        }
-    }
-}
-
-pub struct RevisionStore {}
+pub struct RevisionStore;
 
 impl RevisionStore {
     fn desired_path(dir_path: Option<PathBuf>) -> Result<PathBuf> {
-        let config_dir = data_dir(dir_path)?;
-        let desired_path = config_dir.join("desired_units.json");
-        Ok(desired_path)
+        Ok(data_dir(dir_path)?.join("desired_units.json"))
     }
 
     fn previous_path(dir_path: Option<PathBuf>) -> Result<PathBuf> {
-        let config_dir = data_dir(dir_path)?;
-        let previous_path = config_dir.join("previous_units.json");
-        Ok(previous_path)
+        Ok(data_dir(dir_path)?.join("previous_units.json"))
     }
 
-    // pub fn get_all() -> Result<HashMap<String, RunSpec>> {
-    //     let desired_path = RevisionStore::desired_path()?;
-
-    //     if !desired_path.exists() {
-    //         return Ok(HashMap::new());
-    //     }
-
-    //     let contents =
-    //         std::fs::read_to_string(&desired_path).context("Failed to read desired units file")?;
-    //     let config: DeploymentRevision =
-    //         serde_json::from_str(&contents).context("Failed to parse desired units file")?;
-
-    //     Ok(config
-    //         .units
-    //         .iter()
-    //         .map(|u| (u.get_id(), u.clone()))
-    //         .collect())
-    // }
-
-    /// Get the current rollback policy
     pub fn get_rollback_policy(dir_path: Option<PathBuf>) -> Result<Option<RollbackPolicy>> {
-        let desired_path = RevisionStore::desired_path(dir_path)?;
-        if !desired_path.exists() {
-            return Ok(None);
+        match Self::get_desired_config(dir_path)? {
+            Some(c) => Ok(c.rollback),
+            None => Ok(None),
         }
-
-        let contents =
-            std::fs::read_to_string(&desired_path).context("Failed to read desired units file")?;
-        let config: DeploymentRevision =
-            serde_json::from_str(&contents).context("Failed to parse desired units file")?;
-
-        Ok(config.rollback)
     }
 
-    /// Get entire previous configuration for rollback
     pub fn get_previous_config(dir_path: Option<PathBuf>) -> Result<Option<DeploymentRevision>> {
-        let previous_path = RevisionStore::previous_path(dir_path)?;
-        if !previous_path.exists() {
+        let path = Self::previous_path(dir_path)?;
+        if !path.exists() {
             return Ok(None);
         }
-
-        let contents = std::fs::read_to_string(&previous_path)
-            .context("Failed to read previous units file")?;
-        let config: DeploymentRevision =
-            serde_json::from_str(&contents).context("Failed to parse previous units file")?;
-
-        Ok(Some(config))
+        let s = std::fs::read_to_string(&path).context("read previous_units.json")?;
+        let c: DeploymentRevision =
+            serde_json::from_str(&s).context("parse previous_units.json")?;
+        Ok(Some(c))
     }
 
     pub fn get_desired_config(dir_path: Option<PathBuf>) -> Result<Option<DeploymentRevision>> {
-        let desired_path = RevisionStore::desired_path(dir_path)?;
-        if !desired_path.exists() {
+        let path = Self::desired_path(dir_path)?;
+        if !path.exists() {
             return Ok(None);
         }
-
-        let contents =
-            std::fs::read_to_string(&desired_path).context("Failed to read desired units file")?;
-        let config: DeploymentRevision =
-            serde_json::from_str(&contents).context("Failed to parse desired units file")?;
-
-        Ok(Some(config))
+        let s = std::fs::read_to_string(&path).context("read desired_units.json")?;
+        let c: DeploymentRevision = serde_json::from_str(&s).context("parse desired_units.json")?;
+        Ok(Some(c))
     }
 
-    /// Set new desired configuration, backing up current to previous
+    /// Write a new desired config, backing up the current one to previous.
     pub fn set_config(config: &DeploymentRevision, dir_path: Option<PathBuf>) -> Result<()> {
-        let previous_path = RevisionStore::previous_path(dir_path.clone())?;
-        let desired_path = RevisionStore::desired_path(dir_path)?;
-        if desired_path.exists() {
-            std::fs::copy(&desired_path, &previous_path)
-                .context("Failed to backup previous units")?;
+        let desired = Self::desired_path(dir_path.clone())?;
+        let previous = Self::previous_path(dir_path)?;
+        if desired.exists() {
+            std::fs::copy(&desired, &previous).context("backup desired → previous")?;
         }
-
-        // Write new desired config
-        let contents = serde_json::to_string_pretty(&config)
-            .context("Failed to serialize desired units config")?;
-        std::fs::write(&desired_path, contents).context("Failed to write desired units file")?;
-
-        Ok(())
+        let s = serde_json::to_string_pretty(config).context("serialize DeploymentRevision")?;
+        std::fs::write(&desired, s).context("write desired_units.json")
     }
 }
+
+// ---------------------------------------------------------------------------
+// DeploymentManager
+// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct DeploymentManager {
     root_dir: PathBuf,
-    dirty: Arc<RwLock<HashSet<String>>>,
+    /// Hashes of `ServiceSpec` items that need to be reconciled.
+    dirty_services: Arc<RwLock<HashSet<String>>>,
+    /// Hashes of observer `ServiceSpec` items that need scheduling updates.
+    dirty_observers: Arc<RwLock<HashSet<String>>>,
+    /// Queue of `JobRun` items waiting to be executed.
+    pending_job_runs: Arc<RwLock<VecDeque<JobRun>>>,
     log_manager: LogManager,
     rollback_policy: Arc<RwLock<Option<RollbackPolicy>>>,
     deployment_started_at: Arc<RwLock<Option<Instant>>>,
 }
 
 impl DeploymentManager {
-    /// Create a new UnitManager with a custom state store.
     pub async fn new(data_dir_path: Option<PathBuf>) -> Result<Self> {
-        let _ = ensure_dirs(data_dir_path.clone()).await?;
-        let _ = recover_inflight(data_dir_path.clone()).await?;
+        ensure_dirs(data_dir_path.clone()).await?;
+        recover_inflight(data_dir_path.clone()).await?;
         let root_dir = data_dir(data_dir_path.clone())?;
-
         let log_manager = LogManager::start();
-        // Load rollback policy from disk if exists
         let rollback_policy = RevisionStore::get_rollback_policy(data_dir_path).unwrap_or(None);
-
         Ok(Self {
             root_dir,
-            dirty: Arc::new(RwLock::new(HashSet::new())),
+            dirty_services: Arc::new(RwLock::new(HashSet::new())),
+            dirty_observers: Arc::new(RwLock::new(HashSet::new())),
+            pending_job_runs: Arc::new(RwLock::new(VecDeque::new())),
             log_manager,
             rollback_policy: Arc::new(RwLock::new(rollback_policy)),
             deployment_started_at: Arc::new(RwLock::new(None)),
@@ -381,101 +345,149 @@ impl DeploymentManager {
     }
 
     pub fn get_current_deploy_hash(data_dir_path: Option<PathBuf>) -> String {
-        match RevisionStore::get_desired_config(data_dir_path) {
-            Ok(Some(config)) => config.get_hash(),
-            _ => "".to_string(),
-        }
+        RevisionStore::get_desired_config(data_dir_path)
+            .ok()
+            .flatten()
+            .map(|c| c.get_hash())
+            .unwrap_or_default()
     }
 
-    /// Get reference to the log manager for external use (e.g., streams/logs routing)
     pub async fn start_log_follow(&self) -> Result<()> {
         if let Some(spec) = RevisionStore::get_desired_config(Some(self.root_dir.clone()))? {
-            for (_, unit) in spec.get_job_map() {
-                if let Some(observer_spec) = &unit.observe {
-                    if let Some(log_spec) = &observer_spec.logs {
-                        let workdir = self.resolve_workdir(&unit).await?;
+            for svc in spec.services.iter().chain(spec.observers.iter()) {
+                if let Some(obs) = &svc.observe {
+                    if let Some(log_spec) = &obs.logs {
+                        let wd = self
+                            .resolve_workdir_for(&svc.id, svc.workdir.as_ref())
+                            .await?;
                         self.log_manager
-                            .follow_start(unit.id, log_spec, unit.env, workdir)
+                            .follow_start(svc.id.clone(), log_spec, svc.env.clone(), wd)
                             .await;
                     }
                 }
             }
         }
-
         Ok(())
     }
 
-    pub async fn stop_log_follow(&self) -> Result<()> {
-        if let Some(spec) = RevisionStore::get_desired_config(Some(self.root_dir.clone()))? {
-            for (_, unit) in spec.get_job_map() {
-                self.log_manager.follow_stop(unit.id).await;
-            }
-        }
+    pub async fn stop_log_follow(&self, unit_id: &str) -> Result<()> {
+        self.log_manager.follow_stop(unit_id.to_string()).await;
         Ok(())
     }
 
-    /// Replace desired set (authoritative). Marks changes dirty.
-    pub async fn set_desired_units(&self, config: DeploymentRevision) -> Result<()> {
-        let old_config = RevisionStore::get_desired_config(Some(self.root_dir.clone()))?;
-        if let Some(oc) = &old_config {
-            if oc.get_hash() == config.get_hash() {
-                return Ok(());
+    // -----------------------------------------------------------------------
+    // set_desired_units – called when a new revision arrives via heartbeat
+    // -----------------------------------------------------------------------
+
+    pub async fn set_desired_units(
+        &self,
+        config: DeploymentRevision,
+        lifecycle_updates: Vec<LifecycleUpdate>,
+    ) -> Result<()> {
+        let old = RevisionStore::get_desired_config(Some(self.root_dir.clone()))?;
+
+        // Skip if nothing changed AND no lifecycle updates.
+        if lifecycle_updates.is_empty() {
+            if let Some(ref oc) = old {
+                if oc.get_hash() == config.get_hash() {
+                    return Ok(());
+                }
             }
         }
 
-        let new_map = config.get_job_map(); // keyed by hash
-        let old_desired = match &old_config {
-            Some(spec) => spec.get_job_map(), // keyed by hash
-            None => BTreeMap::new(),
-        };
+        let new_svc_map = config.get_service_map();
+        let new_obs_map = config.get_observer_map();
+
+        let old_svc_map = old
+            .as_ref()
+            .map(|c| c.get_service_map())
+            .unwrap_or_default();
+        let old_obs_map = old
+            .as_ref()
+            .map(|c| c.get_observer_map())
+            .unwrap_or_default();
+        let old_svc_by_id: HashMap<String, String> = old_svc_map
+            .iter()
+            .map(|(h, s)| (s.id.clone(), h.clone()))
+            .collect();
+        let new_svc_by_id: HashMap<String, String> = new_svc_map
+            .iter()
+            .map(|(h, s)| (s.id.clone(), h.clone()))
+            .collect();
+        let old_obs_by_id: HashMap<String, String> = old_obs_map
+            .iter()
+            .map(|(h, o)| (o.id.clone(), h.clone()))
+            .collect();
+        let new_obs_by_id: HashMap<String, String> = new_obs_map
+            .iter()
+            .map(|(h, o)| (o.id.clone(), h.clone()))
+            .collect();
 
         RevisionStore::set_config(&config, Some(self.root_dir.clone()))?;
 
-        let mut dirty = self.dirty.write().await;
+        let mut ds = self.dirty_services.write().await;
+        let mut dobs = self.dirty_observers.write().await;
 
-        // 1) Mark added hashes (new units) dirty
-        for (h, u) in &new_map {
-            if !old_desired.contains_key(h) {
-                dirty.insert(h.clone());
-                continue;
-            }
-
-            // 2) If it existed before but didn't run successfully, retry
-            let wd = self.resolve_workdir(u).await?;
-            if let Ok(st) = LocalRunState::load(&wd) {
-                if !st.ran_successful {
-                    dirty.insert(h.clone());
+        // --- Services -------------------------------------------------------
+        // Added / changed
+        for (h, svc) in &new_svc_map {
+            if !old_svc_map.contains_key(h) {
+                // Check if startup already ran for this hash.
+                let wd = self
+                    .resolve_workdir_for(&svc.id, svc.workdir.as_ref())
+                    .await?;
+                if let Ok(st) = LocalRunState::load(&wd) {
+                    if st.last_run_hash.as_deref() != Some(h) {
+                        ds.insert(h.clone());
+                    }
+                } else {
+                    ds.insert(h.clone());
                 }
-            } else {
-                dirty.insert(h.clone());
+            }
+        }
+        // Removed
+        for (old_h, _) in &old_svc_map {
+            if !new_svc_map.contains_key(old_h) {
+                ds.insert(old_h.clone());
+            }
+        }
+        // Same id, different hash (spec changed)
+        for (id, old_h) in &old_svc_by_id {
+            if let Some(new_h) = new_svc_by_id.get(id) {
+                if new_h != old_h {
+                    ds.insert(old_h.clone());
+                    ds.insert(new_h.clone());
+                }
             }
         }
 
-        // 3) Mark removed hashes dirty (so old services can be stopped)
-        for (old_hash, _old_u) in old_desired.iter() {
-            if !new_map.contains_key(old_hash) {
-                dirty.insert(old_hash.clone());
+        // --- Observers -------------------------------------------------------
+        for (h, _) in &new_obs_map {
+            if !old_obs_map.contains_key(h) {
+                dobs.insert(h.clone());
+            }
+        }
+        for (old_h, _) in &old_obs_map {
+            if !new_obs_map.contains_key(old_h) {
+                dobs.insert(old_h.clone());
+            }
+        }
+        for (id, old_h) in &old_obs_by_id {
+            if let Some(new_h) = new_obs_by_id.get(id) {
+                if new_h != old_h {
+                    dobs.insert(old_h.clone());
+                    dobs.insert(new_h.clone());
+                }
             }
         }
 
-        // 4) Mark replacements dirty on BOTH sides (same run id, different hash)
-        //    This is the key fix: ensures old version is reconciled/stopped even when id stays the same.
-        let old_by_id: HashMap<String, String> = old_desired
-            .iter()
-            .map(|(h, u)| (u.id.clone(), h.clone()))
-            .collect();
-        let new_by_id: HashMap<String, String> = new_map
-            .iter()
-            .map(|(h, u)| (u.id.clone(), h.clone()))
-            .collect();
+        drop(ds);
+        drop(dobs);
 
-        for (run_id, old_hash) in &old_by_id {
-            if let Some(new_hash) = new_by_id.get(run_id) {
-                if new_hash != old_hash {
-                    dirty.insert(old_hash.clone());
-                    dirty.insert(new_hash.clone());
-                }
-            }
+        // Apply lifecycle updates
+        if !lifecycle_updates.is_empty() {
+            self.apply_lifecycle_updates_inner(&config, lifecycle_updates)
+                .await?;
         }
 
         *self.rollback_policy.write().await = config.rollback.clone();
@@ -484,111 +496,227 @@ impl DeploymentManager {
         Ok(())
     }
 
-    async fn set_dirty_ids(&self) -> Result<()> {
-        let desired = match RevisionStore::get_desired_config(Some(self.root_dir.clone()))? {
-            Some(spec) => spec.get_job_map(),
-            None => BTreeMap::new(),
-        };
-        let mut dirty = self.dirty.write().await;
+    // -----------------------------------------------------------------------
+    // apply_lifecycle_updates – public entry-point (e.g. from control_tunnel)
+    // -----------------------------------------------------------------------
 
-        // mark removed as dirty so we can stop logs / stop service if needed
-        for (_, u) in desired.iter() {
-            let wd = self.resolve_workdir(u).await?;
-            if let Ok(st) = LocalRunState::load(&wd) {
-                if !st.ran_successful {
-                    dirty.insert(u.get_hash());
+    pub async fn apply_lifecycle_updates(&self, updates: Vec<LifecycleUpdate>) -> Result<()> {
+        let rev =
+            RevisionStore::get_desired_config(Some(self.root_dir.clone()))?.unwrap_or_default();
+        self.apply_lifecycle_updates_inner(&rev, updates).await
+    }
+
+    async fn apply_lifecycle_updates_inner(
+        &self,
+        rev: &DeploymentRevision,
+        updates: Vec<LifecycleUpdate>,
+    ) -> Result<()> {
+        let mut ds = self.dirty_services.write().await;
+
+        for upd in updates {
+            // Find this unit in services or observers
+            let spec_opt = rev
+                .get_service_by_id(&upd.unit_id)
+                .or_else(|| rev.get_observer_by_id(&upd.unit_id));
+
+            let Some(spec) = spec_opt else {
+                tracing::warn!(
+                    "lifecycle_update: unit '{}' not found in revision",
+                    upd.unit_id
+                );
+                continue;
+            };
+
+            let wd = self
+                .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
+                .await?;
+            let mut st = LocalRunState::load(&wd)?;
+            let prev_lifecycle = st.lifecycle.clone();
+            st.lifecycle = upd.lifecycle.clone();
+            LocalRunState::save(&wd, &st)?;
+
+            let hash = spec.get_hash();
+            match &upd.lifecycle {
+                Lifecycle::Stopped => {
+                    // Trigger stop reconcile
+                    ds.insert(hash);
                 }
+                Lifecycle::Running => {
+                    // If was stopped, need to start again
+                    if prev_lifecycle.is_stopped() {
+                        st.last_run_hash = None;
+                        LocalRunState::save(&wd, &st)?;
+                        ds.insert(hash);
+                    }
+                }
+                Lifecycle::Paused => {
+                    // No stop steps — just suspend observe. Nothing to reconcile.
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // set_dirty_services – called on daemon restart to re-queue pending work
+    // -----------------------------------------------------------------------
+
+    async fn set_dirty_services(&self) -> Result<()> {
+        let desired = match RevisionStore::get_desired_config(Some(self.root_dir.clone()))? {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+        let mut ds = self.dirty_services.write().await;
+        for (hash, svc) in desired.get_service_map() {
+            let wd = self
+                .resolve_workdir_for(&svc.id, svc.workdir.as_ref())
+                .await?;
+            let st = LocalRunState::load(&wd).unwrap_or_default();
+            if st.last_run_hash.as_deref() != Some(&hash) {
+                ds.insert(hash);
             }
         }
         Ok(())
     }
 
-    /// Start the single supervisor loop.
+    // -----------------------------------------------------------------------
+    // enqueue_pending_job_runs – add incoming job runs to the local queue
+    // -----------------------------------------------------------------------
+
+    pub async fn enqueue_job_runs(&self, runs: Vec<JobRun>) {
+        let mut q = self.pending_job_runs.write().await;
+        for r in runs {
+            q.push_back(r);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // start – the main supervisor loop
+    // -----------------------------------------------------------------------
+
     pub fn start(self: Arc<Self>) {
         tokio::spawn(async move {
             let mut next_health: HashMap<String, Instant> = HashMap::new();
             let mut next_liveness: HashMap<String, Instant> = HashMap::new();
-
-            // coarse tick keeps CPU low; checks run only when due
             let tick = Duration::from_millis(250);
 
-            // add ids of desired jobs that are not ran_successfully
-            let _ = self.set_dirty_ids().await;
+            let _ = self.set_dirty_services().await;
+
             loop {
                 if SHUTDOWN.is_cancelled() {
                     break;
                 }
 
-                // 1) reconcile dirty changes (run missing / stop old)
+                // 1) Reconcile dirty services
                 if let Err(e) = self.reconcile_dirty().await {
                     tracing::error!("reconcile error: {e}");
-                    let Ok(Some(desired)) =
+                    if let Ok(Some(desired)) =
                         RevisionStore::get_desired_config(Some(self.root_dir.clone()))
-                    else {
-                        tracing::error!("no desired config found");
-                        continue;
-                    };
-
-                    let _ = enqueue_event(
-                        DeployReportKind::DeploymentRevisionReport(DeploymentRevisionReport {
-                            revision_id: desired.id.expect("revision id is required"),
-                            outcome: Outcome::Failed,
-                            dirty: true,
-                            error: Some(format!("reconcile error: {e}")),
-                        }),
-                        Some(self.root_dir.clone()),
-                    )
-                    .await;
-                    // TODO: Rollback right away?
+                    {
+                        let _ = enqueue_event(
+                            DeployReportKind::DeploymentRevisionReport(DeploymentRevisionReport {
+                                revision_id: desired.id.clone().unwrap_or_default(),
+                                outcome: Outcome::Failed,
+                                dirty: true,
+                                error: Some(format!("reconcile error: {e}")),
+                            }),
+                            Some(self.root_dir.clone()),
+                        )
+                        .await;
+                    }
                 }
 
-                // 2) schedule/poll liveness + health only when due
+                // 2) Drain pending job runs (each gets its own task)
+                {
+                    let mut q = self.pending_job_runs.write().await;
+                    while let Some(job_run) = q.pop_front() {
+                        let desired =
+                            RevisionStore::get_desired_config(Some(self.root_dir.clone()))
+                                .ok()
+                                .flatten();
+                        if let Some(def) = desired
+                            .as_ref()
+                            .and_then(|r| r.get_job_by_id(&job_run.job_def_id))
+                        {
+                            let mgr = self.clone();
+                            tokio::spawn(async move {
+                                let _ = mgr.execute_job_run(job_run, &def).await;
+                            });
+                        } else {
+                            tracing::warn!(
+                                "job_run: job def '{}' not found in revision",
+                                job_run.job_def_id
+                            );
+                        }
+                    }
+                }
+
+                // 3) Schedule observe checks for services + observers
                 let now = Instant::now();
                 let desired_spec =
                     match RevisionStore::get_desired_config(Some(self.root_dir.clone())) {
                         Ok(s) => s,
                         Err(e) => {
-                            tracing::error!("failed to get all revisions: {e}");
-                            // TODO: Rollback right away?
+                            tracing::error!("failed to read desired config: {e}");
+                            sleep(tick).await;
                             continue;
                         }
                     };
 
                 if let Some(spec) = desired_spec {
-                    for (id, u) in spec.get_job_map().iter() {
-                        if !u.enabled {
-                            continue;
-                        }
-                        let Some(obs) = &u.observe else {
+                    let revision_id = spec.id.clone().unwrap_or_default();
+
+                    // Iterate services + observers that have observe hooks
+                    for svc in spec.services.iter().chain(spec.observers.iter()) {
+                        let Some(obs) = &svc.observe else {
                             continue;
                         };
-                        let desired_revision_id = spec.id.clone().expect("revision id is required");
+                        // Check runtime lifecycle override
+                        let wd_res = self
+                            .resolve_workdir_for(&svc.id, svc.workdir.as_ref())
+                            .await;
+                        let is_paused = match wd_res {
+                            Ok(ref wd) => LocalRunState::load(wd)
+                                .map(|st| st.lifecycle.is_paused())
+                                .unwrap_or(false),
+                            Err(_) => false,
+                        };
+                        if is_paused || svc.lifecycle.is_paused() {
+                            continue;
+                        }
+                        // Spec-level stopped → don't poll
+                        if svc.lifecycle.is_stopped() {
+                            continue;
+                        }
 
-                        if let Some(liv) = &obs.liveness {
-                            let due = next_liveness.get(id).copied().unwrap_or(now);
+                        let hash = svc.get_hash();
+
+                        if let Some(liveness) = &obs.liveness {
+                            let due = next_liveness.get(&hash).copied().unwrap_or(now);
                             if now >= due {
-                                next_liveness.insert(id.clone(), now + liv.every);
+                                next_liveness.insert(hash.clone(), now + liveness.every);
                                 let _ = self
                                     .run_observe_check(
                                         ObserveKind::Liveness,
-                                        &u.id,
-                                        &desired_revision_id,
-                                        u,
-                                        liv,
+                                        &svc.id,
+                                        &revision_id,
+                                        svc,
+                                        liveness,
                                     )
                                     .await;
                             }
                         }
                         if let Some(health) = &obs.health {
-                            let due = next_health.get(id).copied().unwrap_or(now);
+                            let due = next_health.get(&hash).copied().unwrap_or(now);
                             if now >= due {
-                                next_health.insert(id.clone(), now + health.every);
+                                next_health.insert(hash.clone(), now + health.every);
                                 let _ = self
                                     .run_observe_check(
                                         ObserveKind::Health,
-                                        &u.id,
-                                        &desired_revision_id,
-                                        u,
+                                        &svc.id,
+                                        &revision_id,
+                                        svc,
                                         health,
                                     )
                                     .await;
@@ -602,181 +730,165 @@ impl DeploymentManager {
         });
     }
 
-    async fn reconcile_dirty(&self) -> Result<()> {
+    // -----------------------------------------------------------------------
+    // reconcile_dirty – services only
+    // -----------------------------------------------------------------------
+
+    pub(crate) async fn reconcile_dirty(&self) -> Result<()> {
         let dirty_hashes: Vec<String> = {
-            let dirty = self.dirty.read().await;
-            if dirty.is_empty() {
+            let d = self.dirty_services.read().await;
+            if d.is_empty() {
                 return Ok(());
             }
-            dirty.iter().cloned().collect()
+            d.iter().cloned().collect()
         };
 
-        let desired_cfg = RevisionStore::get_desired_config(Some(self.root_dir.clone()))?;
-        let desired_cfg = desired_cfg
-            .as_ref()
+        let desired_cfg = RevisionStore::get_desired_config(Some(self.root_dir.clone()))?
             .ok_or_else(|| anyhow!("no desired config"))?;
-        let desired_rev = desired_cfg.id.clone().expect("revision id is required");
+        let desired_rev = desired_cfg.id.clone().unwrap_or_default();
 
         let prev_cfg = RevisionStore::get_previous_config(Some(self.root_dir.clone()))?;
         let prev_rev = prev_cfg.as_ref().and_then(|c| c.id.clone());
 
-        // Phase 1: decide what to stop / start
-        let mut to_stop: Vec<RunSpec> = Vec::new();
-        let mut to_start: Vec<RunSpec> = Vec::new();
+        let mut to_stop: Vec<ServiceSpec> = Vec::new();
+        let mut to_start: Vec<ServiceSpec> = Vec::new();
 
         for h in &dirty_hashes {
-            let new_spec = desired_cfg.get_job_by_hash(h).clone();
-            let old_spec = prev_cfg.as_ref().and_then(|c| c.get_job_by_hash(h).clone());
+            let new_spec = desired_cfg.get_service_by_hash(h);
+            let old_spec = prev_cfg.as_ref().and_then(|c| c.get_service_by_hash(h));
 
             match (old_spec, new_spec) {
-                // Removed: stop old service if possible
+                // Removed from desired
                 (Some(old), None) => {
-                    if matches!(old.run_type, RunType::Service) {
-                        to_stop.push(old);
-                    }
+                    to_stop.push(old);
                 }
-
-                // Present: if disabled stop service
+                // Present in both
                 (Some(old), Some(new)) => {
-                    if matches!(old.run_type, RunType::Service) && !new.enabled {
-                        to_stop.push(old.clone());
-                    }
+                    // Stopped lifecycle → stop
+                    let wd = self
+                        .resolve_workdir_for(&new.id, new.workdir.as_ref())
+                        .await?;
+                    let st = LocalRunState::load(&wd).unwrap_or_default();
+                    let effective_stopped = new.lifecycle.is_stopped() || st.lifecycle.is_stopped();
 
-                    // If it's a service AND changed (hash differs) stop old first then start new
-                    if matches!(new.run_type, RunType::Service) && old.get_hash() != new.get_hash()
-                    {
+                    if effective_stopped {
+                        to_stop.push(new.clone());
+                    } else if old.get_hash() != new.get_hash() {
+                        // Spec changed → stop old, start new
                         to_stop.push(old);
-                        if new.enabled {
-                            to_start.push(new);
-                        }
+                        to_start.push(new);
                     } else {
-                        // Jobs/services that are enabled and changed/new run in phase 2
-                        if new.enabled && old.get_hash() != new.get_hash() {
-                            to_start.push(new);
-                        } else if new.enabled && matches!(new.run_type, RunType::Job) {
-                            // optional: rerun jobs even if same hash is handled elsewhere
-                            // (see section 3)
-                        }
-                    }
-                }
-
-                // Added: start if enabled
-                (None, Some(new)) => {
-                    if new.enabled {
+                        // Same hash, same id — may need startup if hash never ran
                         to_start.push(new);
                     }
                 }
-
+                // Added
+                (None, Some(new)) => {
+                    let wd = self
+                        .resolve_workdir_for(&new.id, new.workdir.as_ref())
+                        .await?;
+                    let st = LocalRunState::load(&wd).unwrap_or_default();
+                    let effective_stopped = new.lifecycle.is_stopped() || st.lifecycle.is_stopped();
+                    if effective_stopped {
+                        // Was previously started (hash exists) but now needs to stop
+                        if st.last_run_hash.is_some() {
+                            to_stop.push(new);
+                        }
+                    } else {
+                        to_start.push(new);
+                    }
+                }
                 (None, None) => {}
             }
         }
 
-        // Dedup by run id so you don't stop/start twice if multiple hashes map to same id
-        // (keep last occurrence; simplest HashMap overwrite)
-        let mut stop_by_id = std::collections::HashMap::<String, RunSpec>::new();
+        // Dedup by id
+        let mut stop_map: HashMap<String, ServiceSpec> = HashMap::new();
         for s in to_stop {
-            stop_by_id.insert(s.id.clone(), s);
+            stop_map.insert(s.id.clone(), s);
         }
-
-        let mut start_by_id = std::collections::HashMap::<String, RunSpec>::new();
+        let mut start_map: HashMap<String, ServiceSpec> = HashMap::new();
         for s in to_start {
-            start_by_id.insert(s.id.clone(), s);
+            start_map.insert(s.id.clone(), s);
         }
 
-        // Phase 2a: execute stops
-        for (_id, spec) in stop_by_id.iter() {
-            let wd = self.resolve_workdir(spec).await?;
+        // Phase 2a: stop first
+        for (_, spec) in &stop_map {
+            let wd = self
+                .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
+                .await?;
             let rev = prev_rev.clone().unwrap_or_else(|| desired_rev.clone());
             let _ = self.stop_service(spec, &rev, &wd).await;
         }
 
-        // Phase 2b: execute starts/runs
-        for (_id, spec) in start_by_id.iter() {
-            let wd = self.resolve_workdir(spec).await?;
-
-            match spec.run_type {
-                RunType::Observe => {}
-                RunType::Job => {
-                    if spec.enabled {
-                        self.maybe_run_job(spec, &desired_rev, &wd).await?;
-                    }
-                }
-                RunType::Service => {
-                    if spec.enabled {
-                        self.apply_service(spec, &desired_rev, &wd).await?;
-                    }
-                }
-            }
+        // Phase 2b: start
+        for (_, spec) in &start_map {
+            let wd = self
+                .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
+                .await?;
+            self.apply_service(spec, &desired_rev, &wd).await?;
         }
 
-        // Finally: clear processed dirty hashes
-        let mut dirty = self.dirty.write().await;
+        // Clear processed hashes
+        let mut ds = self.dirty_services.write().await;
         for h in dirty_hashes {
-            dirty.remove(&h);
+            ds.remove(&h);
         }
 
         Ok(())
     }
 
-    async fn maybe_run_job(&self, spec: &RunSpec, revision_id: &str, wd: &Path) -> Result<()> {
-        // normal job
-        self.execute_unit_steps(spec, revision_id, wd).await
-    }
+    // -----------------------------------------------------------------------
+    // apply_service – hash-based idempotency with exponential backoff
+    // -----------------------------------------------------------------------
 
-    async fn apply_service(&self, spec: &RunSpec, revision_id: &str, wd: &Path) -> Result<()> {
-        self.execute_unit_steps(spec, revision_id, wd).await
-    }
-
-    async fn stop_service(&self, spec: &RunSpec, revision_id: &str, wd: &Path) -> Result<()> {
-        if let Some(stop) = &spec.stop {
-            self.execute_steps(
-                &spec.id,
-                revision_id,
-                wd,
-                &spec.env,
-                &stop.steps,
-                spec.on_failure.as_ref(),
-            )
-            .await?;
-        }
-        // if ephemeral workspace, delete it
-        if let Some(workdir) = &spec.workdir {
-            // change to match and remove local run state if persistent
-            match workdir.mode {
-                WorkdirMode::Persistent => {
-                    let path = self.get_workspace_path(spec)?;
-                    LocalRunState::delete(&path)?;
-                }
-                WorkdirMode::Ephemeral => {
-                    let path = self.get_workspace_path(spec)?;
-                    tokio::fs::remove_dir_all(path).await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn execute_unit_steps(&self, spec: &RunSpec, revision_id: &str, wd: &Path) -> Result<()> {
+    pub(crate) async fn apply_service(
+        &self,
+        spec: &ServiceSpec,
+        revision_id: &str,
+        wd: &Path,
+    ) -> Result<()> {
         let mut st = LocalRunState::load(wd)?;
-        if st.ran_successful {
-            // already done
+
+        // Already ran for this exact spec version
+        if st.last_run_hash.as_deref() == Some(&spec.get_hash()) {
             return Ok(());
         }
-        // materialize files (only if any)
-        self.materialize_files(spec, wd).await?;
 
-        let res = match self
+        // Exponential backoff after failures (cap at 64 s)
+        if st.startup_failures > 0 {
+            let backoff_ms = 1000 * 2u64.pow(st.startup_failures.min(6));
+            if let Some(last) = st.last_attempt_ms {
+                let elapsed = now_ms_u64().saturating_sub(last);
+                if elapsed < backoff_ms {
+                    return Ok(());
+                }
+            }
+        }
+
+        st.last_attempt_ms = Some(now_ms_u64());
+        LocalRunState::save(wd, &st)?;
+
+        self.materialize_files_svc(spec, wd).await?;
+
+        let result = self
             .execute_steps(
                 &spec.id,
-                &revision_id.to_string(),
+                revision_id,
                 wd,
                 &spec.env,
                 &spec.steps,
                 spec.on_failure.as_ref(),
             )
-            .await
-        {
+            .await;
+
+        match result {
             Ok(()) => {
+                let mut st2 = LocalRunState::load(wd)?;
+                st2.last_run_hash = Some(spec.get_hash());
+                st2.startup_failures = 0;
+                st2.last_attempt_ms = None;
+                LocalRunState::save(wd, &st2)?;
                 let _ = enqueue_event(
                     DeployReportKind::RunReport(RunReport {
                         run_id: spec.id.clone(),
@@ -791,6 +903,10 @@ impl DeploymentManager {
                 Ok(())
             }
             Err(e) => {
+                let mut st2 = LocalRunState::load(wd)?;
+                st2.startup_failures += 1;
+                st2.last_attempt_ms = Some(now_ms_u64());
+                LocalRunState::save(wd, &st2)?;
                 let _ = enqueue_event(
                     DeployReportKind::RunReport(RunReport {
                         run_id: spec.id.clone(),
@@ -804,20 +920,119 @@ impl DeploymentManager {
                 .await;
                 Err(e)
             }
-        };
+        }
+    }
 
-        st.ran_successful = true;
+    // -----------------------------------------------------------------------
+    // stop_service
+    // -----------------------------------------------------------------------
+
+    pub(crate) async fn stop_service(
+        &self,
+        spec: &ServiceSpec,
+        revision_id: &str,
+        wd: &Path,
+        // force=true skips stop steps
+    ) -> Result<()> {
+        self.stop_log_follow(&spec.id).await?;
+
+        if let Some(stop) = &spec.stop {
+            self.execute_steps(
+                &spec.id,
+                revision_id,
+                wd,
+                &spec.env,
+                &stop.steps,
+                spec.on_failure.as_ref(),
+            )
+            .await?;
+        }
+
+        // Clear the run hash so startup re-runs if the service is later resumed.
+        // We do NOT delete the state file for persistent workdirs because the
+        // `lifecycle` field must survive the stop so that `apply_lifecycle_updates`
+        // can detect the transition correctly on resume.
+        let mut st = LocalRunState::load(wd).unwrap_or_default();
+        st.last_run_hash = None;
+        st.startup_failures = 0;
         LocalRunState::save(wd, &st)?;
 
-        res
+        if let Some(workdir) = &spec.workdir {
+            let ws = self.get_workspace_path_for(&spec.id, spec.workdir.as_ref())?;
+            match workdir.mode {
+                WorkdirMode::Persistent => {
+                    // State file is preserved so that lifecycle tracking survives the stop.
+                    // last_run_hash was already cleared above.
+                }
+                WorkdirMode::Ephemeral => {
+                    let _ = tokio::fs::remove_dir_all(&ws).await;
+                }
+            }
+        }
+
+        Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // execute_job_run – runs a triggered JobRun
+    // -----------------------------------------------------------------------
+
+    pub(crate) async fn execute_job_run(&self, run: JobRun, def: &JobDef) -> Result<()> {
+        // Merge env: def env overridden by run env_overrides
+        let mut env = def.env.clone();
+        for (k, v) in &run.env_overrides {
+            env.insert(k.clone(), v.clone());
+        }
+
+        let wd = self
+            .resolve_workdir_for(&def.id, def.workdir.as_ref())
+            .await?;
+
+        // Materialize files from the job definition
+        self.materialize_files_job(def, &wd).await?;
+
+        let result = self
+            .execute_steps(
+                &run.run_id,
+                &run.revision_id,
+                &wd,
+                &env,
+                &def.steps,
+                def.on_failure.as_ref(),
+            )
+            .await;
+
+        let (status, error) = match &result {
+            Ok(()) => (JobRunStatus::Success, None),
+            Err(e) => (JobRunStatus::Failed, Some(e.to_string())),
+        };
+
+        let _ = enqueue_event(
+            DeployReportKind::JobRunReport(JobRunReport {
+                run_id: run.run_id.clone(),
+                job_def_id: run.job_def_id.clone(),
+                revision_id: run.revision_id.clone(),
+                status,
+                report_time: now_ms_u64(),
+                error,
+            }),
+            Some(self.root_dir.clone()),
+        )
+        .await;
+
+        result
+    }
+
+    // -----------------------------------------------------------------------
+    // Observe checks
+    // -----------------------------------------------------------------------
 
     async fn run_observe_check(
         &self,
         kind: ObserveKind,
         run_id: &str,
         revision_id: &str,
-        spec: &RunSpec,
+        spec: &ServiceSpec,
         hooks: &ObserveHooks,
     ) -> Result<()> {
         let r = self
@@ -826,14 +1041,15 @@ impl DeploymentManager {
 
         match r {
             Ok(d) if d.consecutive > 0 => {
-                tracing::info!("{} check had {} consecutive failures", &kind, d.consecutive);
+                tracing::info!(
+                    "{} check had {} consecutive failures for '{}'",
+                    kind,
+                    d.consecutive,
+                    run_id
+                );
                 let _ = self
-                    .check_rollback_on_observe_failure(
-                        kind,
-                        revision_id,
-                        r.map(|d| d.clone().consecutive).ok(),
-                    )
-                    .await?;
+                    .check_rollback_on_observe_failure(kind, revision_id, Some(d.consecutive), spec)
+                    .await;
                 Ok(())
             }
             Ok(_) => Ok(()),
@@ -846,20 +1062,24 @@ impl DeploymentManager {
         kind: ObserveKind,
         run_id: &str,
         revision_id: &str,
-        spec: &RunSpec,
+        spec: &ServiceSpec,
         hooks: &ObserveHooks,
     ) -> Result<ObserveDecision> {
-        let wd = self.resolve_workdir(spec).await?;
+        let wd = self
+            .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
+            .await?;
         let mut st = LocalRunState::load(&wd)?;
 
-        let observe_timeout = hooks.observe_timeout.unwrap_or(kind.default_timeout());
+        let timeout = hooks
+            .observe_timeout
+            .unwrap_or_else(|| kind.default_timeout());
 
         let res = run_command(
             run_id,
             &wd,
             &spec.env,
             &hooks.observe,
-            Some(observe_timeout),
+            Some(timeout),
             MAX_TAIL_BYTES,
         )
         .await;
@@ -867,9 +1087,7 @@ impl DeploymentManager {
         match res {
             Ok(_) => {
                 *st.failures_mut(kind) = 0;
-
                 let needs_send = kind.decide_on_success(&st);
-
                 LocalRunState::save(&wd, &st)?;
 
                 if needs_send {
@@ -883,20 +1101,20 @@ impl DeploymentManager {
                         Some(self.root_dir.clone()),
                     )
                     .await;
-
+                    let mut st2 = LocalRunState::load(&wd)?;
                     match kind {
                         ObserveKind::Health => {
-                            st.reported_health_once = true;
-                            st.last_health = true;
-                            st.consecutive_health_failures = 0;
+                            st2.reported_health_once = true;
+                            st2.last_health = true;
+                            st2.consecutive_health_failures = 0;
                         }
                         ObserveKind::Liveness => {
-                            st.reported_alive_once = true;
-                            st.last_alive = true;
-                            st.consecutive_alive_failures = 0;
+                            st2.reported_alive_once = true;
+                            st2.last_alive = true;
+                            st2.consecutive_alive_failures = 0;
                         }
                     }
-                    LocalRunState::save(&wd, &st)?;
+                    LocalRunState::save(&wd, &st2)?;
                 }
 
                 Ok(ObserveDecision {
@@ -906,80 +1124,17 @@ impl DeploymentManager {
                 })
             }
             Err(e) => {
-                let failures = st.failures_mut(kind);
-                *failures = failures.saturating_add(1);
-                let consecutive = *failures;
-
+                let log_tail = match &e {
+                    RunCommandError::Failed(f) => Some(f.combined_tail.clone()),
+                    _ => None,
+                };
+                *st.failures_mut(kind) += 1;
+                let consecutive = *st.failures_mut(kind);
                 let decision = kind.decide_on_error(&st, hooks, consecutive);
-                // if decision.is_failure {
-                //     match kind {
-                //         ObserveKind::Health => {
-                //             st.last_health = false;
-                //         }
-                //         ObserveKind::Liveness => {
-                //             st.last_alive = false;
-                //             st.last_health = false;
-                //         }
-                //     }
-                // }
 
                 LocalRunState::save(&wd, &st)?;
 
-                let mut on_fail_log_tail = None;
-                let mut record_log_tail = None;
-                if decision.is_failure {
-                    if let Some(record) = &hooks.record {
-                        let record_timeout = hooks.record_timeout.unwrap_or(kind.default_timeout());
-
-                        let r = run_command(
-                            run_id,
-                            &wd,
-                            &spec.env,
-                            record,
-                            Some(record_timeout),
-                            MAX_TAIL_BYTES,
-                        )
-                        .await;
-
-                        record_log_tail = match r {
-                            Ok(tail) => Some(tail),
-                            Err(RunCommandError::Failed(cmd)) => Some(cmd.combined_tail),
-                            Err(RunCommandError::Io(_)) => None,
-                            Err(RunCommandError::Other(_)) => None,
-                        };
-                    }
-
-                    if let Some(report) = &hooks.report {
-                        let report_timeout = hooks.report_timeout.unwrap_or(kind.default_timeout());
-
-                        let r = run_command(
-                            run_id,
-                            &wd,
-                            &spec.env,
-                            report,
-                            Some(report_timeout),
-                            MAX_TAIL_BYTES,
-                        )
-                        .await;
-
-                        on_fail_log_tail = match r {
-                            Ok(tail) => Some(tail),
-                            Err(RunCommandError::Failed(cmd)) => Some(cmd.combined_tail),
-                            Err(RunCommandError::Io(_)) => None,
-                            Err(RunCommandError::Other(_)) => None,
-                        };
-                    }
-                }
-
                 if decision.needs_send {
-                    let observe_log_tail = match &e {
-                        RunCommandError::Failed(cmd) => Some(cmd.combined_tail.clone()),
-                        _ => None,
-                    };
-
-                    let log_tail = merge_log_tails(observe_log_tail, record_log_tail);
-                    let log_tail = merge_log_tails(log_tail, on_fail_log_tail);
-
                     let _ = enqueue_event(
                         DeployReportKind::RunState(kind.build_runstate_event(
                             run_id,
@@ -990,40 +1145,45 @@ impl DeploymentManager {
                         Some(self.root_dir.clone()),
                     )
                     .await;
-
+                    let mut st2 = LocalRunState::load(&wd)?;
                     match kind {
                         ObserveKind::Health => {
-                            st.reported_health_once = true;
-                            st.last_health = false;
+                            st2.last_health = false;
+                            st2.reported_health_once = true;
                         }
                         ObserveKind::Liveness => {
-                            st.reported_alive_once = true;
-                            st.last_health = false;
+                            st2.last_alive = false;
+                            st2.reported_alive_once = true;
                         }
                     }
-
-                    LocalRunState::save(&wd, &st)?;
+                    LocalRunState::save(&wd, &st2)?;
                 }
 
-                match kind {
-                    ObserveKind::Liveness => Ok(decision),
-                    ObserveKind::Health => Ok(decision),
-                }
+                Ok(decision)
             }
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Rollback + restart policy
+    // -----------------------------------------------------------------------
 
     async fn check_rollback_on_observe_failure(
         &self,
         kind: ObserveKind,
         revision_id: &str,
         consecutive: Option<u32>,
+        spec: &ServiceSpec,
     ) -> Result<()> {
         use m87_shared::deploy_spec::RollbackTrigger;
 
         let policy = match &*self.rollback_policy.read().await {
             Some(p) => p.clone(),
-            None => return Ok(()),
+            None => {
+                // No rollback policy — check restart policy
+                self.maybe_restart_service(spec).await?;
+                return Ok(());
+            }
         };
 
         if !self.is_past_stabilization_period(&policy).await {
@@ -1038,97 +1198,85 @@ impl DeploymentManager {
         let should_rollback = match trigger {
             RollbackTrigger::Never => false,
             RollbackTrigger::Any => consecutive.unwrap_or(0) > 0,
-            RollbackTrigger::All => self.check_all_units_failing().await?,
+            RollbackTrigger::All => self.check_all_services_failing().await?,
             RollbackTrigger::Consecutive(n) => consecutive.unwrap_or(0) >= *n,
         };
 
         if should_rollback {
-            tracing::warn!(
-                "{} failure triggered rollback for revision_id {}",
-                kind,
-                revision_id
-            );
+            tracing::warn!("{} failure triggered rollback for {}", kind, revision_id);
             self.trigger_rollback(revision_id).await?;
+        } else {
+            self.maybe_restart_service(spec).await?;
         }
 
+        Ok(())
+    }
+
+    async fn maybe_restart_service(&self, spec: &ServiceSpec) -> Result<()> {
+        match spec.restart {
+            RestartPolicy::Never => {}
+            RestartPolicy::OnFailure | RestartPolicy::Always => {
+                let wd = self
+                    .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
+                    .await?;
+                LocalRunState::clear_run_hash(&wd)?;
+                self.dirty_services.write().await.insert(spec.get_hash());
+                tracing::info!("restart policy: re-queuing '{}'", spec.id);
+            }
+        }
         Ok(())
     }
 
     async fn is_past_stabilization_period(&self, policy: &RollbackPolicy) -> bool {
-        let deployment_time = self.deployment_started_at.read().await;
-
-        match *deployment_time {
-            None => true, // No deployment time tracked, allow rollback
-            Some(start) => {
-                let elapsed = start.elapsed();
-                elapsed.as_secs() >= policy.stabilization_period_secs
-            }
+        match *self.deployment_started_at.read().await {
+            None => true,
+            Some(start) => start.elapsed().as_secs() >= policy.stabilization_period_secs,
         }
     }
 
-    async fn check_all_units_failing(&self) -> Result<bool> {
+    async fn check_all_services_failing(&self) -> Result<bool> {
         let desired = match RevisionStore::get_desired_config(Some(self.root_dir.clone()))? {
-            Some(config) => config.get_job_map(),
+            Some(c) => c,
             None => return Ok(false),
         };
-
-        if desired.is_empty() {
-            return Ok(false);
-        }
-
-        let mut all_failing = true;
-        for (_id, spec) in &desired {
-            let wd = self.resolve_workdir(spec).await?;
-            if let Ok(st) = LocalRunState::load(&wd) {
-                if st.consecutive_health_failures == 0 {
-                    all_failing = false;
-                    break;
-                }
+        for svc in desired.services.iter().chain(desired.observers.iter()) {
+            let wd = self
+                .resolve_workdir_for(&svc.id, svc.workdir.as_ref())
+                .await?;
+            let st = LocalRunState::load(&wd).unwrap_or_default();
+            if st.consecutive_health_failures == 0 && st.consecutive_alive_failures == 0 {
+                return Ok(false);
             }
         }
-
-        Ok(all_failing)
+        Ok(true)
     }
 
     async fn trigger_rollback(&self, revision_id: &str) -> Result<()> {
-        tracing::warn!("ROLLBACK TRIGGERED - Reverting to previous configuration");
-
-        // Load previous configuration
-        let prev_config = match RevisionStore::get_previous_config(Some(self.root_dir.clone()))? {
-            Some(config) => config,
+        let prev = match RevisionStore::get_previous_config(Some(self.root_dir.clone()))? {
+            Some(p) => p,
             None => {
-                tracing::error!("No previous configuration available for rollback");
-                let _ = enqueue_event(
-                    DeployReportKind::RollbackReport(RollbackReport {
-                        revision_id: revision_id.to_string(),
-                        new_revision_id: None,
-                    }),
-                    Some(self.root_dir.clone()),
-                );
-                return Err(anyhow!("No previous configuration available"));
+                tracing::warn!("rollback requested but no previous revision");
+                return Ok(());
             }
         };
+        let new_rev_id = prev.id.clone().unwrap_or_default();
+        self.set_desired_units(prev, vec![]).await?;
 
-        tracing::info!(
-            "Rolling back to previous configuration with {} units",
-            prev_config.jobs.len()
-        );
-
-        // Apply previous configuration (this will reset deployment_started_at)
-        self.set_desired_units(prev_config.clone()).await?;
-
-        // TODO: this jsut changes the target revision. Rollback happens in the main loop ehwn this returns
         let _ = enqueue_event(
             DeployReportKind::RollbackReport(RollbackReport {
                 revision_id: revision_id.to_string(),
-                new_revision_id: prev_config.id,
+                new_revision_id: Some(new_rev_id),
             }),
             Some(self.root_dir.clone()),
-        );
+        )
+        .await;
 
-        tracing::info!("Rollback complete");
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Step execution
+    // -----------------------------------------------------------------------
 
     async fn execute_steps(
         &self,
@@ -1139,44 +1287,46 @@ impl DeploymentManager {
         steps: &[Step],
         on_failure: Option<&OnFailure>,
     ) -> Result<()> {
-        let policy = on_failure.cloned().unwrap_or(OnFailure {
-            undo: UndoMode::None,
-            continue_on_failure: false,
-        });
+        let undo_mode = on_failure.map(|f| f.undo.clone()).unwrap_or(UndoMode::None);
+        let continue_on_failure = on_failure.map(|f| f.continue_on_failure).unwrap_or(false);
 
         let mut executed: Vec<&Step> = Vec::new();
+        let mut any_failed = false;
 
         for step in steps {
             let res = self
-                .run_step_with_retry(run_id, revision_id, wd, env, step)
+                .run_step_with_retry(run_id, revision_id, wd, env, step, false)
                 .await;
             match res {
-                Ok(()) => executed.push(step),
+                Ok(()) => {
+                    executed.push(step);
+                }
                 Err(e) => {
-                    // Undo
-                    tracing::error!("Failed to run step: {}", e);
-                    match policy.undo {
-                        UndoMode::None => {}
-                        UndoMode::ExecutedSteps => {
+                    any_failed = true;
+                    tracing::error!(
+                        "step '{}' failed: {e}",
+                        step.name.as_deref().unwrap_or("unnamed")
+                    );
+                    if !continue_on_failure {
+                        if matches!(undo_mode, UndoMode::ExecutedSteps) {
                             self.undo_steps(run_id, revision_id, wd, env, &executed)
                                 .await;
                         }
+                        return Err(e);
                     }
-
-                    if policy.continue_on_failure {
-                        continue;
-                    }
-                    return Err(e);
                 }
             }
         }
 
+        if any_failed {
+            return Err(anyhow!("one or more steps failed"));
+        }
         Ok(())
     }
 
     async fn undo_steps(
         &self,
-        unit_id: &str,
+        run_id: &str,
         revision_id: &str,
         wd: &Path,
         env: &BTreeMap<String, String>,
@@ -1184,386 +1334,285 @@ impl DeploymentManager {
     ) {
         for step in steps.iter().rev() {
             if let Some(undo) = &step.undo {
-                // if undo fails we dont care for now. run_step takes care of sending the event to the user
-                let _ = run_undo(
-                    unit_id,
-                    wd,
-                    env,
-                    undo,
-                    step,
-                    revision_id,
-                    MAX_TAIL_BYTES,
-                    Some(self.root_dir.clone()),
-                )
-                .await;
+                let undo_step = Step {
+                    name: step.name.as_ref().map(|n| format!("{} (undo)", n)),
+                    run: undo.run.clone(),
+                    timeout: undo.timeout,
+                    retry: None,
+                    undo: None,
+                };
+                let _ = self
+                    .run_step_with_retry(run_id, revision_id, wd, env, &undo_step, true)
+                    .await;
             }
         }
     }
 
     async fn run_step_with_retry(
         &self,
-        unit_id: &str,
+        run_id: &str,
         revision_id: &str,
         wd: &Path,
         env: &BTreeMap<String, String>,
         step: &Step,
+        is_undo: bool,
     ) -> Result<()> {
-        let retry = step.retry.clone().unwrap_or(RetrySpec {
-            attempts: 1,
-            backoff: Duration::from_millis(0),
-            on_exit_codes: None,
-        });
+        let max_attempts = step.retry.as_ref().map(|r| r.attempts.max(1)).unwrap_or(1);
+        let backoff = step
+            .retry
+            .as_ref()
+            .and_then(|r| r.backoff)
+            .unwrap_or(Duration::from_secs(1));
 
-        let attempts = retry.attempts.max(1);
-        for i in 0..attempts {
-            let res = run_step(
-                unit_id,
-                wd,
-                env,
-                step,
-                revision_id,
-                i,
-                MAX_TAIL_BYTES,
-                Some(self.root_dir.clone()),
-            )
-            .await;
-            match res {
+        let mut last_err = None;
+        for attempt in 1..=max_attempts {
+            match self
+                .run_step(run_id, revision_id, wd, env, step, attempt, is_undo)
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    if i + 1 >= attempts {
-                        return Err(e);
+                    last_err = Some(e);
+                    if attempt < max_attempts {
+                        sleep(backoff).await;
                     }
-                    sleep(retry.backoff).await;
                 }
             }
         }
-
-        return Err(anyhow!("Failed to run command"));
+        Err(last_err.unwrap_or_else(|| anyhow!("step failed")))
     }
 
-    async fn resolve_workdir(&self, spec: &RunSpec) -> Result<PathBuf> {
-        // observe-only still gets a deterministic cwd for relative paths in log/health commands
-        let resolved = self.get_workspace_path(spec)?;
+    async fn run_step(
+        &self,
+        run_id: &str,
+        revision_id: &str,
+        wd: &Path,
+        env: &BTreeMap<String, String>,
+        step: &Step,
+        attempt: u32,
+        is_undo: bool,
+    ) -> Result<()> {
+        let res = run_command(run_id, wd, env, &step.run, step.timeout, MAX_TAIL_BYTES).await;
 
-        tokio::fs::create_dir_all(&resolved).await?;
-        Ok(resolved)
-    }
+        let (success, exit_code, error_msg, log_tail) = match &res {
+            Ok(out) => (true, Some(0i32), None::<String>, out.clone()),
+            Err(RunCommandError::Failed(f)) => (
+                false,
+                f.exit_code,
+                Some(
+                    f.error
+                        .clone()
+                        .unwrap_or_else(|| format!("exit code {:?}", f.exit_code)),
+                ),
+                f.combined_tail.clone(),
+            ),
+            Err(e) => (false, None, Some(e.to_string()), String::new()),
+        };
 
-    fn get_workspace_path(&self, spec: &RunSpec) -> Result<PathBuf> {
-        let base = if let Some(wd) = &spec.workdir {
-            if let Some(p) = &wd.path {
-                PathBuf::from(p)
-            } else {
-                self.root_dir.join("jobs").join(&spec.id)
-            }
+        let tail = merge_log_tails("", &log_tail, MAX_TAIL_BYTES);
+
+        let _ = enqueue_event(
+            DeployReportKind::StepReport(StepReport {
+                revision_id: revision_id.to_string(),
+                run_id: run_id.to_string(),
+                name: step.name.clone(),
+                attempts: attempt,
+                exit_code,
+                report_time: now_ms_u64(),
+                success,
+                is_undo,
+                error: error_msg.clone(),
+                log_tail: if tail.is_empty() { None } else { Some(tail) },
+            }),
+            Some(self.root_dir.clone()),
+        )
+        .await;
+
+        if success {
+            Ok(())
         } else {
-            self.root_dir.join("jobs").join(&spec.id)
-        };
-
-        // choose persistent/ephemeral
-        let mode = spec
-            .workdir
-            .as_ref()
-            .map(|w| w.mode.clone())
-            .unwrap_or(WorkdirMode::Persistent);
-
-        let resolved = match mode {
-            WorkdirMode::Persistent => base,
-            WorkdirMode::Ephemeral => self
-                .root_dir
-                .join("tmp")
-                .join("jobs")
-                .join(&spec.get_hash()),
-        };
-
-        Ok(resolved)
+            Err(anyhow!(
+                error_msg.unwrap_or_else(|| "step failed".to_string())
+            ))
+        }
     }
 
-    async fn materialize_files(&self, spec: &RunSpec, wd: &Path) -> Result<()> {
-        if spec.files.is_empty() {
-            return Ok(());
-        }
-        for (rel, content) in &spec.files {
-            let p = wd.join(rel);
-            if let Some(parent) = p.parent() {
-                let res = tokio::fs::create_dir_all(parent).await;
-                if let Err(e) = &res {
-                    tracing::error!("Failed to create directory: {}", e);
-                }
-                res?;
+    // -----------------------------------------------------------------------
+    // Workspace helpers
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn get_workspace_path_for(
+        &self,
+        id: &str,
+        workdir: Option<&m87_shared::deploy_spec::Workdir>,
+    ) -> Result<PathBuf> {
+        if let Some(wd) = workdir {
+            if let Some(path) = &wd.path {
+                return Ok(PathBuf::from(path));
             }
-            tokio::fs::write(&p, content).await?;
+        }
+        Ok(self.root_dir.join("workspaces").join(id))
+    }
+
+    pub(crate) async fn resolve_workdir_for(
+        &self,
+        id: &str,
+        workdir: Option<&m87_shared::deploy_spec::Workdir>,
+    ) -> Result<PathBuf> {
+        let path = self.get_workspace_path_for(id, workdir)?;
+        fs::create_dir_all(&path).await?;
+        Ok(path)
+    }
+
+    async fn materialize_files_svc(&self, spec: &ServiceSpec, wd: &Path) -> Result<()> {
+        for (name, content) in &spec.files {
+            let file_path = wd.join(name);
+            let mut f = fs::File::create(&file_path).await?;
+            f.write_all(content.as_bytes()).await?;
+        }
+        Ok(())
+    }
+
+    async fn materialize_files_job(&self, def: &JobDef, wd: &Path) -> Result<()> {
+        for (name, content) in &def.files {
+            let file_path = wd.join(name);
+            let mut f = fs::File::create(&file_path).await?;
+            f.write_all(content.as_bytes()).await?;
         }
         Ok(())
     }
 }
 
-pub async fn enqueue_event(event: DeployReportKind, root_dir: Option<PathBuf>) -> Result<()> {
-    ensure_dirs(root_dir.clone()).await?;
+// ---------------------------------------------------------------------------
+// Event queue (file-based, crash-safe)
+// ---------------------------------------------------------------------------
 
-    let id = event.get_hash().to_string();
-    let pending = pending_dir(root_dir)?.join(format!("{id}.json"));
-    let tmp = pending.with_extension("json.tmp");
-
-    let bytes = serde_json::to_vec(&event).context("serialize event")?;
-
-    let mut f = fs::File::create(&tmp).await.context("create tmp")?;
-    f.write_all(&bytes).await.context("write tmp")?;
-    f.flush().await.context("flush tmp")?;
-    drop(f);
-
-    fs::rename(&tmp, &pending)
-        .await
-        .context("atomic rename tmp->pending")?;
+pub async fn enqueue_event(kind: DeployReportKind, dir_path: Option<PathBuf>) -> Result<()> {
+    let pending = pending_dir(dir_path.clone())?;
+    let hash = kind.get_hash();
+    let path = pending.join(format!("{}.json", hash));
+    if path.exists() {
+        return Ok(());
+    }
+    let s = serde_json::to_string(&kind).context("serialize event")?;
+    fs::write(&path, s).await.context("write pending event")?;
     Ok(())
 }
 
 pub struct ClaimedEvent {
-    pub path: PathBuf, // inflight file path
+    pub path: PathBuf,
     pub report: DeployReportKind,
 }
 
-pub async fn recover_inflight(root_dir: Option<PathBuf>) -> Result<()> {
-    ensure_dirs(root_dir.clone()).await?;
-    let inflight = inflight_dir(root_dir.clone())?;
-    let pending = pending_dir(root_dir)?;
-
-    let mut rd = fs::read_dir(&inflight).await?;
-    while let Some(e) = rd.next_entry().await? {
-        let p = e.path();
-        if p.extension().and_then(|s| s.to_str()) == Some("json") {
-            let target = pending.join(p.file_name().unwrap());
-            let _ = fs::rename(&p, &target).await;
-        }
-    }
-    Ok(())
-}
-
-pub async fn claim_next_event(root_dir: Option<PathBuf>) -> anyhow::Result<Option<ClaimedEvent>> {
-    ensure_dirs(root_dir.clone()).await?;
-
-    let pending = pending_dir(root_dir.clone())?;
-    let inflight = inflight_dir(root_dir)?;
-
-    // collect candidate paths
-    let mut paths = Vec::new();
-    let mut rd = fs::read_dir(&pending).await?;
-    while let Some(e) = rd.next_entry().await? {
-        let p = e.path();
-        if p.extension().and_then(|s| s.to_str()) == Some("json") {
-            paths.push(p);
-        }
-    }
-
-    // compute keys (async) then sort
-    let mut keyed = Vec::with_capacity(paths.len());
-    for p in paths {
-        let t = match fs::metadata(&p).await {
-            Ok(m) => m.created().unwrap_or(SystemTime::UNIX_EPOCH),
-            Err(_) => SystemTime::UNIX_EPOCH,
-        };
-        keyed.push((t, p));
-    }
-
-    keyed.sort_by_key(|(t, _)| *t);
-
-    let Some((_t, p)) = keyed.into_iter().next() else {
-        return Ok(None);
+pub async fn recover_inflight(dir_path: Option<PathBuf>) -> Result<()> {
+    let inflight = inflight_dir(dir_path.clone())?;
+    let pending = pending_dir(dir_path)?;
+    let mut dir = match fs::read_dir(&inflight).await {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
     };
-
-    let inflight_path = inflight.join(p.file_name().unwrap());
-    fs::rename(&p, &inflight_path)
-        .await
-        .context("claim rename pending->inflight")?;
-
-    let bytes = fs::read(&inflight_path).await.context("read inflight")?;
-    let event: DeployReportKind = serde_json::from_slice(&bytes).context("parse inflight")?;
-
-    Ok(Some(ClaimedEvent {
-        path: inflight_path,
-        report: event,
-    }))
-}
-
-pub async fn ack_event(hash: &str, root_dir: Option<PathBuf>) -> Result<()> {
-    let path = inflight_dir(root_dir)?.join(format!("{hash}.json"));
-    fs::remove_file(&path).await.context("delete inflight")?;
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let src = entry.path();
+        let dst = pending.join(entry.file_name());
+        let _ = fs::rename(&src, &dst).await;
+    }
     Ok(())
 }
 
-pub async fn on_new_event(root_dir: Option<PathBuf>) -> Option<ClaimedEvent> {
-    loop {
-        // Try immediately (covers backlog + missed cycles)
-        match claim_next_event(root_dir.clone()).await {
-            Ok(Some(ev)) => return Some(ev),
-            Ok(None) => {
-                tokio::time::sleep(Duration::from_secs(10)).await;
+pub async fn claim_next_event(dir_path: Option<PathBuf>) -> Result<Option<ClaimedEvent>> {
+    let pending = pending_dir(dir_path.clone())?;
+    let inflight = inflight_dir(dir_path)?;
+    let mut dir = match fs::read_dir(&pending).await {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let src = entry.path();
+        if src.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let dst = inflight.join(entry.file_name());
+        if fs::rename(&src, &dst).await.is_err() {
+            continue;
+        }
+        let s = match fs::read_to_string(&dst).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        match serde_json::from_str::<DeployReportKind>(&s) {
+            Ok(report) => {
+                return Ok(Some(ClaimedEvent { path: dst, report }));
             }
             Err(e) => {
-                tracing::error!("event queue error: {e}");
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                tracing::warn!("failed to parse event: {e}");
+                let _ = fs::remove_file(&dst).await;
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub async fn ack_event(hash: &str, dir_path: Option<PathBuf>) -> Result<()> {
+    let inflight = inflight_dir(dir_path)?;
+    let path = inflight.join(format!("{}.json", hash));
+    if path.exists() {
+        fs::remove_file(&path).await?;
+    }
+    Ok(())
+}
+
+pub async fn on_new_event(dir_path: Option<PathBuf>) -> Option<ClaimedEvent> {
+    loop {
+        match claim_next_event(dir_path.clone()).await {
+            Ok(Some(ev)) => return Some(ev),
+            Ok(None) => {
+                sleep(Duration::from_millis(200)).await;
+            }
+            Err(e) => {
+                tracing::error!("claim_next_event error: {e}");
+                sleep(Duration::from_secs(1)).await;
             }
         }
     }
 }
 
-async fn run_step(
-    unit_id: &str,
-    wd: &Path,
-    env: &BTreeMap<String, String>,
-    step: &Step,
-    revision_id: &str,
-    i: u32,
-    max_tail_bytes: usize,
-    root_dir: Option<PathBuf>,
-) -> Result<()> {
-    tracing::info!(
-        "running step {}. Attempt {}",
-        step.name.clone().unwrap_or(format!("{}", step.run)),
-        i + 1
-    );
-    let res = run_command(unit_id, wd, env, &step.run, step.timeout, max_tail_bytes).await;
-    let res = match res {
-        Ok(tail) => Ok(StepReport {
-            revision_id: revision_id.to_string(),
-            run_id: unit_id.to_string(),
-            name: step.name.clone(),
-            attempts: i + 1,
-            log_tail: tail,
-            exit_code: None,
-            success: true,
-            is_undo: false,
-            error: None,
-            report_time: now_ms_u64(),
-        }),
-        Err(RunCommandError::Other(e)) => {
-            tracing::error!(
-                "Failed to run step {}: {}",
-                step.name.clone().unwrap_or(format!("{}", step.run)),
-                e
-            );
-            Err(e)
-        }
-        Err(RunCommandError::Io(e)) => {
-            tracing::error!(
-                "Failed to run step {}: {}",
-                step.name.clone().unwrap_or(format!("{}", step.run)),
-                e
-            );
-            Err(e.into())
-        }
-        Err(RunCommandError::Failed(e)) => Ok(StepReport {
-            revision_id: revision_id.to_string(),
-            run_id: unit_id.to_string(),
-            name: step.name.clone(),
-            attempts: i + 1,
-            log_tail: e.combined_tail,
-            exit_code: e.exit_code,
-            success: false,
-            is_undo: false,
-            error: e.error,
-            report_time: now_ms_u64(),
-        }),
+// ---------------------------------------------------------------------------
+// Log tail merging
+// ---------------------------------------------------------------------------
+
+fn merge_log_tails(existing: &str, new: &str, max_bytes: usize) -> String {
+    let combined = if existing.is_empty() {
+        new.to_string()
+    } else {
+        format!("{}\n{}", existing, new)
     };
-    match res {
-        Ok(report) => {
-            enqueue_event(DeployReportKind::StepReport(report.clone()), root_dir).await?;
-            if !report.success {
-                Err(anyhow!(
-                    "Step {} failed: {}",
-                    step.name.clone().unwrap_or("unknown step".to_string()),
-                    report.error.unwrap_or("unknown error".to_string())
-                ))
-            } else {
-                Ok(())
-            }
-        }
-
-        Err(e) => Err(e),
+    if combined.len() <= max_bytes {
+        combined
+    } else {
+        combined[combined.len() - max_bytes..].to_string()
     }
 }
 
-async fn run_undo(
-    unit_id: &str,
-    wd: &Path,
-    env: &BTreeMap<String, String>,
-    undo: &Undo,
-    step: &Step,
-    revision_id: &str,
-    max_tail_bytes: usize,
-    root_dir: Option<PathBuf>,
-) -> Result<()> {
-    tracing::info!(
-        "undo step {}",
-        step.name.clone().unwrap_or(format!("{}", step.run))
-    );
-    let res = run_command(unit_id, wd, env, &undo.run, undo.timeout, max_tail_bytes).await;
-    let res = match res {
-        Ok(tail) => Ok(StepReport {
-            revision_id: revision_id.to_string(),
-            run_id: unit_id.to_string(),
-            name: step.name.clone(),
-            attempts: 0,
-            is_undo: true,
-            log_tail: tail,
-            exit_code: None,
-            success: true,
-            error: None,
-            report_time: now_ms_u64(),
-        }),
-        Err(RunCommandError::Other(e)) => Err(e),
-        Err(RunCommandError::Io(e)) => Err(e.into()),
-        Err(RunCommandError::Failed(e)) => Ok(StepReport {
-            revision_id: revision_id.to_string(),
-            run_id: unit_id.to_string(),
-            name: step.name.clone(),
-            attempts: 0,
-            is_undo: true,
-            log_tail: e.combined_tail,
-            exit_code: e.exit_code,
-            success: false,
-            error: e.error,
-            report_time: now_ms_u64(),
-        }),
-    };
-    match res {
-        Ok(report) => {
-            enqueue_event(DeployReportKind::StepReport(report.clone()), root_dir).await?;
-            if !report.success {
-                Err(anyhow!(
-                    "Step {} failed: {}",
-                    step.name.clone().unwrap_or("unknown step".to_string()),
-                    report.error.unwrap_or("unknown error".to_string())
-                ))
-            } else {
-                Ok(())
-            }
-        }
-
-        Err(e) => Err(e),
-    }
-}
-
-fn merge_log_tails(primary: Option<String>, secondary: Option<String>) -> Option<String> {
-    match (primary, secondary) {
-        (Some(a), Some(b)) => Some(format!("{}\n{}", a, b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use m87_shared::deploy_spec::{CommandSpec, RebootMode, StopSpec, Workdir};
+    use m87_shared::deploy_spec::{
+        CommandSpec, ObserveHooks, ObserveSpec, RebootMode, StopSpec, Workdir,
+    };
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
 
     fn sh(s: impl Into<String>) -> CommandSpec {
         CommandSpec::Sh(s.into())
     }
 
-    fn step(name: &str, cmd: CommandSpec) -> Step {
+    fn mk_step(name: &str, cmd: CommandSpec) -> Step {
         Step {
             name: Some(name.to_string()),
             run: cmd,
@@ -1573,137 +1622,834 @@ mod tests {
         }
     }
 
-    fn mk_service(id: &str, start_cmd: CommandSpec, stop_cmd: CommandSpec) -> RunSpec {
-        RunSpec {
+    fn mk_svc(id: &str, start: CommandSpec, stop: CommandSpec) -> ServiceSpec {
+        ServiceSpec {
             id: id.to_string(),
-            run_type: RunType::Service,
-            enabled: true,
+            lifecycle: Lifecycle::Running,
             workdir: Some(Workdir {
                 mode: WorkdirMode::Persistent,
                 path: None,
             }),
             files: BTreeMap::new(),
             env: BTreeMap::new(),
-            steps: vec![step("start", start_cmd)],
+            steps: vec![mk_step("start", start)],
             on_failure: None,
+            observe: None,
             stop: Some(StopSpec {
-                steps: vec![step("stop", stop_cmd)],
+                steps: vec![mk_step("stop", stop)],
             }),
             reboot: RebootMode::None,
-            observe: None,
+            restart: RestartPolicy::OnFailure,
         }
     }
 
-    fn mk_rev(id: &str, jobs: Vec<RunSpec>) -> DeploymentRevision {
+    fn mk_observer_spec(id: &str) -> ServiceSpec {
+        ServiceSpec {
+            id: id.to_string(),
+            lifecycle: Lifecycle::Running,
+            workdir: Some(Workdir {
+                mode: WorkdirMode::Persistent,
+                path: None,
+            }),
+            files: BTreeMap::new(),
+            env: BTreeMap::new(),
+            steps: vec![],
+            on_failure: None,
+            observe: Some(ObserveSpec {
+                logs: None,
+                liveness: None,
+                health: Some(ObserveHooks {
+                    every: Duration::from_secs(60),
+                    observe: sh("echo ok"),
+                    observe_timeout: None,
+                    record: None,
+                    record_timeout: None,
+                    report: None,
+                    report_timeout: None,
+                    fails_after: None,
+                }),
+            }),
+            stop: None,
+            reboot: RebootMode::None,
+            restart: RestartPolicy::OnFailure,
+        }
+    }
+
+    fn mk_job_def(id: &str, cmd: CommandSpec) -> JobDef {
+        JobDef {
+            id: id.to_string(),
+            lifecycle: Lifecycle::Running,
+            workdir: Some(Workdir {
+                mode: WorkdirMode::Persistent,
+                path: None,
+            }),
+            files: BTreeMap::new(),
+            env: BTreeMap::new(),
+            steps: vec![mk_step("run", cmd)],
+            on_failure: None,
+            reboot: RebootMode::None,
+        }
+    }
+
+    fn mk_rev(
+        id: &str,
+        svcs: Vec<ServiceSpec>,
+        obs: Vec<ServiceSpec>,
+        jobs: Vec<JobDef>,
+    ) -> DeploymentRevision {
         DeploymentRevision {
             id: Some(id.to_string()),
+            services: svcs,
+            observers: obs,
             jobs,
             rollback: None,
         }
     }
 
+    async fn make_mgr(td: &TempDir) -> DeploymentManager {
+        let base = td.path().join("m87");
+        DeploymentManager::new(Some(base)).await.unwrap()
+    }
+
+    // ── Service lifecycle tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn service_starts_on_deploy() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let marker = td.path().join("started");
+        let marker_s = marker.display().to_string();
+
+        let rev = mk_rev(
+            "r1",
+            vec![mk_svc("svc", sh(format!("touch {marker_s}")), sh("true"))],
+            vec![],
+            vec![],
+        );
+        mgr.set_desired_units(rev, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+
+        assert!(marker.exists(), "startup command should have run");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_skips_restart_same_hash() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let counter = td.path().join("count");
+        let counter_s = counter.display().to_string();
+
+        let svc = mk_svc("svc", sh(format!("echo x >> {counter_s}")), sh("true"));
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+
+        mgr.set_desired_units(rev.clone(), vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        // Force the hash into dirty again (simulating a second deploy with same spec)
+        mgr.dirty_services.write().await.insert(svc.get_hash());
+        mgr.reconcile_dirty().await?;
+
+        let lines = std::fs::read_to_string(&counter)?.lines().count();
+        assert_eq!(lines, 1, "startup should run only once for the same hash");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_restarts_on_spec_change() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let order = td.path().join("order");
+        let order_s = order.display().to_string();
+
+        let v1 = mk_rev(
+            "r1",
+            vec![mk_svc(
+                "svc",
+                sh(format!("echo start_v1 >> {order_s}")),
+                sh(format!("echo stop_v1 >> {order_s}")),
+            )],
+            vec![],
+            vec![],
+        );
+        let v2 = mk_rev(
+            "r2",
+            vec![mk_svc(
+                "svc",
+                sh(format!("echo start_v2 >> {order_s}")),
+                sh(format!("echo stop_v2 >> {order_s}")),
+            )],
+            vec![],
+            vec![],
+        );
+
+        mgr.set_desired_units(v1, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        mgr.set_desired_units(v2, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+
+        let text = std::fs::read_to_string(&order)?;
+        assert!(text.contains("start_v1"), "v1 should have started");
+        assert!(text.contains("start_v2"), "v2 should have started");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_stop_before_start_on_change() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let order = td.path().join("order");
+        let order_s = order.display().to_string();
+        let marker = td.path().join("marker");
+        let marker_s = marker.display().to_string();
+
+        let v1 = mk_rev(
+            "r1",
+            vec![mk_svc(
+                "svc",
+                sh(format!("echo start_v1 >> {order_s}; touch {marker_s}")),
+                sh(format!("echo stop_v1 >> {order_s}; rm -f {marker_s}")),
+            )],
+            vec![],
+            vec![],
+        );
+        let v2 = mk_rev(
+            "r2",
+            vec![mk_svc(
+                "svc",
+                sh(format!("echo start_v2 >> {order_s}; touch {marker_s}")),
+                sh(format!("echo stop_v2 >> {order_s}; rm -f {marker_s}")),
+            )],
+            vec![],
+            vec![],
+        );
+
+        mgr.set_desired_units(v1, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(marker.exists());
+
+        mgr.set_desired_units(v2, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+
+        let text = std::fs::read_to_string(&order)?;
+        let lines: Vec<&str> = text.lines().collect();
+        let pos_stop = lines.iter().position(|l| *l == "stop_v1").unwrap();
+        let pos_start = lines.iter().position(|l| *l == "start_v2").unwrap();
+        assert!(
+            pos_stop < pos_start,
+            "stop_v1 ({pos_stop}) must precede start_v2 ({pos_start})"
+        );
+        assert!(marker.exists(), "v2 marker should exist");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_removed_runs_stop() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let marker = td.path().join("marker");
+        let marker_s = marker.display().to_string();
+
+        let v1 = mk_rev(
+            "r1",
+            vec![mk_svc(
+                "svc",
+                sh(format!("touch {marker_s}")),
+                sh(format!("rm -f {marker_s}")),
+            )],
+            vec![],
+            vec![],
+        );
+        mgr.set_desired_units(v1, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(marker.exists());
+
+        let v2 = mk_rev("r2", vec![], vec![], vec![]);
+        mgr.set_desired_units(v2, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(!marker.exists(), "stop cmd should have removed marker");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_stopped_via_lifecycle_runs_stop() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let marker = td.path().join("marker");
+        let marker_s = marker.display().to_string();
+
+        let svc = mk_svc(
+            "svc",
+            sh(format!("touch {marker_s}")),
+            sh(format!("rm -f {marker_s}")),
+        );
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev.clone(), vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(marker.exists());
+
+        // Apply lifecycle=Stopped → should trigger stop reconcile
+        mgr.apply_lifecycle_updates(vec![LifecycleUpdate {
+            unit_id: "svc".to_string(),
+            lifecycle: Lifecycle::Stopped,
+        }])
+        .await?;
+        mgr.reconcile_dirty().await?;
+        assert!(!marker.exists(), "stop steps should have removed marker");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_paused_lifecycle_does_not_stop() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let marker = td.path().join("marker");
+        let stop_marker = td.path().join("stopped");
+        let marker_s = marker.display().to_string();
+        let stop_s = stop_marker.display().to_string();
+
+        let svc = mk_svc(
+            "svc",
+            sh(format!("touch {marker_s}")),
+            sh(format!("touch {stop_s}")),
+        );
+        let rev = mk_rev("r1", vec![svc], vec![], vec![]);
+        mgr.set_desired_units(rev, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(marker.exists());
+
+        // Pause — should NOT run stop steps
+        mgr.apply_lifecycle_updates(vec![LifecycleUpdate {
+            unit_id: "svc".to_string(),
+            lifecycle: Lifecycle::Paused,
+        }])
+        .await?;
+        // dirty_services should be empty (pause doesn't dirty)
+        assert!(
+            mgr.dirty_services.read().await.is_empty(),
+            "pause should not mark service dirty"
+        );
+        assert!(!stop_marker.exists(), "stop steps must NOT run on pause");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_resume_from_stopped() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let marker = td.path().join("marker");
+        let marker_s = marker.display().to_string();
+
+        let svc = mk_svc(
+            "svc",
+            sh(format!("touch {marker_s}")),
+            sh(format!("rm -f {marker_s}")),
+        );
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev.clone(), vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(marker.exists());
+
+        // Stop it
+        mgr.apply_lifecycle_updates(vec![LifecycleUpdate {
+            unit_id: "svc".to_string(),
+            lifecycle: Lifecycle::Stopped,
+        }])
+        .await?;
+        mgr.reconcile_dirty().await?;
+        assert!(!marker.exists());
+
+        // Resume
+        mgr.apply_lifecycle_updates(vec![LifecycleUpdate {
+            unit_id: "svc".to_string(),
+            lifecycle: Lifecycle::Running,
+        }])
+        .await?;
+        mgr.reconcile_dirty().await?;
+        assert!(marker.exists(), "service should restart after resume");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_backoff_respected() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let counter = td.path().join("count");
+        let counter_s = counter.display().to_string();
+
+        // A service whose startup always fails
+        let svc = mk_svc("svc", sh("exit 1"), sh("true"));
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev, vec![]).await?;
+        // First reconcile: startup attempt, fails, startup_failures=1
+        let _ = mgr.reconcile_dirty().await;
+
+        // Manually re-dirty and reconcile again immediately — backoff should prevent re-run
+        mgr.dirty_services.write().await.insert(svc.get_hash());
+
+        // Set up a counter to verify the startup step is NOT called again immediately
+        let svc2 = ServiceSpec {
+            steps: vec![mk_step("start", sh(format!("echo x >> {counter_s}")))],
+            ..svc.clone()
+        };
+        let wd = mgr
+            .resolve_workdir_for(&svc2.id, svc2.workdir.as_ref())
+            .await?;
+        // Manually set startup_failures=1 with last_attempt_ms = now (so backoff is in effect)
+        let mut st = LocalRunState::load(&wd)?;
+        st.startup_failures = 1;
+        st.last_attempt_ms = Some(now_ms_u64());
+        LocalRunState::save(&wd, &st)?;
+
+        let _ = mgr.apply_service(&svc2, "r1", &wd).await;
+        // Counter file should NOT exist because backoff is in effect
+        assert!(
+            !counter.exists(),
+            "startup must not run during backoff window"
+        );
+        Ok(())
+    }
+
+    // ── Observer tests ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn observer_appears_in_observer_map() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let obs = mk_observer_spec("obs1");
+        let rev = mk_rev("r1", vec![], vec![obs], vec![]);
+        mgr.set_desired_units(rev.clone(), vec![]).await?;
+        let loaded = RevisionStore::get_desired_config(Some(mgr.root_dir.clone()))?;
+        let map = loaded.unwrap().get_observer_map();
+        assert_eq!(map.len(), 1);
+        assert!(map.values().any(|o| o.id == "obs1"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observer_removed_from_map() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let obs = mk_observer_spec("obs1");
+        let rev1 = mk_rev("r1", vec![], vec![obs], vec![]);
+        mgr.set_desired_units(rev1, vec![]).await?;
+
+        let rev2 = mk_rev("r2", vec![], vec![], vec![]);
+        mgr.set_desired_units(rev2, vec![]).await?;
+
+        let loaded = RevisionStore::get_desired_config(Some(mgr.root_dir.clone()))?;
+        assert!(loaded.unwrap().get_observer_map().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observer_paused_skips_observe_check() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let mut obs = mk_observer_spec("obs1");
+        // Paused at spec level
+        obs.lifecycle = Lifecycle::Paused;
+        let rev = mk_rev("r1", vec![], vec![obs.clone()], vec![]);
+        mgr.set_desired_units(rev, vec![]).await?;
+
+        let loaded = RevisionStore::get_desired_config(Some(mgr.root_dir.clone()))?.unwrap();
+        // All observers with paused lifecycle should be filtered in the start loop
+        for o in &loaded.observers {
+            assert!(
+                o.lifecycle.is_paused(),
+                "observer should be paused in saved revision"
+            );
+        }
+        Ok(())
+    }
+
+    // ── Job tests ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn job_def_not_run_on_deploy() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let marker = td.path().join("job_ran");
+        let marker_s = marker.display().to_string();
+
+        let jd = mk_job_def("migrate", sh(format!("touch {marker_s}")));
+        let rev = mk_rev("r1", vec![], vec![], vec![jd]);
+        mgr.set_desired_units(rev, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+
+        assert!(
+            !marker.exists(),
+            "job definition must not auto-run on deploy"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn job_run_executes_steps() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let marker = td.path().join("job_done");
+        let marker_s = marker.display().to_string();
+
+        let jd = mk_job_def("migrate", sh(format!("touch {marker_s}")));
+        let rev = mk_rev("r1", vec![], vec![], vec![jd.clone()]);
+        mgr.set_desired_units(rev, vec![]).await?;
+
+        let run = JobRun {
+            run_id: "run-1".to_string(),
+            job_def_id: "migrate".to_string(),
+            revision_id: "r1".to_string(),
+            env_overrides: BTreeMap::new(),
+            status: JobRunStatus::Queued,
+            enqueued_at: now_ms_u64(),
+            started_at: None,
+            completed_at: None,
+            error: None,
+        };
+        mgr.execute_job_run(run, &jd).await?;
+        assert!(marker.exists(), "job run should have created marker");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn job_run_env_override_applied() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let out = td.path().join("env_out");
+        let out_s = out.display().to_string();
+
+        let mut jd = mk_job_def("env-job", sh(format!("echo $TARGET > {out_s}")));
+        jd.env.insert("TARGET".to_string(), "default".to_string());
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert("TARGET".to_string(), "production".to_string());
+
+        let run = JobRun {
+            run_id: "run-2".to_string(),
+            job_def_id: "env-job".to_string(),
+            revision_id: "r1".to_string(),
+            env_overrides: overrides,
+            status: JobRunStatus::Queued,
+            enqueued_at: now_ms_u64(),
+            started_at: None,
+            completed_at: None,
+            error: None,
+        };
+        mgr.execute_job_run(run, &jd).await?;
+        let content = std::fs::read_to_string(&out)?.trim().to_string();
+        assert_eq!(content, "production", "env override must take effect");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn job_run_reports_success() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let jd = mk_job_def("ok-job", sh("true"));
+        let run = JobRun {
+            run_id: "run-ok".to_string(),
+            job_def_id: "ok-job".to_string(),
+            revision_id: "r1".to_string(),
+            env_overrides: BTreeMap::new(),
+            status: JobRunStatus::Queued,
+            enqueued_at: now_ms_u64(),
+            started_at: None,
+            completed_at: None,
+            error: None,
+        };
+        let result = mgr.execute_job_run(run, &jd).await;
+        assert!(result.is_ok(), "successful job should return Ok");
+
+        // Drain all enqueued events; find the JobRunReport among them (StepReports come first)
+        let mut found = false;
+        loop {
+            let ev = claim_next_event(Some(mgr.root_dir.clone())).await?;
+            match ev {
+                None => break,
+                Some(ev) => {
+                    if let DeployReportKind::JobRunReport(r) = ev.report {
+                        assert_eq!(r.status, JobRunStatus::Success);
+                        assert_eq!(r.run_id, "run-ok");
+                        found = true;
+                    }
+                }
+            }
+        }
+        assert!(found, "JobRunReport with Success must be enqueued");
+        Ok(())
+    }
+    #[tokio::test]
+    async fn job_run_reports_failure() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let jd = mk_job_def("fail-job", sh("exit 1"));
+        let run = JobRun {
+            run_id: "run-fail".to_string(),
+            job_def_id: "fail-job".to_string(),
+            revision_id: "r1".to_string(),
+            env_overrides: BTreeMap::new(),
+            status: JobRunStatus::Queued,
+            enqueued_at: now_ms_u64(),
+            started_at: None,
+            completed_at: None,
+            error: None,
+        };
+        let result = mgr.execute_job_run(run, &jd).await;
+        assert!(result.is_err(), "failed job should return Err");
+
+        // Drain all enqueued events; find the JobRunReport among them (StepReports come first)
+        let mut found = false;
+        loop {
+            let ev = claim_next_event(Some(mgr.root_dir.clone())).await?;
+            match ev {
+                None => break,
+                Some(ev) => {
+                    if let DeployReportKind::JobRunReport(r) = ev.report {
+                        assert_eq!(r.status, JobRunStatus::Failed);
+                        assert_eq!(r.run_id, "run-fail");
+                        found = true;
+                    }
+                }
+            }
+        }
+        assert!(found, "JobRunReport with Failed must be enqueued");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multiple_job_runs_sequential() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let order = td.path().join("order");
+        let order_s = order.display().to_string();
+
+        let jd = mk_job_def("seq-job", sh(format!("echo run >> {order_s}")));
+        for i in 0..3u32 {
+            let run = JobRun {
+                run_id: format!("run-{i}"),
+                job_def_id: "seq-job".to_string(),
+                revision_id: "r1".to_string(),
+                env_overrides: BTreeMap::new(),
+                status: JobRunStatus::Queued,
+                enqueued_at: now_ms_u64(),
+                started_at: None,
+                completed_at: None,
+                error: None,
+            };
+            mgr.execute_job_run(run, &jd).await?;
+        }
+        let count = std::fs::read_to_string(&order)?.lines().count();
+        assert_eq!(count, 3, "three runs should produce three lines");
+        Ok(())
+    }
+
+    // ── Restart policy tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn restart_on_failure_marks_service_dirty() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        let svc = mk_svc("svc", sh("true"), sh("true"));
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+
+        // Clear dirty set to start clean
+        mgr.dirty_services.write().await.clear();
+
+        // Simulate restart policy triggering
+        mgr.maybe_restart_service(&svc).await?;
+
+        let wd = mgr
+            .resolve_workdir_for(&svc.id, svc.workdir.as_ref())
+            .await?;
+        let st = LocalRunState::load(&wd)?;
+        assert!(
+            st.last_run_hash.is_none(),
+            "clear_run_hash should have cleared hash"
+        );
+        assert!(
+            mgr.dirty_services.read().await.contains(&svc.get_hash()),
+            "service should be re-queued in dirty set"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_never_does_not_dirty() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        let mut svc = mk_svc("svc", sh("true"), sh("true"));
+        svc.restart = RestartPolicy::Never;
+
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        mgr.dirty_services.write().await.clear();
+
+        mgr.maybe_restart_service(&svc).await?;
+
+        assert!(
+            mgr.dirty_services.read().await.is_empty(),
+            "RestartPolicy::Never must not re-queue service"
+        );
+        Ok(())
+    }
+
+    // ── Hash idempotency / dirty tracking tests ───────────────────────────────
+
     #[tokio::test]
     async fn dirty_add_change_remove_hashes() -> Result<()> {
         let td = TempDir::new()?;
-        let base = td.path().join("m87"); // this is your data_dir root
+        let mgr = make_mgr(&td).await;
 
-        let mgr = DeploymentManager::new(Some(base.clone())).await?;
-
-        // add v1
         let v1 = mk_rev(
-            "rev1",
-            vec![mk_service("svc", sh("echo start_v1"), sh("echo stop_v1"))],
+            "r1",
+            vec![mk_svc("svc", sh("echo s1"), sh("echo stop1"))],
+            vec![],
+            vec![],
         );
-        let h1 = v1.get_job_map().keys().next().unwrap().clone();
+        let h1 = v1.get_service_map().keys().next().cloned().unwrap();
 
-        mgr.set_desired_units(v1).await?;
-        assert!(mgr.dirty.read().await.contains(&h1));
-        mgr.dirty.write().await.clear();
+        mgr.set_desired_units(v1, vec![]).await?;
+        assert!(mgr.dirty_services.read().await.contains(&h1));
+        mgr.dirty_services.write().await.clear();
 
-        // change same id (different hash) by changing command
         let v2 = mk_rev(
-            "rev2",
-            vec![mk_service("svc", sh("echo start_v2"), sh("echo stop_v2"))],
+            "r2",
+            vec![mk_svc("svc", sh("echo s2"), sh("echo stop2"))],
+            vec![],
+            vec![],
         );
-        let h2 = v2.get_job_map().keys().next().unwrap().clone();
+        let h2 = v2.get_service_map().keys().next().cloned().unwrap();
 
-        mgr.set_desired_units(v2).await?;
-        let d = mgr.dirty.read().await.clone();
-        assert!(d.contains(&h1), "old hash should be dirty");
-        assert!(d.contains(&h2), "new hash should be dirty");
-        mgr.dirty.write().await.clear();
+        mgr.set_desired_units(v2, vec![]).await?;
+        let d = mgr.dirty_services.read().await.clone();
+        assert!(d.contains(&h1), "old hash must be dirty");
+        assert!(d.contains(&h2), "new hash must be dirty");
+        mgr.dirty_services.write().await.clear();
 
-        // remove: v2 hash should be marked dirty so reconcile can stop it
-        let v3 = mk_rev("rev3", vec![]);
-        mgr.set_desired_units(v3).await?;
+        // Remove
+        let v3 = mk_rev("r3", vec![], vec![], vec![]);
+        mgr.set_desired_units(v3, vec![]).await?;
         assert!(
-            mgr.dirty.read().await.contains(&h2),
-            "removed hash should be dirty"
+            mgr.dirty_services.read().await.contains(&h2),
+            "removed hash must be dirty"
         );
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn reconcile_stops_before_starts_on_change() -> Result<()> {
+    async fn reconcile_stops_before_starts() -> Result<()> {
         let td = TempDir::new()?;
-        let base = td.path().join("m87");
-
-        let mgr = DeploymentManager::new(Some(base.clone())).await?;
-
-        let order = td.path().join("order.txt");
-        let marker = td.path().join("marker.txt");
+        let mgr = make_mgr(&td).await;
+        let order = td.path().join("order");
+        let marker = td.path().join("marker");
         let order_s = order.display().to_string();
         let marker_s = marker.display().to_string();
 
-        // v1
         let v1 = mk_rev(
-            "rev1",
-            vec![mk_service(
+            "r1",
+            vec![mk_svc(
                 "svc",
                 sh(format!("echo start_v1 >> {order_s}; touch {marker_s}")),
                 sh(format!("echo stop_v1 >> {order_s}; rm -f {marker_s}")),
             )],
+            vec![],
+            vec![],
         );
-
-        mgr.set_desired_units(v1).await?;
+        mgr.set_desired_units(v1, vec![]).await?;
         mgr.reconcile_dirty().await?;
-        assert!(marker.exists(), "expected v1 running marker");
+        assert!(marker.exists());
 
-        // v2 (same id, different content => different hash)
         let v2 = mk_rev(
-            "rev2",
-            vec![mk_service(
+            "r2",
+            vec![mk_svc(
                 "svc",
                 sh(format!("echo start_v2 >> {order_s}; touch {marker_s}")),
                 sh(format!("echo stop_v2 >> {order_s}; rm -f {marker_s}")),
             )],
+            vec![],
+            vec![],
+        );
+        mgr.set_desired_units(v2, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+
+        let text = std::fs::read_to_string(&order)?;
+        let lines: Vec<&str> = text.lines().collect();
+        let p_stop = lines.iter().position(|l| *l == "stop_v1").unwrap();
+        let p_start = lines.iter().position(|l| *l == "start_v2").unwrap();
+        assert!(p_stop < p_start, "stop_v1 must precede start_v2");
+        assert!(marker.exists());
+
+        let v3 = mk_rev("r3", vec![], vec![], vec![]);
+        mgr.set_desired_units(v3, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(
+            !marker.exists(),
+            "marker should be gone after remove + stop"
         );
 
-        mgr.set_desired_units(v2).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn daemon_restart_requeues_stale_hash() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        let svc = mk_svc("svc", sh("true"), sh("true"));
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev, vec![]).await?;
+        mgr.dirty_services.write().await.clear();
+
+        // Simulate: LocalRunState has a *different* hash (stale) or None
+        let wd = mgr
+            .resolve_workdir_for(&svc.id, svc.workdir.as_ref())
+            .await?;
+        let mut st = LocalRunState::load(&wd)?;
+        st.last_run_hash = Some("stale-hash".to_string());
+        LocalRunState::save(&wd, &st)?;
+
+        mgr.set_dirty_services().await?;
+
+        assert!(
+            mgr.dirty_services.read().await.contains(&svc.get_hash()),
+            "stale hash should cause service to be re-queued on startup"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_update_delivered_via_set_desired_units() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let marker = td.path().join("marker");
+        let marker_s = marker.display().to_string();
+
+        let svc = mk_svc(
+            "svc",
+            sh(format!("touch {marker_s}")),
+            sh(format!("rm -f {marker_s}")),
+        );
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev.clone(), vec![]).await?;
         mgr.reconcile_dirty().await?;
+        assert!(marker.exists());
 
-        let contents = std::fs::read_to_string(&order)?;
-        let lines: Vec<&str> = contents.lines().collect();
-
-        let stop_v1 = lines
-            .iter()
-            .position(|l| *l == "stop_v1")
-            .expect("missing stop_v1");
-        let start_v2 = lines
-            .iter()
-            .position(|l| *l == "start_v2")
-            .expect("missing start_v2");
-
-        assert!(stop_v1 < start_v2, "stop_v1 must come before start_v2");
-        assert!(marker.exists(), "expected v2 running marker");
-
-        // remove -> should stop v2
-        let v3 = mk_rev("rev3", vec![]);
-        mgr.set_desired_units(v3).await?;
+        // Deliver lifecycle=Stopped via set_desired_units (as server heartbeat would)
+        mgr.set_desired_units(
+            rev.clone(),
+            vec![LifecycleUpdate {
+                unit_id: "svc".to_string(),
+                lifecycle: Lifecycle::Stopped,
+            }],
+        )
+        .await?;
         mgr.reconcile_dirty().await?;
-        assert!(!marker.exists(), "expected marker removed after stop");
-
+        assert!(!marker.exists(), "stop should have run");
         Ok(())
     }
 }

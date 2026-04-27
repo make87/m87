@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use m87_shared::deploy_spec::{
     CommandSpec, CreateDeployRevisionBody, DeployReport, DeploymentRevision,
-    DeploymentStatusSnapshot, LogSpec, ObserveHooks, ObserveSpec, OnFailure, RebootMode, RetrySpec,
-    RunSpec, RunType, Step, StopSpec, Undo, UndoMode, UpdateDeployRevisionBody, Workdir,
-    WorkdirMode,
+    DeploymentStatusSnapshot, JobDef, Lifecycle, LogSpec, ObserveHooks, ObserveSpec, OnFailure,
+    RebootMode, RetrySpec, ServiceSpec, Step, StopSpec, Undo, UndoMode, UpdateDeployRevisionBody,
+    Workdir, WorkdirMode,
 };
 use serde_yaml::Value;
 use std::collections::BTreeMap;
@@ -101,54 +101,38 @@ pub async fn deploy_file(
     // Convert input -> run-spec YAML string (typed for runspec)
     let update_body = match ty {
         SpecType::Compose => {
-            let run_spec = compose_file_to_runspec_yaml(&file, name.as_deref())
-                .await?
-                .to_yaml()?;
+            let svc = compose_file_to_service_spec(&file, name.as_deref()).await?;
             UpdateDeployRevisionBody {
-                add_run_spec: Some(run_spec),
+                add_service: Some(svc.to_yaml()?),
                 ..Default::default()
             }
         }
         SpecType::Runspec => {
+            // Auto-detect service vs job from the file
             let s = load_file_to_string(&file)?;
-            let mut rs = RunSpec::from_yaml(&s)?;
-            rs.resolve_file_references(base_dir)?;
-            UpdateDeployRevisionBody {
-                add_run_spec: Some(rs.to_yaml()?),
-                ..Default::default()
-            }
+            let update = parse_unit_yaml(&s, base_dir)?;
+            update
         }
         SpecType::Auto => {
             let s = load_file_to_string(&file)?;
             if is_docker_compose_yaml(&s) {
-                let run_spec = compose_file_to_runspec_yaml(&file, name.as_deref())
-                    .await?
-                    .to_yaml()?;
+                let svc = compose_file_to_service_spec(&file, name.as_deref()).await?;
                 UpdateDeployRevisionBody {
-                    add_run_spec: Some(run_spec),
+                    add_service: Some(svc.to_yaml()?),
                     ..Default::default()
                 }
             } else {
-                match RunSpec::from_yaml(&s) {
-                    Ok(mut rs) => {
-                        let _ = rs.resolve_file_references(base_dir)?;
+                // Try new format first (DeploymentRevision with services/observers/jobs)
+                match DeploymentRevision::from_yaml(&s) {
+                    Ok(mut dr) => {
+                        let _ = dr.resolve_file_references(base_dir);
                         UpdateDeployRevisionBody {
-                            add_run_spec: Some(rs.to_yaml()?),
+                            revision: Some(dr.to_yaml()?),
                             ..Default::default()
                         }
                     }
-                    Err(_) => {
-                        let deployment = DeploymentRevision::from_yaml(&s);
-                        if let Ok(mut dr) = deployment {
-                            let _ = dr.resolve_file_references(base_dir)?;
-                            UpdateDeployRevisionBody {
-                                revision: Some(dr.to_yaml()?),
-                                ..Default::default()
-                            }
-                        } else {
-                            let err_msg = deployment.err().unwrap().to_string();
-                            bail!("Failed to parse deployment YAML: {}", err_msg);
-                        }
+                    Err(e) => {
+                        bail!("Failed to parse deployment YAML: {}", e);
                     }
                 }
             }
@@ -419,8 +403,17 @@ pub async fn deployment_update(
             let (spec_id, path) = parse_kv_eq(rep)?;
             let path = PathBuf::from(path);
 
-            let spec = file_to_run_spec(&path, args.r#type).await?;
-            let yml = spec.to_yaml()?;
+            let s = load_file_to_string(&path)?;
+            let base = path.parent().map(|p| p.to_path_buf());
+            let update = if is_docker_compose_yaml(&s) {
+                let svc = compose_file_to_service_spec(&path, Some(&spec_id)).await?;
+                UpdateDeployRevisionBody {
+                    add_service: Some(svc.to_yaml()?),
+                    ..Default::default()
+                }
+            } else {
+                parse_unit_yaml(&s, base)?
+            };
 
             server::update_deployment(
                 &api_url,
@@ -428,10 +421,7 @@ pub async fn deployment_update(
                 trust_invalid,
                 &device_id,
                 &deployment_id,
-                UpdateDeployRevisionBody {
-                    update_run_spec: Some(yml),
-                    ..Default::default()
-                },
+                update,
             )
             .await
             .with_context(|| format!("failed to update run spec {spec_id}"))?;
@@ -450,49 +440,90 @@ pub async fn deployment_update(
             .context("failed to fetch deployment")?;
 
     for id in &args.rm {
+        dep.services.retain(|s| s.id != *id);
+        dep.observers.retain(|s| s.id != *id);
         dep.jobs.retain(|s| s.id != *id);
     }
 
     for rep in &args.replace {
         let (spec_id, path) = parse_kv_eq(rep)?;
         let path = PathBuf::from(path);
-
-        let mut rs = file_to_run_spec(&path, args.r#type).await?;
-        rs.id = spec_id.clone();
-
-        let idx = dep
-            .jobs
-            .iter()
-            .position(|s| s.id == spec_id)
-            .with_context(|| format!("spec_id not found for --replace: {spec_id}"))?;
-        dep.jobs[idx] = rs;
+        let s = load_file_to_string(&path)?;
+        // Try service first, then job
+        if let Ok(mut svc) = ServiceSpec::from_yaml(&s) {
+            svc.id = spec_id.clone();
+            if let Some(idx) = dep.services.iter().position(|s| s.id == spec_id) {
+                dep.services[idx] = svc;
+            } else if let Some(idx) = dep.observers.iter().position(|s| s.id == spec_id) {
+                dep.observers[idx] = svc;
+            } else {
+                bail!("spec_id not found for --replace: {spec_id}");
+            }
+        } else if let Ok(mut jd) = JobDef::from_yaml(&s) {
+            jd.id = spec_id.clone();
+            let idx = dep
+                .jobs
+                .iter()
+                .position(|j| j.id == spec_id)
+                .with_context(|| format!("spec_id not found for --replace: {spec_id}"))?;
+            dep.jobs[idx] = jd;
+        } else {
+            bail!("failed to parse replacement spec for {spec_id}");
+        }
     }
 
     for r in &args.rename {
         let (spec_id, new_name) = parse_kv_eq(r)?;
-        let rs = dep
-            .jobs
-            .iter_mut()
-            .find(|s| s.id == spec_id)
-            .with_context(|| format!("spec_id not found for --rename: {spec_id}"))?;
-        rs.id = new_name;
+        let mut found = false;
+        for svc in dep.services.iter_mut().chain(dep.observers.iter_mut()) {
+            if svc.id == spec_id {
+                svc.id = new_name.clone();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            if let Some(jd) = dep.jobs.iter_mut().find(|j| j.id == spec_id) {
+                jd.id = new_name;
+            } else {
+                bail!("spec_id not found for --rename: {spec_id}");
+            }
+        }
     }
 
     for id in &args.enable {
-        let rs = dep
-            .jobs
-            .iter_mut()
-            .find(|s| s.id == *id)
-            .with_context(|| format!("spec_id not found for --enable: {id}"))?;
-        rs.enabled = true;
+        let mut found = false;
+        for svc in dep.services.iter_mut().chain(dep.observers.iter_mut()) {
+            if svc.id == *id {
+                svc.lifecycle = Lifecycle::Running;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            if let Some(jd) = dep.jobs.iter_mut().find(|j| j.id == *id) {
+                jd.lifecycle = Lifecycle::Running;
+            } else {
+                bail!("spec_id not found for --enable: {id}");
+            }
+        }
     }
     for id in &args.disable {
-        let rs = dep
-            .jobs
-            .iter_mut()
-            .find(|s| s.id == *id)
-            .with_context(|| format!("spec_id not found for --disable: {id}"))?;
-        rs.enabled = false;
+        let mut found = false;
+        for svc in dep.services.iter_mut().chain(dep.observers.iter_mut()) {
+            if svc.id == *id {
+                svc.lifecycle = Lifecycle::Stopped;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            if let Some(jd) = dep.jobs.iter_mut().find(|j| j.id == *id) {
+                jd.lifecycle = Lifecycle::Stopped;
+            } else {
+                bail!("spec_id not found for --disable: {id}");
+            }
+        }
     }
 
     server::update_deployment(
@@ -519,37 +550,27 @@ fn parse_kv_eq(s: &str) -> Result<(String, String)> {
     Ok((k.to_string(), v.to_string()))
 }
 
-async fn file_to_run_spec(path: &Path, spec_type: SpecType) -> Result<RunSpec> {
-    let res = match spec_type {
-        SpecType::Compose => compose_file_to_runspec_yaml(path, None).await?,
-        SpecType::Runspec => {
-            let s = load_file_to_string(path)?;
-            RunSpec::from_yaml(&s)?
-        }
-        SpecType::Auto => {
-            let s = load_file_to_string(path)?;
-            if is_docker_compose_yaml(&s) {
-                compose_file_to_runspec_yaml(path, None).await?
-            } else {
-                match RunSpec::from_yaml(&s) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        let deployment = DeploymentRevision::from_yaml(&s);
-                        if let Ok(_) = deployment {
-                            bail!("--type deployment is not valid for --replace")
-                        } else {
-                            bail!("Failed to parse deployment YAML");
-                        }
-                    }
-                }
-            }
-        }
-        SpecType::Deployment => bail!("--type deployment is not valid for --replace"),
-    };
-    Ok(res)
+/// Parse a unit YAML (ServiceSpec or JobDef) and return the appropriate UpdateDeployRevisionBody.
+fn parse_unit_yaml(yaml: &str, base_dir: Option<PathBuf>) -> Result<UpdateDeployRevisionBody> {
+    // Try ServiceSpec first (has more fields; JobDef is a subset)
+    if let Ok(mut svc) = ServiceSpec::from_yaml(yaml) {
+        svc.resolve_file_references(base_dir)?;
+        return Ok(UpdateDeployRevisionBody {
+            add_service: Some(svc.to_yaml()?),
+            ..Default::default()
+        });
+    }
+    if let Ok(mut jd) = JobDef::from_yaml(yaml) {
+        jd.resolve_file_references(base_dir)?;
+        return Ok(UpdateDeployRevisionBody {
+            add_job: Some(jd.to_yaml()?),
+            ..Default::default()
+        });
+    }
+    bail!("failed to parse as ServiceSpec or JobDef")
 }
 
-pub async fn compose_file_to_runspec_yaml(file: &Path, name: Option<&str>) -> Result<RunSpec> {
+pub async fn compose_file_to_service_spec(file: &Path, name: Option<&str>) -> Result<ServiceSpec> {
     // Read compose file (kept verbatim; we do not attempt to interpret/transform compose contents).
     let compose = tokio::fs::read_to_string(file)
         .await
@@ -571,7 +592,7 @@ pub async fn compose_file_to_runspec_yaml(file: &Path, name: Option<&str>) -> Re
         stem.to_string()
     } else {
         return Err(anyhow!(
-            "cannot derive RunSpec id: pass name or use a compose file with a valid name"
+            "cannot derive ServiceSpec id: pass name or use a compose file with a valid name"
         ));
     };
 
@@ -584,8 +605,8 @@ pub async fn compose_file_to_runspec_yaml(file: &Path, name: Option<&str>) -> Re
         timeout: Some(Duration::from_secs(15 * 60)),
         retry: Some(RetrySpec {
             attempts: 2,
-            backoff: Duration::from_secs(15),
-            on_exit_codes: None,
+            backoff: Some(Duration::from_secs(15)),
+            on_exit_codes: vec![],
         }),
         undo: None,
     };
@@ -654,25 +675,25 @@ pub async fn compose_file_to_runspec_yaml(file: &Path, name: Option<&str>) -> Re
         }),
     };
 
-    Ok(RunSpec::new(
+    Ok(ServiceSpec {
         id,
-        RunType::Service,
-        true,
-        Some(Workdir {
+        lifecycle: Lifecycle::Running,
+        workdir: Some(Workdir {
             mode: WorkdirMode::Ephemeral,
             path: None,
         }),
         files,
-        BTreeMap::new(),
-        vec![pull, up],
-        Some(OnFailure {
+        env: BTreeMap::new(),
+        steps: vec![pull, up],
+        on_failure: Some(OnFailure {
             undo: UndoMode::ExecutedSteps,
             continue_on_failure: false,
         }),
-        Some(stop),
-        RebootMode::None,
-        Some(observe),
-    ))
+        stop: Some(stop),
+        reboot: RebootMode::None,
+        observe: Some(observe),
+        restart: m87_shared::deploy_spec::RestartPolicy::OnFailure,
+    })
 }
 
 pub async fn get_deployment_reports(

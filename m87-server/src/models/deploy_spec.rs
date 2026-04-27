@@ -7,9 +7,9 @@ use futures::TryStreamExt;
 use m87_shared::{
     deploy_spec::{
         BucketRow, BucketTotals, DeployReport, DeployReportKind, DeploymentRevision,
-        DeploymentStatusSnapshot, FailureAggResponse, ObserveKind, ObserveStatusItem, Outcome,
-        RollbackStatus, RunSpec, RunStatus, SliceLevel, StepAttemptStatus, StepState, StepStatus,
-        UpdateDeployRevisionBody,
+        DeploymentStatusSnapshot, FailureAggResponse, JobDef, ObserveStatusItem, Outcome,
+        RollbackStatus, RunStatus, ServiceSpec, SliceLevel, Step, StepAttemptStatus, StepState,
+        StepStatus, UnitKind, UpdateDeployRevisionBody,
     },
     device::ObserveStatus,
 };
@@ -68,6 +68,25 @@ pub fn to_update_doc(
     if body.revision.is_some() {
         which += 1;
     }
+    if body.add_service.is_some() {
+        which += 1;
+    }
+    if body.add_observer.is_some() {
+        which += 1;
+    }
+    if body.add_job.is_some() {
+        which += 1;
+    }
+    if body.remove_unit_id.is_some() {
+        which += 1;
+    }
+    if body.lifecycle_update.is_some() {
+        which += 1;
+    }
+    if body.active.is_some() {
+        which += 1;
+    }
+    // legacy fields
     if body.add_run_spec.is_some() {
         which += 1;
     }
@@ -75,9 +94,6 @@ pub fn to_update_doc(
         which += 1;
     }
     if body.remove_run_spec_id.is_some() {
-        which += 1;
-    }
-    if body.active.is_some() {
         which += 1;
     }
 
@@ -100,32 +116,76 @@ pub fn to_update_doc(
         ));
     }
 
-    if let Some(yaml) = &body.add_run_spec {
-        let rs: RunSpec = serde_yaml::from_str(yaml).map_err(|e| {
-            ServerError::bad_request(&format!("invalid YAML in `add_run_spec`: {}", e))
+    if let Some(yaml) = &body.add_service {
+        let spec: ServiceSpec = ServiceSpec::from_yaml(yaml).map_err(|e| {
+            ServerError::bad_request(&format!("invalid YAML in `add_service`: {}", e))
         })?;
         return Ok((
-            doc! { "$push": { "revision.jobs": to_bson(&rs).map_err(|e| ServerError::bad_request(&format!("RunSpec -> bson failed: {}", e)))? } },
+            doc! { "$push": { "revision.services": to_bson(&spec).map_err(|e| ServerError::bad_request(&format!("ServiceSpec -> bson failed: {}", e)))? } },
             None,
         ));
     }
 
-    if let Some(yaml) = &body.update_run_spec {
-        let rs: RunSpec = serde_yaml::from_str(yaml).map_err(|e| {
-            ServerError::bad_request(&format!("invalid YAML in `update_run_spec`: {}", e))
+    if let Some(yaml) = &body.add_observer {
+        let spec: ServiceSpec = ServiceSpec::from_yaml(yaml).map_err(|e| {
+            ServerError::bad_request(&format!("invalid YAML in `add_observer`: {}", e))
         })?;
         return Ok((
-            doc! { "$set": { "revision.jobs.$": to_bson(&rs).map_err(|e| ServerError::bad_request(&format!("RunSpec -> bson failed: {}", e)))? } },
-            Some(doc! { "revision.jobs.id": &rs.id }),
+            doc! { "$push": { "revision.observers": to_bson(&spec).map_err(|e| ServerError::bad_request(&format!("ServiceSpec -> bson failed: {}", e)))? } },
+            None,
         ));
     }
 
-    if let Some(id) = &body.remove_run_spec_id {
-        return Ok((doc! { "$pull": { "revision.jobs": { "id": id } } }, None));
+    if let Some(yaml) = &body.add_job {
+        let job: JobDef = JobDef::from_yaml(yaml)
+            .map_err(|e| ServerError::bad_request(&format!("invalid YAML in `add_job`: {}", e)))?;
+        return Ok((
+            doc! { "$push": { "revision.jobs": to_bson(&job).map_err(|e| ServerError::bad_request(&format!("JobDef -> bson failed: {}", e)))? } },
+            None,
+        ));
+    }
+
+    if let Some(id) = &body.remove_unit_id {
+        // Remove from all three arrays by id
+        return Ok((
+            doc! {
+                "$pull": {
+                    "revision.services": { "id": id },
+                    "revision.observers": { "id": id },
+                    "revision.jobs": { "id": id },
+                }
+            },
+            None,
+        ));
+    }
+
+    if body.lifecycle_update.is_some() {
+        // Lifecycle updates are delivered to the device via heartbeat.
+        // No revision document change is needed here; return a no-op set.
+        // TODO: persist lifecycle_update to a pending queue for heartbeat delivery.
+        return Ok((doc! { "$set": { "dirty": true } }, None));
     }
 
     if let Some(active) = body.active {
         return Ok((doc! { "$set": { "active": active } }, None));
+    }
+
+    // Legacy backward-compat fields
+    if body.add_run_spec.is_some() {
+        return Err(ServerError::bad_request(
+            "add_run_spec is not supported; use add_service, add_observer, or add_job",
+        ));
+    }
+
+    if body.update_run_spec.is_some() {
+        return Err(ServerError::bad_request(
+            "update_run_spec is not supported in this version",
+        ));
+    }
+
+    if let Some(id) = &body.remove_run_spec_id {
+        // Legacy: remove from jobs only (backward compat)
+        return Ok((doc! { "$pull": { "revision.jobs": { "id": id } } }, None));
     }
 
     Err(ServerError::internal_error("This should be unreachable"))
@@ -531,19 +591,18 @@ impl DeployReportDoc {
             .await?
             .ok_or(ServerError::not_found("Deployment not found"))?;
         let deployment = deployment_doc.revision;
-        let mut runs: Vec<RunStatus> = Vec::with_capacity(deployment.jobs.len());
-        let mut run_id_to_idx: HashMap<String, usize> =
-            HashMap::with_capacity(deployment.jobs.len());
+        let total_units =
+            deployment.services.len() + deployment.observers.len() + deployment.jobs.len();
+        let mut runs: Vec<RunStatus> = Vec::with_capacity(total_units);
+        let mut run_id_to_idx: HashMap<String, usize> = HashMap::with_capacity(total_units);
 
-        for (ri, job) in deployment.jobs.iter().enumerate() {
-            run_id_to_idx.insert(job.id.clone(), ri);
-
-            let mut steps: Vec<StepStatus> = Vec::with_capacity(step_slots(job));
-            for (i, st) in job.steps.iter().enumerate() {
+        // Helper closure: build step slot vec for any unit type's steps list.
+        let build_steps = |unit_id: &str, spec_steps: &[Step]| -> Vec<StepStatus> {
+            let mut steps = Vec::with_capacity(step_slots(spec_steps.len()));
+            for (i, st) in spec_steps.iter().enumerate() {
                 let name = st.name.clone().unwrap_or_else(|| format!("step {}", i + 1));
-                // main row
                 steps.push(StepStatus {
-                    step_id: step_id(&job.id, i, false),
+                    step_id: step_id(unit_id, i, false),
                     name: name.clone(),
                     is_undo: false,
                     defined_in_spec: true,
@@ -554,9 +613,8 @@ impl DeployReportDoc {
                     exit_code: None,
                     error: None,
                 });
-                // undo row (allocated but “expected” only if undo exists)
                 steps.push(StepStatus {
-                    step_id: step_id(&job.id, i, true),
+                    step_id: step_id(unit_id, i, true),
                     name,
                     is_undo: true,
                     defined_in_spec: st.undo.is_some(),
@@ -568,11 +626,51 @@ impl DeployReportDoc {
                     error: None,
                 });
             }
+            steps
+        };
 
+        for svc in deployment.services.iter() {
+            let ri = runs.len();
+            run_id_to_idx.insert(svc.id.clone(), ri);
+            let steps = build_steps(&svc.id, &svc.steps);
+            runs.push(RunStatus {
+                run_id: svc.id.clone(),
+                enabled: !svc.lifecycle.is_stopped(),
+                unit_kind: UnitKind::Service,
+                outcome: Outcome::Unknown,
+                last_update: 0,
+                error: None,
+                alive: None,
+                healthy: None,
+                steps,
+            });
+        }
+
+        for obs in deployment.observers.iter() {
+            let ri = runs.len();
+            run_id_to_idx.insert(obs.id.clone(), ri);
+            let steps = build_steps(&obs.id, &obs.steps);
+            runs.push(RunStatus {
+                run_id: obs.id.clone(),
+                enabled: !obs.lifecycle.is_stopped(),
+                unit_kind: UnitKind::Observer,
+                outcome: Outcome::Unknown,
+                last_update: 0,
+                error: None,
+                alive: None,
+                healthy: None,
+                steps,
+            });
+        }
+
+        for job in deployment.jobs.iter() {
+            let ri = runs.len();
+            run_id_to_idx.insert(job.id.clone(), ri);
+            let steps = build_steps(&job.id, &job.steps);
             runs.push(RunStatus {
                 run_id: job.id.clone(),
-                enabled: job.enabled,
-                run_type: job.run_type.clone(),
+                enabled: !job.lifecycle.is_stopped(),
+                unit_kind: UnitKind::Job,
                 outcome: Outcome::Unknown,
                 last_update: 0,
                 error: None,
@@ -643,24 +741,25 @@ impl DeployReportDoc {
 
                         // Update alive/healthy with latest only; no per-run Vec<RunState>.
                         // Adapt these fields to your RunState shape.
-                        if let Some((kind, ok, log_tail)) = x.as_observe_update() {
+                        let rs = x.as_observe_update();
+                        if let Some(ok) = rs.alive {
                             let item = ObserveStatusItem {
                                 report_time: t,
                                 ok,
-                                log_tail,
+                                log_tail: rs.log_tail.clone(),
                             };
-                            match kind {
-                                ObserveKind::Alive => {
-                                    if run.alive.as_ref().map(|a| a.report_time).unwrap_or(0) <= t {
-                                        run.alive = Some(item);
-                                    }
-                                }
-                                ObserveKind::Healthy => {
-                                    if run.healthy.as_ref().map(|a| a.report_time).unwrap_or(0) <= t
-                                    {
-                                        run.healthy = Some(item);
-                                    }
-                                }
+                            if run.alive.as_ref().map(|a| a.report_time).unwrap_or(0) <= t {
+                                run.alive = Some(item);
+                            }
+                        }
+                        if let Some(ok) = rs.healthy {
+                            let item = ObserveStatusItem {
+                                report_time: t,
+                                ok,
+                                log_tail: rs.log_tail.clone(),
+                            };
+                            if run.healthy.as_ref().map(|a| a.report_time).unwrap_or(0) <= t {
+                                run.healthy = Some(item);
                             }
                         }
                     }
@@ -670,16 +769,22 @@ impl DeployReportDoc {
                         let run = &mut runs[ri];
                         let t = s.report_time as u64;
                         run.last_update = run.last_update.max(t);
-                        let job = deployment.get_job_by_id(&s.run_id);
-                        if job.is_none() {
-                            continue;
-                        }
-                        let job = job.unwrap();
-                        let idx = job.steps.iter().position(|step| step.name == s.name);
-                        if idx.is_none() {
-                            continue;
-                        }
-                        let idx = idx.unwrap();
+                        // Look up step index from whichever unit section owns this run_id.
+                        let idx = {
+                            let found = if let Some(job) = deployment.get_job_by_id(&s.run_id) {
+                                job.steps.iter().position(|step| step.name == s.name)
+                            } else if let Some(svc) = deployment.get_service_by_id(&s.run_id) {
+                                svc.steps.iter().position(|step| step.name == s.name)
+                            } else if let Some(obs) = deployment.get_observer_by_id(&s.run_id) {
+                                obs.steps.iter().position(|step| step.name == s.name)
+                            } else {
+                                None
+                            };
+                            match found {
+                                Some(i) => i,
+                                None => continue,
+                            }
+                        };
 
                         // Critical: use step_index from the report (store it in DB).
                         let idx = idx as usize;
@@ -717,13 +822,16 @@ impl DeployReportDoc {
                                 .as_ref()
                                 .map(|e| e.trim().to_string())
                                 .filter(|x| !x.is_empty()),
-                            log_tail: Some(s.log_tail.clone()),
+                            log_tail: s.log_tail.clone(),
                         };
 
                         if st.attempt.as_ref().map(|a| a.report_time).unwrap_or(0) <= t {
                             st.attempt = Some(attempt);
                         }
                     }
+                }
+                DeployReportKind::JobRunReport(_) => {
+                    // Job run reports are handled separately; ignore in snapshot.
                 }
             }
         }
@@ -764,9 +872,9 @@ impl DeployReportDoc {
         db: &Arc<Mongo>,
         device_id: &ObjectId,
         revision_id: &str,
-        from_ts_ms: i64,
-        to_ts_ms: i64,
-        bucket_ms: i64,
+        from_ts_ms: u64,
+        to_ts_ms: u64,
+        bucket_ms: u64,
         level: SliceLevel,
     ) -> ServerResult<FailureAggResponse> {
         use futures::TryStreamExt;
@@ -776,12 +884,17 @@ impl DeployReportDoc {
         if to_ts_ms <= from_ts_ms {
             return Err(ServerError::bad_request("to_ts_ms must be > from_ts_ms"));
         }
-        if bucket_ms <= 0 {
+        if bucket_ms == 0 {
             return Err(ServerError::bad_request("bucket_ms must be > 0"));
         }
 
-        let from_dt = mongodb::bson::DateTime::from_millis(from_ts_ms);
-        let to_dt = mongodb::bson::DateTime::from_millis(to_ts_ms);
+        // Cast to i64 for use in BSON pipeline expressions (BSON has no u64).
+        let from_ms: i64 = from_ts_ms as i64;
+        let to_ms: i64 = to_ts_ms as i64;
+        let bucket: i64 = bucket_ms as i64;
+
+        let from_dt = mongodb::bson::DateTime::from_millis(from_ms);
+        let to_dt = mongodb::bson::DateTime::from_millis(to_ms);
 
         let match_doc = doc! {
             "device_id": device_id,
@@ -796,15 +909,15 @@ impl DeployReportDoc {
         // raw_bucket_start = from + floor((created_ms - from)/bucket_ms)*bucket_ms
         let raw_bucket_start = doc! {
             "$add": [
-                from_ts_ms,
+                from_ms,
                 {
                     "$multiply": [
-                        bucket_ms,
+                        bucket,
                         {
                             "$floor": {
                                 "$divide": [
-                                    { "$subtract": [ created_ms, from_ts_ms ] },
-                                    bucket_ms
+                                    { "$subtract": [ created_ms, from_ms ] },
+                                    bucket
                                 ]
                             }
                         }
@@ -818,7 +931,7 @@ impl DeployReportDoc {
 
         // bucket_end_ms = toLong(bucket_start_ms + bucket_ms)
         let bucket_end_ms = doc! {
-            "$toLong": { "$add": [ bucket_start_ms.clone(), bucket_ms ] }
+            "$toLong": { "$add": [ bucket_start_ms.clone(), bucket ] }
         };
 
         // Count events (not 0/1):
@@ -900,7 +1013,7 @@ impl DeployReportDoc {
             start_ts_ms: i64,
             end_ts_ms: i64,
             total: BucketTotals,
-            by_run: Option<BTreeMap<String, BucketTotals>>,
+            by_run: BTreeMap<String, BucketTotals>,
         }
 
         let mut buckets: Vec<BucketRow> = Vec::new();
@@ -910,15 +1023,13 @@ impl DeployReportDoc {
             let row: Row = mongodb::bson::from_document(d)
                 .map_err(|e| ServerError::internal_error(&format!("BSON decode failed: {e}")))?;
 
-            if let Some(ref m) = row.by_run {
-                for k in m.keys() {
-                    run_set.insert(k.clone());
-                }
+            for k in row.by_run.keys() {
+                run_set.insert(k.clone());
             }
 
             buckets.push(BucketRow {
-                start_ts_ms: row.start_ts_ms,
-                end_ts_ms: row.end_ts_ms.min(to_ts_ms),
+                start_ts_ms: row.start_ts_ms as u64,
+                end_ts_ms: row.end_ts_ms.min(to_ms) as u64,
                 total: row.total,
                 by_run: row.by_run,
             });
@@ -928,7 +1039,7 @@ impl DeployReportDoc {
 
         Ok(FailureAggResponse {
             level,
-            runs: Some(runs),
+            runs,
             buckets,
         })
     }
@@ -941,10 +1052,10 @@ fn main_slot(step_index: usize) -> usize {
     step_index * 2
 }
 
-fn step_slots(job: &RunSpec) -> usize {
+fn step_slots(step_count: usize) -> usize {
     // allocate 2 per step (main + undo) to allow O(1) indexing;
     // you can still hide undo in rendering if never executed.
-    job.steps.len() * 2
+    step_count * 2
 }
 
 fn step_id(run_id: &str, idx: usize, is_undo: bool) -> String {

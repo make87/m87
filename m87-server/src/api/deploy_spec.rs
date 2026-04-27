@@ -233,7 +233,6 @@ async fn update_revision_by_id(
     let (update_doc, extra_filter) = to_update_doc(&payload)?;
     let report_delete_doc = to_report_delete_doc(&payload, &id, &device_oid)?;
 
-    // if its an update with a new revision that is set as active. set the old active to false
     let set_inactive = match &payload.active {
         Some(true) => {
             let out =
@@ -254,6 +253,7 @@ async fn update_revision_by_id(
     if let Some(extra) = extra_filter {
         filter.extend(extra);
     }
+
     let res = state
         .db
         .deploy_revisions()
@@ -263,6 +263,7 @@ async fn update_revision_by_id(
     if res.matched_count == 0 {
         return Err(ServerError::not_found("Revision not found"));
     }
+
     if let Some((filter, update_doc)) = set_inactive {
         let res = state
             .db
@@ -270,12 +271,10 @@ async fn update_revision_by_id(
             .update_one(filter, update_doc)
             .await?;
         if res.matched_count == 0 {
-            // TODO: check if and how we might need to recover to a stable state
             return Err(ServerError::not_found("Revision not found"));
         }
     }
 
-    // update device last_deployment_hash. Pesimistic update as we might update an inactive revision. TODO for later
     let _ = DeviceDoc::invalidate_deployment_hash(&state.db, &device_oid).await?;
 
     if let Some(delete_doc) = report_delete_doc {
@@ -283,7 +282,6 @@ async fn update_revision_by_id(
         tracing::info!("Deleted {} deploy reports", res.deleted_count);
     }
 
-    // if we removed a run_id also remove form current_run_states
     if let Some(run_id) = &payload.remove_run_spec_id {
         let _ = state
             .db
