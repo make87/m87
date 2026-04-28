@@ -17,6 +17,11 @@ pub struct HeartbeatRequest {
     pub active_revision: String,
     #[serde(default)]
     pub deploy_report: Option<DeployReportKind>,
+    /// Revision format version this device supports.
+    /// `None` / `1` = legacy (`jobs: Vec<RunSpec>` flat list).
+    /// `2`         = new format (`services` / `observers` / `job_defs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_revision_format: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

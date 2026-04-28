@@ -244,6 +244,13 @@ impl DeviceDoc {
         payload: HeartbeatRequest,
         config: &Arc<AppConfig>,
     ) -> ServerResult<HeartbeatResponse> {
+        // Determine the wire format this device understands.
+        // None / 1 = legacy (flat "jobs" list); 2+ = new (services/observers/job_defs).
+        // DeploymentRevision's custom Serialize always emits both formats, so this flag
+        // is informational and available for future selective serialization.
+        let use_new_format = payload.supported_revision_format.unwrap_or(1) >= 2;
+        let _ = use_new_format; // currently both paths receive the same serialized value
+
         let mut update_fields = doc! {};
         if let Some(sys_info) = payload.system_info {
             update_fields.insert("system_info", mongodb::bson::to_bson(&sys_info).unwrap());

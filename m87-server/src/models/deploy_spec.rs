@@ -171,10 +171,56 @@ pub fn to_update_doc(
     }
 
     // Legacy backward-compat fields
-    if body.add_run_spec.is_some() {
-        return Err(ServerError::bad_request(
-            "add_run_spec is not supported; use add_service, add_observer, or add_job",
-        ));
+    if let Some(yaml) = &body.add_run_spec {
+        // Parse the type field to route to the correct collection.
+        let raw: serde_yaml::Value = serde_yaml::from_str(yaml).map_err(|e| {
+            ServerError::bad_request(&format!("invalid YAML in `add_run_spec`: {}", e))
+        })?;
+
+        let run_type = raw
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("service");
+
+        match run_type {
+            "observe" => {
+                let spec: ServiceSpec = serde_yaml::from_str(yaml).map_err(|e| {
+                    ServerError::bad_request(&format!(
+                        "invalid YAML in `add_run_spec` (observer): {}",
+                        e
+                    ))
+                })?;
+                return Ok((
+                    doc! { "$push": { "revision.observers": to_bson(&spec).map_err(|e| ServerError::bad_request(&e.to_string()))? } },
+                    None,
+                ));
+            }
+            "job" => {
+                let jd: JobDef = serde_yaml::from_str(yaml).map_err(|e| {
+                    ServerError::bad_request(&format!(
+                        "invalid YAML in `add_run_spec` (job): {}",
+                        e
+                    ))
+                })?;
+                return Ok((
+                    doc! { "$push": { "revision.jobs": to_bson(&jd).map_err(|e| ServerError::bad_request(&e.to_string()))? } },
+                    None,
+                ));
+            }
+            _ => {
+                // Default: service
+                let spec: ServiceSpec = serde_yaml::from_str(yaml).map_err(|e| {
+                    ServerError::bad_request(&format!(
+                        "invalid YAML in `add_run_spec` (service): {}",
+                        e
+                    ))
+                })?;
+                return Ok((
+                    doc! { "$push": { "revision.services": to_bson(&spec).map_err(|e| ServerError::bad_request(&e.to_string()))? } },
+                    None,
+                ));
+            }
+        }
     }
 
     if body.update_run_spec.is_some() {

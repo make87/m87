@@ -51,19 +51,178 @@ m87 <device> serial <name>     # serial mount forwarding
 m87 <device> audit --details   # audit logs on who interacted with the device
 ```
 
-### Async Deployment
+### Deployment
 
-In case your devices are not always online, you can register jobs
-to be executed when the device comes online.
-With this you can deploy arbitrary runtimes like docker systemd servers etc
-or observe services and get notified upon events.
+Deploy services, observers, and job definitions to a device — even when it is
+offline. The device picks up changes as soon as it comes back online.
 
+**Units** come in three kinds:
+
+| Kind         | Description                                                                                      |
+| ------------ | ------------------------------------------------------------------------------------------------ |
+| **service**  | Long-running process. Has startup steps, optional stop steps, optional health / liveness checks. |
+| **observer** | Polling-only unit. No startup steps — just health / liveness checks that run on a schedule.      |
+| **job**      | One-shot definition triggered explicitly. Runs once per trigger; each run is tracked separately. |
+
+#### Deploying
+
+```sh
+# Deploy a single unit — type is auto-detected from the YAML
+m87 <device> deploy ./web-server.yaml
+m87 <device> deploy ./api-health.yaml      # observer if it has no steps
+m87 <device> deploy ./db-migrate.yaml      # job definition
+m87 <device> deploy ./docker-compose.yml   # docker compose — auto-converted
+
+# Atomically replace the entire device state from a full revision file
+# (contains services / observers / job_defs sections)
+m87 <device> deploy ./my-stack.yaml --replace-all
+
+# Remove a unit from the active deployment
+m87 <device> undeploy web-server
+
+# List everything currently deployed
+m87 <device> units
+
+# Show full status (health, step outcomes, last update times)
+m87 <device> deployment status --logs
+m87 <device> deployment show --yaml
 ```
-m87 <device> deploy ./my-compose.yml             # register a docker compsoe file to be run and observed (Auto converted by our cli)
-m87 <device> undeploy my-compose                 # remove the compose spec fomr the current deployment
-m87 <device> deploy ./custom_run_spec.yml        # register a custom run spec. See docs for schema
-m87 <device> deployment status --logs            # get the status and logs of the currently active deployment
-m87 <device> deployment show --yaml              # show the yaml spec of the currently active deployment
+
+#### Runtime lifecycle control
+
+Change a unit's state at runtime — no YAML file or revision bump required.
+Changes are delivered to the device on its next heartbeat (typically within
+a few seconds).
+
+```sh
+m87 <device> start web-server       # run startup steps (if not already running)
+m87 <device> stop web-server        # run stop steps and tear down
+m87 <device> stop web-server --force  # skip stop steps, tear down immediately
+m87 <device> pause web-server       # suspend observe polling; process keeps running
+m87 <device> resume web-server      # resume a paused unit
+m87 <device> restart web-server     # stop then start
+```
+
+#### Triggering jobs
+
+```sh
+# Trigger a job run (creates a tracked run instance)
+m87 <device> job trigger db-migrate
+m87 <device> job trigger db-migrate --env TARGET=prod --env DRY_RUN=false
+
+# Inspect runs
+m87 <device> job list                       # all runs across all jobs
+m87 <device> job list --job db-migrate      # runs for one job definition
+m87 <device> job status <run-id>            # status, times, error
+m87 <device> job logs <run-id>              # step-by-step output for this run
+
+# List job definitions (not runs)
+m87 <device> job defs
+```
+
+#### Logs
+
+```sh
+# Live streaming observe-follow logs (from running services / observers)
+m87 <device> logs
+m87 <device> logs -f                        # follow
+
+# Recorded step execution history (startup, stop, restart events)
+m87 <device> logs --steps                   # all units
+m87 <device> logs web-server --steps        # one unit
+
+# Step output for a specific job run
+m87 <device> job logs <run-id>
+```
+
+#### Rollback
+
+```sh
+m87 <device> rollback                       # activate previous revision
+m87 <device> rollback --list               # show revision history
+m87 <device> rollback --to <revision-id>   # jump to a specific revision
+```
+
+#### YAML format reference
+
+A **service** YAML:
+
+```yaml
+# web-server.yaml
+id: web-server
+steps:
+  - name: start
+    run: docker compose up -d
+stop:
+  steps:
+    - name: stop
+      run: docker compose down
+observe:
+  liveness:
+    every: 30s
+    observe: docker compose ps | grep -q Up
+restart: on_failure # auto-restart when liveness fails (default)
+```
+
+An **observer** YAML (no `steps` — purely polling):
+
+```yaml
+# api-health.yaml
+id: api-health
+observe:
+  health:
+    every: 60s
+    observe: curl -sf http://api.internal/health
+    fails_after: 3 # trigger after 3 consecutive failures
+```
+
+A **job** YAML:
+
+```yaml
+# db-migrate.yaml
+id: db-migrate
+steps:
+  - name: migrate
+    run: ./migrate.sh
+    timeout: 10m
+  - name: verify
+    run: ./verify.sh
+```
+
+A **full revision** file (atomic multi-unit deploy with `--replace-all`):
+
+```yaml
+# my-stack.yaml
+services:
+  - id: web-server
+    steps:
+      - name: start
+        run: docker compose up -d
+    stop:
+      steps:
+        - name: stop
+          run: docker compose down
+    observe:
+      liveness:
+        every: 30s
+        observe: docker compose ps | grep -q Up
+
+observers:
+  - id: api-health
+    observe:
+      health:
+        every: 60s
+        observe: curl -sf http://api.internal/health
+
+job_defs:
+  - id: db-migrate
+    steps:
+      - name: migrate
+        run: ./migrate.sh
+
+rollback:
+  on_health_failure: consecutive(3)
+  stabilization_period_secs: 60
 ```
 
 ### File Transfer
@@ -135,6 +294,7 @@ m87 runtime disable --now   # disable at boot and stop
 The CLI automatically handles privilege escalation by invoking `sudo`. The runtime service runs as your user, not root.
 
 **Command behavior:**
+
 - `start` / `enable --now`: Installs the service file, enables it to start on boot, and starts it immediately
 - `stop`: Stops the running service but keeps it enabled for next boot
 - `restart`: Matches systemd behavior — restarts if running, starts if stopped

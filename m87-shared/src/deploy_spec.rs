@@ -254,7 +254,7 @@ impl JobDef {
 // JobRun – one triggered execution of a JobDef
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum JobRunStatus {
     Queued,
@@ -320,21 +320,12 @@ impl Display for UnitKind {
 // DeploymentRevision – the full desired state pushed to a device
 // ---------------------------------------------------------------------------
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone)]
 pub struct DeploymentRevision {
-    #[serde(default)]
     pub id: Option<String>,
-
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ServiceSpec>,
-
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observers: Vec<ServiceSpec>,
-
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub jobs: Vec<JobDef>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollback: Option<RollbackPolicy>,
 }
 
@@ -458,27 +449,10 @@ impl DeploymentRevision {
     /// Accepts both the new format (`services:` / `observers:` / `jobs:`) and
     /// the legacy format (`jobs: [{type: service|job|observe, ...}]`).
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
-        let raw: serde_yaml::Value = serde_yaml::from_str(yaml)?;
-
-        // Detect legacy format: `jobs` list whose first element has a `type` field.
-        let is_legacy = raw
-            .get("jobs")
-            .and_then(|j| j.as_sequence())
-            .and_then(|s| s.first())
-            .and_then(|f| f.get("type"))
-            .is_some();
-
-        let mut rev: Self = if is_legacy {
-            let legacy: LegacyDeploymentRevision = serde_yaml::from_value(raw)?;
-            legacy.into()
-        } else {
-            serde_yaml::from_value(raw)?
-        };
-
+        let mut rev: Self = serde_yaml::from_str(yaml)?;
         if rev.id.is_none() {
             rev.id = Some(derive_id_from_hash(&rev));
         }
-
         Ok(rev)
     }
 
@@ -500,6 +474,261 @@ impl DeploymentRevision {
             j.resolve_file_references(base_dir.clone())?;
         }
         Ok(())
+    }
+
+    /// Build the legacy flat job list (RunSpec-like) for backward-compat wire format.
+    /// Old devices (pre-services/observers split) parse `"jobs": [...]` with a `type` field.
+    pub fn build_legacy_jobs(&self) -> Vec<serde_json::Value> {
+        use serde_json::json;
+        let mut jobs = Vec::new();
+        for svc in &self.services {
+            jobs.push(json!({
+                "id": svc.id,
+                "type": "service",
+                "enabled": !svc.lifecycle.is_stopped(),
+                "workdir": svc.workdir,
+                "files": svc.files,
+                "env": svc.env,
+                "steps": svc.steps,
+                "on_failure": svc.on_failure,
+                "stop": svc.stop,
+                "reboot": svc.reboot,
+                "observe": svc.observe,
+                "revision": 0u64,
+            }));
+        }
+        for obs in &self.observers {
+            jobs.push(json!({
+                "id": obs.id,
+                "type": "observe",
+                "enabled": !obs.lifecycle.is_stopped(),
+                "workdir": obs.workdir,
+                "files": obs.files,
+                "env": obs.env,
+                "steps": serde_json::Value::Array(vec![]),
+                "observe": obs.observe,
+                "reboot": obs.reboot,
+                "revision": 0u64,
+            }));
+        }
+        for jd in &self.jobs {
+            jobs.push(json!({
+                "id": jd.id,
+                "type": "job",
+                "enabled": !jd.lifecycle.is_stopped(),
+                "workdir": jd.workdir,
+                "files": jd.files,
+                "env": jd.env,
+                "steps": jd.steps,
+                "on_failure": jd.on_failure,
+                "reboot": jd.reboot,
+                "revision": 0u64,
+            }));
+        }
+        jobs
+    }
+
+    /// Convert to the legacy wire format for old devices.
+    /// Returns a `serde_json::Value` shaped as the old `DeploymentRevision`
+    /// with `jobs: Vec<{type, enabled, id, steps, ...}>`.
+    pub fn to_legacy_value(&self) -> serde_json::Value {
+        use serde_json::json;
+        json!({
+            "id": self.id,
+            "jobs": self.build_legacy_jobs(),
+            "rollback": self.rollback,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Custom Serialize / Deserialize for DeploymentRevision
+// ---------------------------------------------------------------------------
+//
+// Wire-format backward compatibility:
+//   • New format  – emits/reads  "services", "observers", "job_defs" keys.
+//   • Legacy fmt  – old devices expect "jobs": [{type: "service"|"job"|"observe", ...}].
+//
+// Serialize always emits BOTH new format keys AND the legacy "jobs" field so
+// that old devices still receive parseable data.
+//
+// Deserialize accepts:
+//   1. "job_defs" key                → new-format job definitions.
+//   2. "jobs" with {type} entries    → legacy RunSpec; converted to services/observers/jobs.
+//   3. "jobs" without {type} entries → pre-rename JobDef array (backward compat for stored data).
+// ---------------------------------------------------------------------------
+
+impl Serialize for DeploymentRevision {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+
+        map.serialize_entry("id", &self.id)?;
+
+        if !self.services.is_empty() {
+            map.serialize_entry("services", &self.services)?;
+        }
+        if !self.observers.is_empty() {
+            map.serialize_entry("observers", &self.observers)?;
+        }
+        // New-format key for job definitions (avoids collision with legacy "jobs" key).
+        if !self.jobs.is_empty() {
+            map.serialize_entry("job_defs", &self.jobs)?;
+        }
+        if let Some(r) = &self.rollback {
+            map.serialize_entry("rollback", r)?;
+        }
+
+        // Legacy backward-compat: emit flat "jobs" list so old devices can still parse the
+        // revision.  Old clients read "jobs"; new clients use "services"/"observers"/"job_defs".
+        let legacy_jobs = self.build_legacy_jobs();
+        if !legacy_jobs.is_empty() {
+            map.serialize_entry("jobs", &legacy_jobs)?;
+        }
+
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for DeploymentRevision {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Rev;
+
+        impl<'de> serde::de::Visitor<'de> for Rev {
+            type Value = DeploymentRevision;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("DeploymentRevision map")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut id: Option<Option<String>> = None;
+                let mut services: Vec<ServiceSpec> = Vec::new();
+                let mut observers: Vec<ServiceSpec> = Vec::new();
+                // Explicit new-format key.
+                let mut job_defs: Option<Vec<JobDef>> = None;
+                // "jobs" key – could be legacy RunSpec list OR plain JobDef list.
+                let mut raw_jobs: Option<serde_json::Value> = None;
+                let mut rollback: Option<Option<RollbackPolicy>> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "id" => {
+                            id = Some(map.next_value()?);
+                        }
+                        "services" => {
+                            services = map.next_value()?;
+                        }
+                        "observers" => {
+                            observers = map.next_value()?;
+                        }
+                        "job_defs" => {
+                            job_defs = Some(map.next_value()?);
+                        }
+                        "jobs" => {
+                            // Buffer as a JSON value so we can inspect it for format detection.
+                            raw_jobs = Some(map.next_value()?);
+                        }
+                        "rollback" => {
+                            rollback = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                let jobs: Vec<JobDef> = if let Some(jd) = job_defs {
+                    // Explicit "job_defs" key → new format; legacy "jobs" field (if any) is ignored.
+                    jd
+                } else if let Some(raw) = raw_jobs {
+                    let is_legacy = raw
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.get("type"))
+                        .is_some();
+
+                    // If new-format fields (services/observers) are already populated, the
+                    // "jobs" field is the backward-compat copy we emitted for old devices.
+                    // Do NOT re-run the legacy conversion – it would create duplicate entries.
+                    let already_new_format = !services.is_empty() || !observers.is_empty();
+
+                    if is_legacy && already_new_format {
+                        // Compat "jobs" emitted alongside "services"/"observers" – ignore it.
+                        Vec::new()
+                    } else if is_legacy {
+                        // Fully-legacy document (no new-format fields): fan-out into buckets.
+                        let specs: Vec<LegacyRunSpec> =
+                            serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+                        let mut extra_jobs = Vec::new();
+                        for spec in specs {
+                            let lifecycle = if spec.enabled {
+                                Lifecycle::Running
+                            } else {
+                                Lifecycle::Stopped
+                            };
+                            match spec.run_type {
+                                LegacyRunType::Service => services.push(ServiceSpec {
+                                    id: spec.id,
+                                    lifecycle,
+                                    workdir: spec.workdir,
+                                    files: spec.files,
+                                    env: spec.env,
+                                    steps: spec.steps,
+                                    on_failure: spec.on_failure,
+                                    observe: spec.observe,
+                                    stop: spec.stop,
+                                    reboot: spec.reboot,
+                                    restart: RestartPolicy::OnFailure,
+                                }),
+                                LegacyRunType::Observe => observers.push(ServiceSpec {
+                                    id: spec.id,
+                                    lifecycle,
+                                    workdir: spec.workdir,
+                                    files: spec.files,
+                                    env: spec.env,
+                                    steps: vec![],
+                                    on_failure: None,
+                                    observe: spec.observe,
+                                    stop: spec.stop,
+                                    reboot: spec.reboot,
+                                    restart: RestartPolicy::OnFailure,
+                                }),
+                                LegacyRunType::Job => extra_jobs.push(JobDef {
+                                    id: spec.id,
+                                    lifecycle,
+                                    workdir: spec.workdir,
+                                    files: spec.files,
+                                    env: spec.env,
+                                    steps: spec.steps,
+                                    on_failure: spec.on_failure,
+                                    reboot: spec.reboot,
+                                }),
+                            }
+                        }
+                        extra_jobs
+                    } else {
+                        // Non-legacy: treat as plain JobDef array (pre-rename compat).
+                        serde_json::from_value(raw).map_err(serde::de::Error::custom)?
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                Ok(DeploymentRevision {
+                    id: id.flatten(),
+                    services,
+                    observers,
+                    jobs,
+                    rollback: rollback.flatten(),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(Rev)
     }
 }
 
@@ -694,6 +923,9 @@ pub struct UpdateDeployRevisionBody {
     pub update_run_spec: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remove_run_spec_id: Option<String>,
+    /// Legacy re-run trigger: trigger a new job run for the named job definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerun_run_spec_id: Option<String>,
 }
 
 impl Display for UpdateDeployRevisionBody {
@@ -1017,7 +1249,7 @@ impl Display for Outcome {
 // Telemetry / report types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct DeploymentRevisionReport {
     pub revision_id: String,
     pub outcome: Outcome,
@@ -1026,7 +1258,7 @@ pub struct DeploymentRevisionReport {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct RunReport {
     pub run_id: String,
     pub revision_id: String,
@@ -1036,7 +1268,7 @@ pub struct RunReport {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct StepReport {
     pub revision_id: String,
     pub run_id: String,
@@ -1054,20 +1286,20 @@ pub struct StepReport {
     pub log_tail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct RollbackReport {
     pub revision_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_revision_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub enum ObserveKind {
     Alive,
     Healthy,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct RunState {
     pub run_id: String,
     pub revision_id: String,
@@ -1085,7 +1317,7 @@ impl RunState {
 }
 
 /// Job run status report – sent from device → server when a `JobRun` completes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct JobRunReport {
     pub run_id: String,
     pub job_def_id: String,
@@ -1096,7 +1328,8 @@ pub struct JobRunReport {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
+#[serde(tag = "type", content = "data")]
 pub enum DeployReportKind {
     DeploymentRevisionReport(DeploymentRevisionReport),
     RunReport(RunReport),
@@ -1251,7 +1484,7 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 // ---------------------------------------------------------------------------
 
 pub fn build_instruction_hash(deploy_hash: &str, config_hash: &str) -> String {
-    sha256_hex(format!("{deploy_hash}{config_hash}"))
+    format!("{}-{}", deploy_hash, config_hash)
 }
 
 // ---------------------------------------------------------------------------

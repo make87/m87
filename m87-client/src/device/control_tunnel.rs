@@ -157,6 +157,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                         let req = HeartbeatRequest {
                             last_instruction_hash: st.last_instruction_hash.clone(),
                             deploy_report: Some(claimed.report.clone()),
+                            supported_revision_format: Some(2),
                             ..Default::default()
                         };
 
@@ -172,6 +173,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
 
                             let mut req = HeartbeatRequest {
                                 last_instruction_hash: st.last_instruction_hash.clone(),
+                                supported_revision_format: Some(2),
                                 ..Default::default()
                             };
 

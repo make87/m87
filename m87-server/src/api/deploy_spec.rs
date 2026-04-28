@@ -276,6 +276,35 @@ async fn update_revision_by_id(
         return Err(ServerError::not_found("Device not found"));
     }
 
+    // Legacy rerun: trigger a new job run for the named job definition.
+    if let Some(run_id) = &payload.rerun_run_spec_id {
+        let rev_doc = state
+            .db
+            .deploy_revisions()
+            .find_one(doc! { "revision.id": &id, "device_id": &device_oid })
+            .await?
+            .ok_or_else(|| ServerError::not_found("Revision not found"))?;
+
+        if rev_doc.revision.get_job_by_id(run_id).is_some() {
+            let device = dev_opt.unwrap();
+            let _ = JobRunDoc::create(
+                &state.db,
+                device_oid,
+                id.clone(),
+                run_id.clone(),
+                Default::default(),
+                device.owner_scope,
+                device.allowed_scopes,
+            )
+            .await?;
+            let _ = DeviceDoc::invalidate_deployment_hash(&state.db, &device_oid).await?;
+        }
+
+        return Ok(ServerResponse::builder()
+            .status_code(axum::http::StatusCode::NO_CONTENT)
+            .build());
+    }
+
     let (update_doc, extra_filter) = to_update_doc(&payload)?;
     let report_delete_doc = to_report_delete_doc(&payload, &id, &device_oid)?;
 
