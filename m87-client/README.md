@@ -84,8 +84,9 @@ m87 <device> undeploy web-server
 m87 <device> units
 
 # Show full status (health, step outcomes, last update times)
-m87 <device> deployment status --logs
-m87 <device> deployment show --yaml
+m87 <device> health             # all units
+m87 <device> health web-server  # one unit
+m87 <device> health --logs      # with captured step output inline
 ```
 
 #### Runtime lifecycle control
@@ -120,18 +121,27 @@ m87 <device> job logs <run-id>              # step-by-step output for this run
 m87 <device> job defs
 ```
 
-#### Logs
+#### Inspecting the deployed spec
 
 ```sh
-# Live streaming observe-follow logs (from running services / observers)
-m87 <device> logs
-m87 <device> logs -f                        # follow
+m87 <device> spec               # raw YAML of what is currently deployed
+m87 <device> spec --json        # JSON format
+```
 
-# Recorded step execution history (startup, stop, restart events)
+#### Logs
+
+**Three distinct log surfaces — each shows something different:**
+
+```sh
+# 1. Live observe-follow logs  (running service / observer output right now)
+m87 <device> logs
+m87 <device> logs -f
+
+# 2. Step execution history  (start / stop / restart events with captured output)
 m87 <device> logs --steps                   # all units
 m87 <device> logs web-server --steps        # one unit
 
-# Step output for a specific job run
+# 3. Job run step output  (output from a specific triggered job run)
 m87 <device> job logs <run-id>
 ```
 

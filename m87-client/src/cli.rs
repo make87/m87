@@ -408,6 +408,27 @@ pub enum DeviceCommand {
     /// List all services, observers, and job definitions in the active deployment
     Units,
 
+    /// Show the current step state of all units (or one unit): which steps passed,
+    /// failed, or are pending, plus the latest health/liveness check result.
+    /// Use --logs to include captured step output inline.
+    ///
+    /// For live streaming observe logs use: m87 <device> logs
+    /// For historical step logs use:        m87 <device> logs [unit] --steps
+    Health {
+        /// Optional unit id — show state for this unit only
+        unit: Option<String>,
+        /// Include captured step output inline
+        #[arg(long)]
+        logs: bool,
+    },
+
+    /// Show the raw YAML spec of what is currently deployed on this device.
+    Spec {
+        /// Output as JSON instead of YAML
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Trigger and inspect job runs
     #[command(subcommand)]
     Job(JobCommand),
@@ -1263,6 +1284,52 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             Ok(())
         }
 
+        // ── Health snapshot ────────────────────────────────────────────────
+        // Current step state (pending/success/failed) + health/liveness.
+        // NOT the same as:
+        //   status      — device connectivity + observation history
+        //   logs --steps — historical step log entries
+        DeviceCommand::Health { unit, logs } => {
+            let deployment_id = dp::get_active_deployment_id(&device)
+                .await?
+                .context("no active deployment on device")?;
+            let snapshot = dp::get_deployment_snapshot(&device, &deployment_id).await?;
+            let mut opts = tui::helper::RenderOpts::default();
+            opts.show_logs_inline = logs;
+            // Filter snapshot to a single unit if requested
+            let filtered = match &unit {
+                None => snapshot,
+                Some(id) => {
+                    use m87_shared::deploy_spec::DeploymentStatusSnapshot;
+                    let runs = snapshot
+                        .runs
+                        .into_iter()
+                        .filter(|r| &r.run_id == id)
+                        .collect();
+                    DeploymentStatusSnapshot { runs, ..snapshot }
+                }
+            };
+            tui::deploy::print_deployment_status_snapshot(&filtered, &opts);
+            Ok(())
+        }
+
+        // ── Spec viewer ────────────────────────────────────────────────────
+        // The raw spec that is deployed — what services/observers/jobs are
+        // defined. Use `units` for the runtime lifecycle view.
+        DeviceCommand::Spec { json } => {
+            let rev = dp::get_active_revision(&device).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&rev)
+                        .context("failed to serialize revision as JSON")?
+                );
+            } else {
+                tui::deploy::print_revision_verbose(&rev);
+            }
+            Ok(())
+        }
+
         DeviceCommand::Deployment(cmd) => match cmd {
             DeploymentCommand::List => {
                 let deployments = device::deploy::get_deployments(&device).await?;
@@ -1286,23 +1353,20 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
                 deployment_id,
                 logs,
             } => {
+                // Hint: prefer `m87 <device> health [--logs]` for the active deployment.
+                // This command still works for inspecting non-active revisions by id.
                 let deployment_id = match deployment_id {
                     Some(d) => d,
                     None => match device::deploy::get_active_deployment_id(&device).await? {
                         Some(d) => d,
                         None => {
-                            tracing::error!(
-                                "No active deployment set for device {}. You either need to activate one or specify an --deployment-id",
-                                device
-                            );
+                            tracing::error!("No active deployment. Try: m87 {} health", device);
                             return Ok(());
                         }
                     },
                 };
                 let snapshot =
                     device::deploy::get_deployment_snapshot(&device, &deployment_id).await?;
-
-                tracing::info!("Received deployment reports");
                 let mut config = tui::helper::RenderOpts::default();
                 config.show_logs_inline = logs;
                 tui::deploy::print_deployment_status_snapshot(&snapshot, &config);
@@ -1313,26 +1377,22 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
                 deployment_id,
                 yaml,
             } => {
+                // Hint: prefer `m87 <device> spec` for the active deployment.
+                // This command still works for inspecting non-active revisions by id.
                 let deployment_id = match deployment_id {
                     Some(d) => d,
                     None => match device::deploy::get_active_deployment_id(&device).await? {
                         Some(d) => d,
                         None => {
-                            tracing::error!(
-                                "No active deployment set for device {}. You either need to activate one or specify an --deployment-id",
-                                device
-                            );
+                            tracing::error!("No active deployment. Try: m87 {} spec", device);
                             return Ok(());
                         }
                     },
                 };
                 let deployment = device::deploy::get_deployment(&device, &deployment_id).await?;
-                tracing::info!("Loaded deployment");
                 match yaml {
                     true => tui::deploy::print_revision_verbose(&deployment),
-                    false => {
-                        tui::deploy::print_revision_short_detail(&deployment);
-                    }
+                    false => tui::deploy::print_revision_short_detail(&deployment),
                 }
                 Ok(())
             }
