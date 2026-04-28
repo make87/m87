@@ -309,10 +309,18 @@ pub enum DeviceCommand {
     },
     /// Stream container logs from the device
     Logs {
+        /// Optional unit id — show logs for this service or observer only.
+        /// For live streaming this filters observe-follow output by unit;
+        /// use --steps to show recorded step execution history instead.
+        unit: Option<String>,
         #[arg(short = 'f', long)]
         follow: bool,
         #[arg(long, default_value = "100")]
         tail: usize,
+        /// Show recorded step execution history (start / stop / pause events)
+        /// instead of live-streaming observe logs.
+        #[arg(long)]
+        steps: bool,
     },
     /// Show device system metrics
     #[clap(alias = "stats")]
@@ -361,13 +369,44 @@ pub enum DeviceCommand {
     #[command(subcommand)]
     Deployment(DeploymentCommand),
 
-    /// Control a service's runtime lifecycle (start / stop / pause / restart)
-    #[command(subcommand)]
-    Service(ServiceCommand),
+    /// Start a unit (runs startup steps). Works for services and observers.
+    Start {
+        /// Unit id
+        id: String,
+    },
 
-    /// Control an observer's runtime lifecycle (pause / resume)
-    #[command(subcommand)]
-    Observer(ObserverCommand),
+    /// Stop a unit (runs stop steps). Works for services and observers.
+    Stop {
+        /// Unit id
+        id: String,
+        /// Skip stop steps and tear down immediately
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Pause a unit — suspends observe polling without stopping the process.
+    Pause {
+        /// Unit id
+        id: String,
+    },
+
+    /// Resume a paused or stopped unit.
+    Resume {
+        /// Unit id
+        id: String,
+    },
+
+    /// Restart a unit (stop then start).
+    Restart {
+        /// Unit id
+        id: String,
+        /// Skip stop steps
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// List all services, observers, and job definitions in the active deployment
+    Units,
 
     /// Trigger and inspect job runs
     #[command(subcommand)]
@@ -388,67 +427,6 @@ pub enum DeviceCommand {
 }
 
 // ---------------------------------------------------------------------------
-// Service commands
-// ---------------------------------------------------------------------------
-
-#[derive(Subcommand, Debug)]
-pub enum ServiceCommand {
-    /// Start a service (runs startup steps if not already running)
-    Start {
-        /// Service id
-        id: String,
-    },
-    /// Stop a service (runs stop steps)
-    Stop {
-        /// Service id
-        id: String,
-        /// Skip stop steps and tear down immediately
-        #[arg(long)]
-        force: bool,
-    },
-    /// Pause a service (suspends observe polling; process keeps running)
-    Pause {
-        /// Service id
-        id: String,
-    },
-    /// Resume a paused or stopped service
-    Resume {
-        /// Service id
-        id: String,
-    },
-    /// Restart a service (stop then start)
-    Restart {
-        /// Service id
-        id: String,
-        /// Skip stop steps
-        #[arg(long)]
-        force: bool,
-    },
-    /// List all services in the active deployment
-    List,
-}
-
-// ---------------------------------------------------------------------------
-// Observer commands
-// ---------------------------------------------------------------------------
-
-#[derive(Subcommand, Debug)]
-pub enum ObserverCommand {
-    /// Pause an observer (suspend polling)
-    Pause {
-        /// Observer id
-        id: String,
-    },
-    /// Resume a paused observer
-    Resume {
-        /// Observer id
-        id: String,
-    },
-    /// List all observers in the active deployment
-    List,
-}
-
-// ---------------------------------------------------------------------------
 // Job commands
 // ---------------------------------------------------------------------------
 
@@ -462,7 +440,7 @@ pub enum JobCommand {
         #[arg(long = "env", value_parser = parse_kv_pair, action = clap::ArgAction::Append)]
         env: Vec<(String, String)>,
     },
-    /// List job runs (all jobs or a specific one)
+    /// List job runs for this device (optionally filter by job definition id)
     List {
         /// Filter by job definition id
         #[arg(long)]
@@ -470,6 +448,11 @@ pub enum JobCommand {
     },
     /// Show status of a specific job run
     Status {
+        /// Job run id
+        run_id: String,
+    },
+    /// Show step execution logs for a specific job run
+    Logs {
         /// Job run id
         run_id: String,
     },
@@ -507,8 +490,10 @@ pub enum AccessAction {
 
 #[derive(Parser, Debug)]
 pub struct DeployArgs {
-    /// File to deploy (docker-compose.yml, service YAML, observer YAML, job YAML,
-    /// or a full revision YAML with services/observers/jobs sections)
+    /// File to deploy: docker-compose.yml, a single service / observer / job YAML,
+    /// or a full revision YAML with services / observers / jobs sections.
+    /// The type is auto-detected; use --replace-all to atomically replace the
+    /// entire device state from a full revision file.
     pub file: PathBuf,
 
     /// Spec type (auto detects by default)
@@ -1118,8 +1103,28 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             Ok(())
         }
 
-        DeviceCommand::Logs { follow: _, tail: _ } => {
-            tui::log::run_logs(&device).await?;
+        DeviceCommand::Logs {
+            unit,
+            follow: _,
+            tail: _,
+            steps,
+        } => {
+            if steps {
+                // Recorded step history from server-side deploy_reports
+                let reports = dp::get_unit_step_logs(&device, unit.as_deref()).await?;
+                tui::deploy::print_step_logs(unit.as_deref(), &reports);
+            } else {
+                // Live observe-follow streaming
+                // Note: per-unit filtering of the live stream is not yet supported;
+                // all observe logs are streamed and the unit hint is noted.
+                if let Some(ref uid) = unit {
+                    tracing::warn!(
+                        "Live log filtering by unit is not yet supported — streaming all logs. \
+                         Use --steps to see recorded step history for '{uid}'."
+                    );
+                }
+                tui::log::run_logs(&device).await?;
+            }
             Ok(())
         }
 
@@ -1213,6 +1218,48 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
         DeviceCommand::Undeploy(args) => {
             dp::undeploy_file(&device, args.job_id.clone(), args.deployment_id).await?;
             tracing::info!("Removed {} from deployment", args.job_id);
+            Ok(())
+        }
+
+        // ── Flat lifecycle commands ────────────────────────────────────────
+        DeviceCommand::Start { id } => {
+            dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
+            tracing::info!("Start requested for '{id}' — will apply on next heartbeat");
+            Ok(())
+        }
+
+        DeviceCommand::Stop { id, force: _ } => {
+            dp::send_lifecycle(&device, &id, Lifecycle::Stopped).await?;
+            tracing::info!("Stop requested for '{id}' — will apply on next heartbeat");
+            Ok(())
+        }
+
+        DeviceCommand::Pause { id } => {
+            dp::send_lifecycle(&device, &id, Lifecycle::Paused).await?;
+            tracing::info!(
+                "Pause requested for '{id}' — observe polling suspended on next heartbeat"
+            );
+            Ok(())
+        }
+
+        DeviceCommand::Resume { id } => {
+            dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
+            tracing::info!("Resume requested for '{id}' — will apply on next heartbeat");
+            Ok(())
+        }
+
+        DeviceCommand::Restart { id, force: _ } => {
+            // Two sequential lifecycle updates: server queues both, device
+            // applies them in order across successive heartbeat ticks.
+            dp::send_lifecycle(&device, &id, Lifecycle::Stopped).await?;
+            dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
+            tracing::info!("Restart requested for '{id}'");
+            Ok(())
+        }
+
+        DeviceCommand::Units => {
+            let rev = dp::get_active_revision(&device).await?;
+            tui::deploy::print_units_list(&rev);
             Ok(())
         }
 
@@ -1354,60 +1401,6 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             }
         },
 
-        // ── Service lifecycle ──────────────────────────────────────────────
-        DeviceCommand::Service(cmd) => match cmd {
-            ServiceCommand::Start { id } => {
-                dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
-                tracing::info!("Start requested for service '{id}'");
-                Ok(())
-            }
-            ServiceCommand::Stop { id, force: _ } => {
-                dp::send_lifecycle(&device, &id, Lifecycle::Stopped).await?;
-                tracing::info!("Stop requested for service '{id}'");
-                Ok(())
-            }
-            ServiceCommand::Pause { id } => {
-                dp::send_lifecycle(&device, &id, Lifecycle::Paused).await?;
-                tracing::info!("Pause requested for service '{id}'");
-                Ok(())
-            }
-            ServiceCommand::Resume { id } => {
-                dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
-                tracing::info!("Resume requested for service '{id}'");
-                Ok(())
-            }
-            ServiceCommand::Restart { id, force: _ } => {
-                dp::send_lifecycle(&device, &id, Lifecycle::Stopped).await?;
-                dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
-                tracing::info!("Restart requested for service '{id}'");
-                Ok(())
-            }
-            ServiceCommand::List => {
-                let rev = dp::get_active_revision(&device).await?;
-                tui::deploy::print_services_list(&rev);
-                Ok(())
-            }
-        },
-
-        // ── Observer lifecycle ─────────────────────────────────────────────
-        DeviceCommand::Observer(cmd) => match cmd {
-            ObserverCommand::Pause { id } => {
-                dp::send_lifecycle(&device, &id, Lifecycle::Paused).await?;
-                tracing::info!("Pause requested for observer '{id}'");
-                Ok(())
-            }
-            ObserverCommand::Resume { id } => {
-                dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
-                tracing::info!("Resume requested for observer '{id}'");
-                Ok(())
-            }
-            ObserverCommand::List => {
-                let rev = dp::get_active_revision(&device).await?;
-                tui::deploy::print_observers_list(&rev);
-                Ok(())
-            }
-        },
-
         // ── Job commands ───────────────────────────────────────────────────
         DeviceCommand::Job(cmd) => match cmd {
             JobCommand::Trigger { id, env } => {
@@ -1426,6 +1419,11 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             JobCommand::Status { run_id } => {
                 let run = dp::get_job_run(&device, &run_id).await?;
                 tui::deploy::print_job_run(&run);
+                Ok(())
+            }
+            JobCommand::Logs { run_id } => {
+                let reports = dp::get_unit_step_logs(&device, Some(&run_id)).await?;
+                tui::deploy::print_step_logs(Some(&run_id), &reports);
                 Ok(())
             }
             JobCommand::Defs => {

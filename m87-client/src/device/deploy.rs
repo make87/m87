@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use m87_shared::deploy_spec::{
-    CommandSpec, CreateDeployRevisionBody, DeployReport, DeploymentRevision,
+    CommandSpec, CreateDeployRevisionBody, DeployReport, DeployReportKind, DeploymentRevision,
     DeploymentStatusSnapshot, JobDef, JobRun, Lifecycle, LogSpec, ObserveHooks, ObserveSpec,
     OnFailure, RebootMode, RetrySpec, ServiceSpec, Step, StopSpec, TriggerJobBody, Undo, UndoMode,
     UpdateDeployRevisionBody, Workdir, WorkdirMode,
@@ -856,4 +856,49 @@ pub async fn rollback_device(device_name: &str) -> Result<()> {
     server::rollback_device(&api_url, &token, trust_invalid, &device_id)
         .await
         .context("failed to rollback device")
+}
+
+// ---------------------------------------------------------------------------
+// Step log access — fetches StepReport entries from server-side deploy_reports
+// ---------------------------------------------------------------------------
+
+/// Return all StepReport entries for the active revision, optionally filtered
+/// by `unit_id` (the service/observer id or the job run_id).
+pub async fn get_unit_step_logs(
+    device_name: &str,
+    unit_id: Option<&str>,
+) -> Result<Vec<DeployReport>> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+
+    let revision_id = server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id)
+        .await
+        .context("failed to get active deployment id")?
+        .context("no active deployment — deploy a revision first")?;
+
+    let all =
+        server::get_deployment_reports(&api_url, &token, trust_invalid, &device_id, &revision_id)
+            .await
+            .context("failed to fetch deployment reports")?;
+
+    let filtered = all
+        .into_iter()
+        .filter(|r| {
+            // Keep only step reports …
+            if !matches!(&r.kind, DeployReportKind::StepReport(_)) {
+                return false;
+            }
+            // … and optionally filter by unit / run id
+            match unit_id {
+                Some(id) => r.kind.get_run_id() == Some(id),
+                None => true,
+            }
+        })
+        .collect();
+
+    Ok(filtered)
+}
+
+/// Convenience wrapper: step logs for a specific job run id.
+pub async fn get_job_run_logs(device_name: &str, run_id: &str) -> Result<Vec<DeployReport>> {
+    get_unit_step_logs(device_name, Some(run_id)).await
 }
