@@ -352,6 +352,7 @@ impl DeviceDoc {
                 received_report_hashes: ack_hash_list,
                 lifecycle_updates: pending_updates.clone(),
                 pending_job_runs: pending_job_runs.clone(),
+                iroh_supported: false,
             });
         }
 
@@ -391,6 +392,7 @@ impl DeviceDoc {
             received_report_hashes: ack_hash_list,
             lifecycle_updates: pending_updates,
             pending_job_runs,
+            iroh_supported: false,
         };
         Ok(resp)
     }

@@ -37,7 +37,38 @@ pub fn create_route() -> Router<AppState> {
             "/{id}/access/{email_or_org_id}",
             delete(remove_device_access),
         )
+        .route("/{id}/iroh-addr", get(get_device_iroh_addr))
         .merge(deploy_spec_route())
+}
+
+#[derive(serde::Serialize)]
+struct IrohAddrResponse {
+    iroh_node_addr: String,
+}
+
+async fn get_device_iroh_addr(
+    claims: Claims,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ServerAppResult<IrohAddrResponse> {
+    let device_id =
+        ObjectId::parse_str(&id).map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
+
+    let device_opt = claims
+        .find_one_with_scope_and_role(&state.db.devices(), doc! { "_id": device_id }, Role::Viewer)
+        .await?;
+    let device = device_opt.ok_or_else(|| ServerError::not_found("Device not found"))?;
+
+    let iroh_addr = state.relay.get_iroh_addr(&device.short_id).await;
+    match iroh_addr {
+        Some(addr) => Ok(ServerResponse::builder()
+            .body(IrohAddrResponse {
+                iroh_node_addr: addr,
+            })
+            .status_code(axum::http::StatusCode::OK)
+            .build()),
+        None => Err(ServerError::not_found("iroh not available")),
+    }
 }
 
 async fn get_devices(

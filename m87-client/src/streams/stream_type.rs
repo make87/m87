@@ -339,7 +339,10 @@ impl StreamType {
         }
     }
 
-    pub async fn from_incoming_stream(recv: &mut quinn::RecvStream) -> anyhow::Result<StreamType> {
+    pub async fn from_incoming_stream(
+        recv: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> anyhow::Result<StreamType> {
+        use tokio::io::AsyncReadExt;
         // length header
         let mut len_buf = [0u8; 4];
         recv.read_exact(&mut len_buf).await?;
@@ -505,8 +508,7 @@ mod tests {
     #[test]
     fn test_existing_single_port_with_host() {
         // Ensure existing functionality still works
-        let targets =
-            ForwardTarget::from_list(vec!["8080:192.168.1.50:9090".to_string()]).unwrap();
+        let targets = ForwardTarget::from_list(vec!["8080:192.168.1.50:9090".to_string()]).unwrap();
         assert_eq!(targets.len(), 1);
         match &targets[0] {
             ForwardTarget::Tcp(t) => {
