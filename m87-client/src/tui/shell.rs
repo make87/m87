@@ -4,6 +4,7 @@ use crate::util::shutdown::SHUTDOWN;
 use crate::{auth::AuthManager, config::Config, devices};
 use anyhow::Result;
 use termion::{raw::IntoRawMode, terminal_size};
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
@@ -124,10 +125,7 @@ pub async fn run_shell(device: &str) -> Result<()> {
         let mut buf = [0u8; 8192];
 
         loop {
-            let n = match reader.read(&mut buf).await? {
-                Some(n) => n,
-                None => break,
-            };
+            let n = reader.read(&mut buf).await?;
             if n == 0 {
                 break;
             }

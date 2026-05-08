@@ -64,6 +64,10 @@ termion = "4.0.6"
 ratatui = { version = "0.30", features = ["termion"] }
 # STUN client for public IP detection (WebRTC-compatible)
 stun = "0.9.0"
+iroh = "0.98"
+
+# Cryptography and auth
+jsonwebtoken = { workspace = true }
 
 bytes = ">=1.11.1"
 # ssh

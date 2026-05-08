@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="ALL" />
+  </component>
+  <component name="CargoProjects">
+    <cargoProject FILE="$PROJECT_DIR$/Cargo.toml">
+      <package file="$PROJECT_DIR$/m87-client">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/m87-server">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/m87-shared">
+        <feature name="default" enabled="true" />
+      </package>
+    </cargoProject>
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="0c926958-5bbf-4196-994c-cf44f7bdf7c9" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/m87-client/src/runtime.rs" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/m87-client/src/util/unix.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.github/workflows/release.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.github/workflows/release.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.lock" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.lock" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/Dockerfile" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/build.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/build.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/examples/features/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/examples/features/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/examples/features/auth/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/examples/features/auth/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/examples/features/devices/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/examples/features/devices/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/examples/features/logs/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/examples/features/logs/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/examples/features/tunnels/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/examples/features/forward/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/install.sh" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/install.sh" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/auth/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/auth/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/auth/oauth.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/auth/oauth.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/cli.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/cli.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/config/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/config/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/device/agent.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/device/agent.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/device/control_tunnel.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/device/control_tunnel.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/device/docker.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/device/docker.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/device/fs.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/device/fs.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/device/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/device/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/device/services/docker.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/device/services/docker.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/device/services/systemd.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/device/services/systemd.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/device/ssh.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/device/ssh.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/device/tunnel.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/device/forward.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/lib.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/server.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/server.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/streams/exec.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/streams/exec.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/streams/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/streams/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/streams/router.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/streams/router.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/streams/shared.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/streams/shared.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/streams/stream_type.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/streams/stream_type.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/streams/terminal.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/streams/terminal.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/streams/tunnel.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/streams/forward.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/streams/udp_manager.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/streams/udp_manager.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/tui/metrics.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/tui/metrics.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/update/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/update/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/command.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/command.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/device_cache.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/device_cache.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/format.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/format.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/fs.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/fs.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/log_renderer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/log_renderer.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/logging.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/logging.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/mac.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/mac.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/retry.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/retry.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/servers_parallel.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/servers_parallel.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/subprocess.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/subprocess.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/tls.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/tls.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-client/src/util/udp.rs" beforeDir="false" afterPath="$PROJECT_DIR$/m87-client/src/util/udp.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/m87-server/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/m87-server/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/agent_args.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/runtime_args.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/containers.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/containers.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/device_registration.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/device_registration.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/fixtures/agent.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/fixtures/runtime.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/fixtures/device.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/fixtures/device.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/fixtures/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/fixtures/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/fixtures/setup.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/fixtures/setup.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/fs.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/fs.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/helpers/exec.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/helpers/exec.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/helpers/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/helpers/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/helpers/sni.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/helpers/sni.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/src/e2e_containers/tunnel.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/src/e2e_containers/forward.rs" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:test" />
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="MacroExpansionManager">
+    <option name="directoryName" value="fk1J8AqK" />
+  </component>
+  <component name="ProjectColorInfo"><![CDATA[{
+  "customColor": "",
+  "associatedIndex": 1
+}]]></component>
+  <component name="ProjectId" id="38FRgq7bnHT0QKKiHPjmpfpJ6vR" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.rust.reset.selective.auto.import": "true",
+    "git-widget-placeholder": "Merging phillip/run-units",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "org.rust.cargo.project.model.PROJECT_DISCOVERY": "true",
+    "org.rust.first.attach.projects": "true",
+    "vue.rearranger.settings.migration": "true"
+  }
+}]]></component>
+  <component name="RunManager" selected="Cargo.Test gravity">
+    <configuration name="Run m87-server" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package m87-server --bin m87-server" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run m87" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package m87-client --bin m87" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Test gravity" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="buildProfileId" value="test" />
+      <option name="command" value="test --workspace" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+  </component>
+  <component name="RustProjectSettings">
+    <option name="toolchainHomeDirectory" value="$USER_HOME$/.cargo/bin" />
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="0c926958-5bbf-4196-994c-cf44f7bdf7c9" name="Changes" comment="" />
+      <created>1768393447124</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1768393447124</updated>
+      <workItem from="1768393448843" duration="308000" />
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+</project>

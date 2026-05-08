@@ -356,6 +356,11 @@ async fn run_heartbeat_loop(
                     }
                 };
 
+                // Store iroh addr if device advertised one
+                if let Some(addr) = &req.iroh_node_addr {
+                    state.relay.set_iroh_addr(&device_id, addr.clone()).await;
+                }
+
                 let device_opt = state.db.devices().find_one(doc!{ "short_id": &device_id }).await?;
 
                 let Some(device) = device_opt else {

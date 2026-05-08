@@ -318,6 +318,7 @@ impl DeviceDoc {
                 instruction_hash: target_hash.clone(),
                 target_revision: None,
                 received_report_hashes: ack_hash_list,
+                iroh_supported: false,
             });
         }
 
@@ -355,6 +356,7 @@ impl DeviceDoc {
             instruction_hash: build_instruction_hash(&new_deployment_hash, &config_hash),
             target_revision,
             received_report_hashes: ack_hash_list,
+            iroh_supported: false,
         };
         Ok(resp)
     }

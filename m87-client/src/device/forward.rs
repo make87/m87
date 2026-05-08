@@ -12,6 +12,7 @@ use anyhow::Result;
 use bytes::BufMut;
 use bytes::BytesMut;
 use tokio::io;
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::net::UdpSocket;
 use tokio::net::UnixListener;
@@ -47,8 +48,15 @@ pub async fn start_forward(
         let resolved = resolved.clone();
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                forward_device_port(&resolved.host, &token, &resolved.short_id, t, trust, cancel.clone()).await
+            if let Err(e) = forward_device_port(
+                &resolved.host,
+                &token,
+                &resolved.short_id,
+                t,
+                trust,
+                cancel.clone(),
+            )
+            .await
             {
                 error!("Forward exited with error: {}", e);
                 cancel.cancel();
