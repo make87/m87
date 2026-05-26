@@ -125,6 +125,66 @@ If you've ever SSH'd into an embedded device only to run into network traps or s
 
 ---
 
+## 🧪 Testing
+
+This repo has three layers of tests; the right command depends on what
+you're trying to verify.
+
+### Unit tests (fast, no external dependencies)
+
+```bash
+cargo test --workspace
+```
+
+Covers the time parser, event aggregator, status summary, deployment
+manager state machine, and so on. ~200 tests, completes in a few seconds.
+Use this on every change.
+
+### E2E compile gate (no Docker, no test execution)
+
+```bash
+cargo e2e-check
+```
+
+Just typechecks the e2e crate against the current `m87-client` /
+`m87-server` / `m87-shared` API. Catches drift before you spend a full
+e2e run on it. CI runs this on every PR.
+
+### Full e2e suite (Docker required)
+
+```bash
+cargo e2e
+```
+
+Spins up real `m87-server`, MongoDB, and runtime containers and exercises
+the CLI surface end-to-end (`deploy`, `logs`, `status`, `job trigger`,
+lifecycle, etc.). Around 60 tests; takes 5–10 minutes on a typical
+laptop.
+
+Defaults to running 4 tests in parallel (each owns its own container
+set). Override per-machine if needed:
+
+```bash
+RUST_TEST_THREADS=1 cargo e2e      # resource-constrained host (~25 min)
+RUST_TEST_THREADS=8 cargo e2e      # beefy CI runner
+```
+
+Run a single test:
+
+```bash
+cargo e2e -- --nocapture deployment::test_deploy_service_lands_in_spec
+```
+
+Requires:
+
+* Docker daemon running and accessible
+* Rust toolchain (build of the e2e harness uses `testcontainers`)
+
+CI runs this on PRs that touch `m87-client/**`, `m87-server/**`,
+`m87-shared/**`, or `tests/**`. See `.github/workflows/e2e-tests.yml`.
+
+---
+
 ## 🧱 Core Concepts
 
 ### 🛠 Development & Debugging
