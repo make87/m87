@@ -2,8 +2,10 @@
 
 mod runtime_args;
 pub mod containers;
+mod deployment;
 mod device_registration;
 mod docker;
+mod logs_status;
 mod exec;
 pub mod fixtures;
 mod fs;

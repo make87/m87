@@ -79,22 +79,19 @@ pub async fn deploy_file(
     file: PathBuf,
     ty: SpecType,
     name: Option<String>,
-    deployment_id: Option<String>,
 ) -> Result<()> {
     let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
 
+    // Each device has a single in-place spec. Resolve it; create an empty
+    // one if this is the device's first deploy.
     let target_dep_id =
-        resolve_target_deployment_id(&device_id, &api_url, &token, trust_invalid, deployment_id)
-            .await?;
+        server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id).await?;
     let target_dep_id = match target_dep_id {
         Some(id) => id,
         None => {
-            tracing::info!("No active deployment found, creating a new one");
-            let new = create_deployment(device_name, true).await?;
-
-            let new_id = new.id.unwrap();
-            tracing::info!("Created new deployment with ID: {}", new_id);
-            new_id
+            tracing::info!("No spec on device yet; creating one");
+            let new = create_deployment(device_name).await?;
+            new.id.unwrap()
         }
     };
     let base_dir = file.parent().map(|f| f.to_path_buf());
@@ -122,18 +119,33 @@ pub async fn deploy_file(
                     ..Default::default()
                 }
             } else {
-                // Try new format first (DeploymentRevision with services/observers/jobs)
-                match DeploymentRevision::from_yaml(&s) {
-                    Ok(mut dr) => {
-                        let _ = dr.resolve_file_references(base_dir);
-                        UpdateDeployRevisionBody {
-                            revision: Some(dr.to_yaml()?),
-                            ..Default::default()
-                        }
+                // Structural detection: a full DeploymentRevision YAML carries
+                // one of the section keys (`services` / `observers` /
+                // `jobs` / `job_defs`). A single-unit YAML (ServiceSpec or
+                // JobDef) does not. We can't rely on `DeploymentRevision::
+                // from_yaml` succeeding to mean "this is a revision" because
+                // its custom Deserialize silently ignores unknown keys — a
+                // single-unit YAML parses as a revision with only `id` set,
+                // which then $set-overwrites the device's whole revision
+                // with an empty one.
+                let probe: serde_yaml::Value =
+                    serde_yaml::from_str(&s).context("failed to parse deploy YAML")?;
+                let is_revision = matches!(probe, serde_yaml::Value::Mapping(_))
+                    && ["services", "observers", "jobs", "job_defs"]
+                        .iter()
+                        .any(|k| probe.get(*k).is_some());
+
+                if is_revision {
+                    let mut dr = DeploymentRevision::from_yaml(&s)
+                        .context("failed to parse as DeploymentRevision")?;
+                    let _ = dr.resolve_file_references(base_dir);
+                    UpdateDeployRevisionBody {
+                        revision: Some(dr.to_yaml()?),
+                        ..Default::default()
                     }
-                    Err(e) => {
-                        bail!("Failed to parse deployment YAML: {}", e);
-                    }
+                } else {
+                    // Single ServiceSpec or JobDef.
+                    parse_unit_yaml(&s, base_dir)?
                 }
             }
         }
@@ -161,38 +173,27 @@ pub async fn deploy_file(
     Ok(())
 }
 
-pub async fn undeploy_file(
-    device_name: &str,
-    job_id: String,
-    deployment_id: Option<String>,
-) -> Result<()> {
+pub async fn undeploy_file(device_name: &str, unit_id: String) -> Result<()> {
     let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
 
     let target_dep_id =
-        resolve_target_deployment_id(&device_id, &api_url, &token, trust_invalid, deployment_id)
-            .await?;
-    let target_dep_id = match target_dep_id {
-        Some(id) => id,
-        None => {
-            tracing::info!("No active deployment found, creating a new one");
-            let new = create_deployment(device_name, true).await?;
+        server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id)
+            .await?
+            .context("device has no spec to remove from")?;
 
-            let new_id = new.id.unwrap();
-            tracing::info!("Created new deployment with ID: {}", new_id);
-            new_id
-        }
-    };
-
-    deployment_update(
-        device_name,
-        DeploymentUpdateArgs {
-            deployment_id: Some(target_dep_id),
-            rm: vec![job_id],
+    server::update_deployment(
+        &api_url,
+        &token,
+        trust_invalid,
+        &device_id,
+        &target_dep_id,
+        UpdateDeployRevisionBody {
+            remove_unit_id: Some(unit_id),
             ..Default::default()
         },
     )
     .await
-    .context("failed to undeploy job")?;
+    .context("failed to remove unit")?;
     Ok(())
 }
 
@@ -245,7 +246,9 @@ pub async fn get_deployment(device_name: &str, deployment_id: &str) -> Result<De
     Ok(deployment)
 }
 
-pub async fn create_deployment(device_name: &str, active: bool) -> Result<DeploymentRevision> {
+/// Create the device's spec (one per device). Called only from
+/// `deploy_file` when the device has no spec yet.
+pub async fn create_deployment(device_name: &str) -> Result<DeploymentRevision> {
     let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
 
     let deployment = DeploymentRevision::empty();
@@ -257,7 +260,7 @@ pub async fn create_deployment(device_name: &str, active: bool) -> Result<Deploy
         &device_id,
         CreateDeployRevisionBody {
             revision: deployment.to_yaml()?,
-            active: Some(active),
+            active: Some(true),
         },
     )
     .await
@@ -748,11 +751,11 @@ pub async fn deploy_file_replace_all(device_name: &str, file: PathBuf) -> Result
     let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
 
     let target_dep_id =
-        resolve_target_deployment_id(&device_id, &api_url, &token, trust_invalid, None).await?;
+        server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id).await?;
     let target_dep_id = match target_dep_id {
         Some(id) => id,
         None => {
-            let new = create_deployment(device_name, true).await?;
+            let new = create_deployment(device_name).await?;
             new.id.unwrap()
         }
     };
@@ -864,6 +867,23 @@ pub async fn rollback_device(device_name: &str) -> Result<()> {
 
 /// Return all StepReport entries for the active revision, optionally filtered
 /// by `unit_id` (the service/observer id or the job run_id).
+/// Fetch all deploy reports for the active revision and return them
+/// unfiltered. The unified `logs` command applies the actual filtering
+/// (kind / id / failed / time window) in
+/// [`crate::device::events::aggregate_events`], which is pure and tested.
+pub async fn get_active_revision_reports(device_name: &str) -> Result<Vec<DeployReport>> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+
+    let revision_id = server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id)
+        .await
+        .context("failed to get active deployment id")?
+        .context("no active deployment — deploy a revision first")?;
+
+    server::get_deployment_reports(&api_url, &token, trust_invalid, &device_id, &revision_id)
+        .await
+        .context("failed to fetch deployment reports")
+}
+
 pub async fn get_unit_step_logs(
     device_name: &str,
     unit_id: Option<&str>,

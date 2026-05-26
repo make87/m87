@@ -296,45 +296,12 @@ impl DeviceDoc {
             ack_report_hash = Some(deploy_report.get_hash().to_string());
 
             match deploy_report {
-                DeployReportKind::RollbackReport(rollback) => {
-                    // change active deployment to rollback.new_revision_id
-                    let device_oid = self.id.clone().unwrap();
-                    let out =
-                        DeployRevisionDoc::get_active_device_deployment(&db, device_oid.clone())
-                            .await?;
-
-                    if let Some(new_id) = &rollback.new_revision_id {
-                        let _ = db
-                            .deploy_revisions()
-                            .update_one(
-                                doc! { "revision.id": new_id, "device_id": &device_oid },
-                                doc! { "$set": { "active": true } },
-                            )
-                            .await?;
-                    }
-
-                    match out {
-                        Some(doc) => {
-                            let filter = doc! { "revision.id": &doc.id, "device_id": &device_oid };
-                            let update_doc = doc! { "active": false };
-                            let _ = db.deploy_revisions().update_one(filter, update_doc).await?;
-                        }
-                        None => {}
-                    };
-
-                    let _ = AuditLogDoc::add(
-                        &db,
-                        &claims,
-                        &config,
-                        &format!(
-                            "Rolled back deployment to {} for device {}",
-                            &rollback.new_revision_id.unwrap_or("None".to_string()),
-                            &device_oid
-                        ),
-                        "",
-                        Some(device_oid.clone()),
-                    )
-                    .await;
+                DeployReportKind::RollbackReport(_rollback) => {
+                    // Single-revision model: rollback events from old
+                    // devices are accepted and stored as part of the deploy
+                    // report stream (for visibility in `logs`) but no
+                    // longer drive any server-side revision flip — there's
+                    // only one revision per device.
                 }
                 DeployReportKind::JobRunReport(report) => {
                     let _ = JobRunDoc::update_status(

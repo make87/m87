@@ -69,10 +69,6 @@ pub fn create_route() -> Router<AppState> {
             "/{device_id}/job-runs/{run_id}",
             axum::routing::get(get_job_run),
         )
-        .route(
-            "/{device_id}/rollback",
-            axum::routing::post(rollback_device),
-        )
 }
 
 async fn list_device_revisions(
@@ -167,12 +163,25 @@ async fn create_device_revision(
         m87_shared::deploy_spec::DeploymentRevision::from_yaml(&payload.revision)
             .map_err(|e| ServerError::internal_error(&format!("{:?}", e)))?;
 
+    // Single-revision model: if a spec already exists for this device,
+    // return it instead of creating a second one. The `payload.active`
+    // field is accepted for wire compat but no longer meaningful — every
+    // device has exactly one spec which is always the active one.
+    if let Some(existing) =
+        DeployRevisionDoc::get_active_device_deployment(&state.db, device_oid).await?
+    {
+        return Ok(ServerResponse::builder()
+            .body(existing.revision)
+            .status_code(axum::http::StatusCode::OK)
+            .build());
+    }
+
     let doc = DeployRevisionDoc::create(
         &state.db,
         revision,
         Some(device_oid),
         None,
-        payload.active.unwrap_or(true),
+        true,
         device.owner_scope,
         device.allowed_scopes,
     )
@@ -308,21 +317,8 @@ async fn update_revision_by_id(
     let (update_doc, extra_filter) = to_update_doc(&payload)?;
     let report_delete_doc = to_report_delete_doc(&payload, &id, &device_oid)?;
 
-    let set_inactive = match &payload.active {
-        Some(true) => {
-            let out =
-                DeployRevisionDoc::get_active_device_deployment(&state.db, device_oid).await?;
-            match out {
-                Some(doc) => {
-                    let filter = doc! { "revision.id": &doc.id, "device_id": &device_oid };
-                    let update_doc = doc! { "active": false };
-                    Some((filter, update_doc))
-                }
-                None => None,
-            }
-        }
-        _ => None,
-    };
+    // `payload.active` is accepted for wire compat but has no effect under
+    // the single-revision model — there's nothing to switch away from.
 
     let mut filter = doc! { "revision.id": &id, "device_id": &device_oid };
     if let Some(extra) = extra_filter {
@@ -337,17 +333,6 @@ async fn update_revision_by_id(
 
     if res.matched_count == 0 {
         return Err(ServerError::not_found("Revision not found"));
-    }
-
-    if let Some((filter, update_doc)) = set_inactive {
-        let res = state
-            .db
-            .deploy_revisions()
-            .update_one(filter, update_doc)
-            .await?;
-        if res.matched_count == 0 {
-            return Err(ServerError::not_found("Revision not found"));
-        }
     }
 
     let _ = DeviceDoc::invalidate_deployment_hash(&state.db, &device_oid).await?;
@@ -545,10 +530,37 @@ async fn update_unit_lifecycle(
     }
 
     let update = LifecycleUpdate {
-        unit_id,
-        lifecycle: payload.lifecycle,
+        unit_id: unit_id.clone(),
+        lifecycle: payload.lifecycle.clone(),
     };
     DeviceDoc::push_lifecycle_update(&state.db, &device_oid, update).await?;
+
+    // Also persist the lifecycle to the active revision so the desired-state
+    // view (`spec`/`units`/`health`) reflects the change. Without this,
+    // `RunStatus.enabled` (computed from `revision.lifecycle` in
+    // `compute_deployment_status_snapshot_for_device`) keeps reading the
+    // original lifecycle from when the unit was deployed, and a `stop` would
+    // never flip `enabled` to false on inspection.
+    let lifecycle_bson =
+        mongodb::bson::to_bson(&payload.lifecycle).map_err(|e| {
+            ServerError::internal_error(&format!("lifecycle bson failed: {e}"))
+        })?;
+    let array_filter = doc! { "elem.id": &unit_id };
+    let options = mongodb::options::UpdateOptions::builder()
+        .array_filters(vec![array_filter])
+        .build();
+    for section in ["services", "observers", "jobs"] {
+        let path = format!("revision.{section}.$[elem].lifecycle");
+        let _ = state
+            .db
+            .deploy_revisions()
+            .update_one(
+                doc! { "device_id": &device_oid, "active": true },
+                doc! { "$set": { path: &lifecycle_bson } },
+            )
+            .with_options(options.clone())
+            .await?;
+    }
 
     Ok(ServerResponse::builder()
         .status_code(axum::http::StatusCode::NO_CONTENT)
@@ -657,68 +669,5 @@ async fn get_job_run(
         .build())
 }
 
-async fn rollback_device(
-    claims: Claims,
-    State(state): State<AppState>,
-    Path(device_id): Path<String>,
-) -> ServerAppResult<()> {
-    let device_oid = ObjectId::parse_str(&device_id)
-        .map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
-
-    let dev_opt = claims
-        .find_one_with_scope_and_role(
-            &state.db.devices(),
-            doc! { "_id": device_oid },
-            Role::Editor,
-        )
-        .await?;
-    if dev_opt.is_none() {
-        return Err(ServerError::not_found("Device not found"));
-    }
-
-    // Find active revision
-    let active = DeployRevisionDoc::get_active_device_deployment(&state.db, device_oid)
-        .await?
-        .ok_or_else(|| ServerError::not_found("No active revision"))?;
-
-    let active_index = active.index;
-    if active_index == 0 {
-        return Err(ServerError::bad_request(
-            "No previous revision to roll back to",
-        ));
-    }
-
-    // Find revision with index = active_index - 1
-    let prev = state
-        .db
-        .deploy_revisions()
-        .find_one(doc! { "device_id": &device_oid, "index": active_index - 1 })
-        .await?
-        .ok_or_else(|| ServerError::not_found("No previous revision found"))?;
-
-    // Deactivate current
-    state
-        .db
-        .deploy_revisions()
-        .update_one(
-            doc! { "device_id": &device_oid, "_id": &active.id },
-            doc! { "$set": { "active": false } },
-        )
-        .await?;
-
-    // Activate previous
-    state
-        .db
-        .deploy_revisions()
-        .update_one(
-            doc! { "device_id": &device_oid, "_id": &prev.id },
-            doc! { "$set": { "active": true } },
-        )
-        .await?;
-
-    DeviceDoc::invalidate_deployment_hash(&state.db, &device_oid).await?;
-
-    Ok(ServerResponse::builder()
-        .status_code(axum::http::StatusCode::NO_CONTENT)
-        .build())
-}
+// `rollback_device` was removed alongside the multi-revision model.
+// Each device has a single in-place spec; redeploy is the way to revert.

@@ -40,12 +40,12 @@ m87 <device> forward 8080      # forward port 8080
 ### Remote Device Access
 
 ```
-m87 <device> status            # status of the device (crashes, health and incidents)
+m87 <device> status            # health snapshot (--short / --quiet / --json / --since)
+m87 <device> logs              # last 200 events (history); -f for live stream
 m87 <device> shell             # interactive shell
 m87 <device> exec -- <cmd>     # run command
 m87 <device> forward <ports>   # port forwarding (see below)
 m87 <device> docker <args>     # docker passthrough
-m87 <device> logs              # logs from the runtime and observed containers
 m87 <device> metrics           # system metrics
 m87 <device> serial <name>     # serial mount forwarding
 m87 <device> audit --details   # audit logs on who interacted with the device
@@ -115,10 +115,17 @@ m87 <device> job trigger db-migrate --env TARGET=prod --env DRY_RUN=false
 m87 <device> job list                       # all runs across all jobs
 m87 <device> job list --job db-migrate      # runs for one job definition
 m87 <device> job status <run-id>            # status, times, error
-m87 <device> job logs <run-id>              # step-by-step output for this run
 
 # List job definitions (not runs)
 m87 <device> job defs
+```
+
+Step-by-step output for a specific run is part of the unified `logs`
+command — pass the run id as a positional:
+
+```sh
+m87 <device> logs <run-id>                  # everything for that run
+m87 <device> logs <run-id> --logs           # + captured stdout/stderr tails
 ```
 
 #### Inspecting the deployed spec
@@ -130,28 +137,100 @@ m87 <device> spec --json        # JSON format
 
 #### Logs
 
-**Three distinct log surfaces — each shows something different:**
+A single `logs` command answers three different questions depending on
+the flags you pass:
+
+| Question                          | Command                            |
+| --------------------------------- | ---------------------------------- |
+| What's been going on lately?      | `m87 <dev> logs`                   |
+| What happened to this unit?       | `m87 <dev> logs <unit-or-run-id>`  |
+| What's happening right now?       | `m87 <dev> logs --follow`          |
+
+By default, `logs` shows the **last 200 events** from history, sorted by
+time, across services, observers, and jobs. The positional id scopes to
+one unit (service / observer / job-def id) or to a specific job run.
 
 ```sh
-# 1. Live observe-follow logs  (running service / observer output right now)
-m87 <device> logs
-m87 <device> logs -f
+# Recent history
+m87 <device> logs                              # last 200 events, all units
+m87 <device> logs web-server                   # last 200 events for one unit
+m87 <device> logs <run-id>                     # everything for one job run
+m87 <device> logs --tail 50                    # last 50
 
-# 2. Step execution history  (start / stop / restart events with captured output)
-m87 <device> logs --steps                   # all units
-m87 <device> logs web-server --steps        # one unit
+# Kind scoping (additive — omit both = all)
+m87 <device> logs --services                   # services + observers only
+m87 <device> logs --jobs                       # job defs + runs only
 
-# 3. Job run step output  (output from a specific triggered job run)
-m87 <device> job logs <run-id>
+# Failures-only and time windows
+m87 <device> logs --failed                     # only failed events
+m87 <device> logs --failed --since 1h          # failures in the last hour
+m87 <device> logs --since 2026-05-25T13:00:00Z # since an absolute timestamp
+m87 <device> logs web-server --logs --since 1h # include captured stdout/stderr
+
+# Live stream (not history)
+m87 <device> logs --follow                     # live observe stream
+m87 <device> logs -f                           # short form
+
+# JSON for scripting (NDJSON — one event per line)
+m87 <device> logs --failed --since 1h --json
 ```
 
-#### Rollback
+Time formats accepted by `--since` / `--until`: relative durations like
+`30s`, `5m`, `1h`, `24h`, `7d`, `2w`; or any RFC 3339 timestamp
+(`2026-05-25T13:00:00Z`); or a date alone (`2026-05-25`, treated as
+UTC midnight).
+
+#### Status
+
+`status` answers a single question: **is the device healthy?**
+
+Without flags it prints a snapshot — per-observe liveness/health, open
+incidents. With `--since`, it also aggregates events over the window
+(failure / success / restart counts per unit). The exit code reflects
+the answer, which makes it scriptable.
 
 ```sh
-m87 <device> rollback                       # activate previous revision
-m87 <device> rollback --list               # show revision history
-m87 <device> rollback --to <revision-id>   # jump to a specific revision
+m87 <device> status                         # snapshot table
+m87 <device> status --since 24h             # snapshot + 24h aggregate
+m87 <device> status --since 1h --json       # JSON for scripts
+
+m87 <device> status --short                 # one-line summary
+m87 <device> status --quiet                 # no output, exit code only
 ```
+
+**Exit codes:**
+
+| Code | Meaning                                                        |
+| ---: | -------------------------------------------------------------- |
+|    0 | Healthy — no current issues, no failures in the window         |
+|    1 | Issues detected (unhealthy unit, open incident, or window has failures) |
+|    2 | The command itself failed (network / auth / no such device)    |
+
+So you can write health gates:
+
+```sh
+m87 dev1 status --quiet && echo "healthy" || page-oncall
+```
+
+A typical drill-down from an alarm:
+
+```sh
+m87 dev1 status                                   # see what's red
+m87 dev1 status --since 1h                        # has it been bad for long?
+m87 dev1 logs web-server --failed --since 1h --logs   # show actual errors
+```
+
+#### Reverting a change
+
+Each device has a single in-place spec — there is no revision history to
+flip between. To revert, redeploy the previous YAML:
+
+```sh
+m87 <device> deploy ./last-known-good.yaml --replace-all
+```
+
+`--replace-all` atomically swaps the entire spec; anything not in the new
+file is removed.
 
 #### YAML format reference
 
@@ -229,10 +308,6 @@ job_defs:
     steps:
       - name: migrate
         run: ./migrate.sh
-
-rollback:
-  on_health_failure: consecutive(3)
-  stabilization_period_secs: 60
 ```
 
 ### File Transfer

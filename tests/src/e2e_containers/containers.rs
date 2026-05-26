@@ -205,17 +205,43 @@ impl E2EInfra {
         Err("Server did not become ready within timeout".into())
     }
 
+    /// Run a sh command inside the container and BLOCK until it completes.
+    ///
+    /// testcontainers' `ContainerAsync::exec` returns as soon as the exec is
+    /// started — it does NOT wait for the command to finish. The command's
+    /// stdout is only drained when we call `.stdout_to_vec().await`, and that
+    /// drain is what forces the command to complete. Skipping it means writes
+    /// from heredocs like `cat > file <<EOF` may not have hit disk by the time
+    /// the next exec runs, producing very confusing race-condition bugs (e.g.
+    /// the runtime reading a not-yet-written config file and falling back to
+    /// production defaults).
+    async fn exec_blocking(
+        container: &ContainerAsync<GenericImage>,
+        shell_cmd: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut result = container
+            .exec(ExecCommand::new(vec!["sh", "-c", shell_cmd]))
+            .await?;
+        let _ = result.stdout_to_vec().await?;
+        let _ = result.stderr_to_vec().await?;
+        Ok(())
+    }
+
     async fn configure_runtime(
         runtime: &ContainerAsync<GenericImage>,
         run_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let server_name = format!("e2e-server-{}", run_id);
+        // `heartbeat_interval_secs: 2` makes lifecycle-update / job-run /
+        // deploy-change propagation visible to tests within seconds rather
+        // than the production default of 300s.
         let config = format!(
             r#"{{
   "api_url": "https://{}:8084",
   "make87_api_url": "https://{}:8084",
   "make87_app_url": "https://{}:8084",
   "log_level": "debug",
+  "heartbeat_interval_secs": 2,
   "owner_reference": "e2e@test.local",
   "auth_domain": "https://auth.make87.com/",
   "auth_audience": "https://auth.make87.com",
@@ -225,25 +251,15 @@ impl E2EInfra {
             server_name, server_name, server_name
         );
 
-        runtime
-            .exec(ExecCommand::new(vec![
-                "sh",
-                "-c",
-                "mkdir -p /root/.config/m87",
-            ]))
-            .await?;
-
-        runtime
-            .exec(ExecCommand::new(vec![
-                "sh",
-                "-c",
-                &format!(
-                    "cat > /root/.config/m87/config.json << 'EOF'\n{}\nEOF",
-                    config
-                ),
-            ]))
-            .await?;
-
+        Self::exec_blocking(runtime, "mkdir -p /root/.config/m87").await?;
+        Self::exec_blocking(
+            runtime,
+            &format!(
+                "cat > /root/.config/m87/config.json << 'EOF'\n{}\nEOF",
+                config
+            ),
+        )
+        .await?;
         Ok(())
     }
 
@@ -274,33 +290,23 @@ impl E2EInfra {
             ADMIN_KEY
         );
 
-        cli.exec(ExecCommand::new(vec![
-            "sh",
-            "-c",
-            "mkdir -p /root/.config/m87",
-        ]))
-        .await?;
-
-        cli.exec(ExecCommand::new(vec![
-            "sh",
-            "-c",
+        Self::exec_blocking(cli, "mkdir -p /root/.config/m87").await?;
+        Self::exec_blocking(
+            cli,
             &format!(
                 "cat > /root/.config/m87/config.json << 'EOF'\n{}\nEOF",
                 config
             ),
-        ]))
+        )
         .await?;
-
-        cli.exec(ExecCommand::new(vec![
-            "sh",
-            "-c",
+        Self::exec_blocking(
+            cli,
             &format!(
                 "cat > /root/.config/m87/credentials.json << 'EOF'\n{}\nEOF",
                 credentials
             ),
-        ]))
+        )
         .await?;
-
         Ok(())
     }
 
@@ -331,14 +337,27 @@ impl E2EInfra {
 
     /// Start runtime login in background (doesn't block)
     pub async fn start_runtime_login(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // Run runtime login in background using nohup
-        self.runtime
+        // `setsid` puts the child in a new session, so it survives when the
+        // docker exec session that spawned it ends. Without this, a plain
+        // `nohup ... &` would be killed when the parent exec session is torn
+        // down (which happens as soon as we drain its stdout below) — making
+        // the runtime login process never actually run. The `< /dev/null`
+        // detaches stdin so docker doesn't keep the exec stream alive.
+        let mut result = self
+            .runtime
             .exec(ExecCommand::new(vec![
                 "sh",
                 "-c",
-                "nohup m87 runtime login --org-id e2e@test.local > /tmp/runtime-login.log 2>&1 &",
+                "rm -f /tmp/runtime-login.log && \
+                 setsid sh -c 'm87 runtime login --org-id e2e@test.local \
+                 > /tmp/runtime-login.log 2>&1' < /dev/null > /dev/null 2>&1 &",
             ]))
             .await?;
+        // Drain streams so the spawning exec session completes deterministically.
+        // The backgrounded `setsid` child has already been reparented and
+        // survives independently.
+        let _ = result.stdout_to_vec().await?;
+        let _ = result.stderr_to_vec().await?;
 
         Ok(())
     }

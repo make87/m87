@@ -501,19 +501,26 @@ impl DeployReportDoc {
         db: &Arc<Mongo>,
         body: CreateDeployReportBody,
     ) -> ServerResult<Self> {
-        // let filter = Self::upsert_filter(&body)?;
-        // check if device id + revision + optional kind.data.run_id still exist. If not ignore
-        let mut check_doc = doc! {
-            "device_id": &body.device_id,
-            "revision.id": &body.revision_id,
-        };
-        if let Some(run_id) = body.kind.get_run_id() {
-            // check if and revision.jobs lsit entry has id == run_id
-            check_doc.insert("revision.jobs.id", run_id);
-        }
+        // Sanity: the device + revision the report references must still
+        // exist. We used to also check `revision.jobs.id == run_id`, but
+        // that was a stale assumption from the old flat-`jobs` model. In
+        // the new split:
+        //   • Service step reports carry `run_id = <service id>` → live in
+        //     `revision.services`, not `revision.jobs`.
+        //   • Observe (RunState) reports carry `run_id = <unit id>`.
+        //   • `JobRunReport.run_id` is the unique run UUID — not an id in
+        //     the spec at all.
+        // The old check silently rejected every report that wasn't a job
+        // def matching its own def id (i.e. almost everything), and the
+        // CLI's step-history view came back empty even though events were
+        // being uploaded. Now we just verify the revision exists and
+        // accept any report referencing it.
         let exists = db
             .deploy_revisions()
-            .find_one(check_doc)
+            .find_one(doc! {
+                "device_id": &body.device_id,
+                "revision.id": &body.revision_id,
+            })
             .await
             .map_err(|e| {
                 ServerError::internal_error(&format!(
@@ -525,10 +532,8 @@ impl DeployReportDoc {
             .unwrap_or(false);
         if !exists {
             return Err(ServerError::not_found(&format!(
-                "Deploy revision {} {} {} not found",
-                &body.device_id,
-                &body.revision_id,
-                &body.kind.get_run_id().unwrap_or_default(),
+                "Deploy revision {} {} not found",
+                &body.device_id, &body.revision_id,
             )));
         }
 
@@ -577,18 +582,27 @@ impl DeployReportDoc {
         Ok(res.deleted_count == 1)
     }
 
+    /// List all deploy reports for a device + revision, sorted newest-first.
+    ///
+    /// Despite the historical name, this returns reports of every kind
+    /// (`StepReport`, `RunState`, `JobRunReport`, `RollbackReport`, …) —
+    /// the CLI's unified `logs` view and step-history viewer both
+    /// depend on the full stream. The previous `kind.type == "RunState"`
+    /// filter and 5-per-page cap silently dropped step/job history,
+    /// making the data inaccessible from the CLI even though it was on
+    /// the server. A 500-entry per-page cap is enough for the typical
+    /// drill-down case; deep history can be paginated.
     pub async fn list_run_states_for_device(
         db: &Arc<Mongo>,
         device_id: &ObjectId,
         revision_id: &str,
         pagination: &RequestPagination,
     ) -> ServerResult<Vec<DeployReportDoc>> {
-        let limit = pagination.limit.min(5) as i64;
+        let limit = pagination.limit.min(500) as i64;
 
         let mut filter = doc! {
             "device_id": device_id,
             "revision_id": revision_id,
-            "kind.type": "RunState",
         };
 
         let mut created_at_filter = Document::new();

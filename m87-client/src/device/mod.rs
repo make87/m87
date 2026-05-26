@@ -17,3 +17,5 @@ pub mod serial;
 pub mod ssh;
 
 pub mod deploy;
+pub mod events;
+pub mod status;

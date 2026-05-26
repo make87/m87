@@ -2,8 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use m87_shared::deploy_spec::{
     DeployReportKind, DeploymentRevision, DeploymentRevisionReport, JobDef, JobRun, JobRunReport,
     JobRunStatus, Lifecycle, LifecycleUpdate, ObserveHooks, OnFailure, Outcome, RestartPolicy,
-    RollbackPolicy, RollbackReport, RunReport, RunState, ServiceSpec, Step, StepReport, UndoMode,
-    WorkdirMode,
+    RunReport, RunState, ServiceSpec, Step, StepReport, UndoMode, WorkdirMode,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -268,13 +267,6 @@ impl RevisionStore {
         Ok(data_dir(dir_path)?.join("previous_units.json"))
     }
 
-    pub fn get_rollback_policy(dir_path: Option<PathBuf>) -> Result<Option<RollbackPolicy>> {
-        match Self::get_desired_config(dir_path)? {
-            Some(c) => Ok(c.rollback),
-            None => Ok(None),
-        }
-    }
-
     pub fn get_previous_config(dir_path: Option<PathBuf>) -> Result<Option<DeploymentRevision>> {
         let path = Self::previous_path(dir_path)?;
         if !path.exists() {
@@ -322,8 +314,6 @@ pub struct DeploymentManager {
     /// Queue of `JobRun` items waiting to be executed.
     pending_job_runs: Arc<RwLock<VecDeque<JobRun>>>,
     log_manager: LogManager,
-    rollback_policy: Arc<RwLock<Option<RollbackPolicy>>>,
-    deployment_started_at: Arc<RwLock<Option<Instant>>>,
 }
 
 impl DeploymentManager {
@@ -332,15 +322,12 @@ impl DeploymentManager {
         recover_inflight(data_dir_path.clone()).await?;
         let root_dir = data_dir(data_dir_path.clone())?;
         let log_manager = LogManager::start();
-        let rollback_policy = RevisionStore::get_rollback_policy(data_dir_path).unwrap_or(None);
         Ok(Self {
             root_dir,
             dirty_services: Arc::new(RwLock::new(HashSet::new())),
             dirty_observers: Arc::new(RwLock::new(HashSet::new())),
             pending_job_runs: Arc::new(RwLock::new(VecDeque::new())),
             log_manager,
-            rollback_policy: Arc::new(RwLock::new(rollback_policy)),
-            deployment_started_at: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -489,9 +476,6 @@ impl DeploymentManager {
             self.apply_lifecycle_updates_inner(&config, lifecycle_updates)
                 .await?;
         }
-
-        *self.rollback_policy.write().await = config.rollback.clone();
-        *self.deployment_started_at.write().await = Some(Instant::now());
 
         Ok(())
     }
@@ -1165,51 +1149,21 @@ impl DeploymentManager {
     }
 
     // -----------------------------------------------------------------------
-    // Rollback + restart policy
+    // Restart policy
     // -----------------------------------------------------------------------
+    //
+    // Auto-rollback-on-observe-failure was removed when we collapsed to a
+    // single-revision model. The remaining recovery path is per-service
+    // `RestartPolicy` — re-runs startup steps in place, no revision swap.
 
     async fn check_rollback_on_observe_failure(
         &self,
-        kind: ObserveKind,
-        revision_id: &str,
-        consecutive: Option<u32>,
+        _kind: ObserveKind,
+        _revision_id: &str,
+        _consecutive: Option<u32>,
         spec: &ServiceSpec,
     ) -> Result<()> {
-        use m87_shared::deploy_spec::RollbackTrigger;
-
-        let policy = match &*self.rollback_policy.read().await {
-            Some(p) => p.clone(),
-            None => {
-                // No rollback policy — check restart policy
-                self.maybe_restart_service(spec).await?;
-                return Ok(());
-            }
-        };
-
-        if !self.is_past_stabilization_period(&policy).await {
-            return Ok(());
-        }
-
-        let trigger = match kind {
-            ObserveKind::Health => &policy.on_health_failure,
-            ObserveKind::Liveness => &policy.on_liveness_failure,
-        };
-
-        let should_rollback = match trigger {
-            RollbackTrigger::Never => false,
-            RollbackTrigger::Any => consecutive.unwrap_or(0) > 0,
-            RollbackTrigger::All => self.check_all_services_failing().await?,
-            RollbackTrigger::Consecutive(n) => consecutive.unwrap_or(0) >= *n,
-        };
-
-        if should_rollback {
-            tracing::warn!("{} failure triggered rollback for {}", kind, revision_id);
-            self.trigger_rollback(revision_id).await?;
-        } else {
-            self.maybe_restart_service(spec).await?;
-        }
-
-        Ok(())
+        self.maybe_restart_service(spec).await
     }
 
     async fn maybe_restart_service(&self, spec: &ServiceSpec) -> Result<()> {
@@ -1224,53 +1178,6 @@ impl DeploymentManager {
                 tracing::info!("restart policy: re-queuing '{}'", spec.id);
             }
         }
-        Ok(())
-    }
-
-    async fn is_past_stabilization_period(&self, policy: &RollbackPolicy) -> bool {
-        match *self.deployment_started_at.read().await {
-            None => true,
-            Some(start) => start.elapsed().as_secs() >= policy.stabilization_period_secs,
-        }
-    }
-
-    async fn check_all_services_failing(&self) -> Result<bool> {
-        let desired = match RevisionStore::get_desired_config(Some(self.root_dir.clone()))? {
-            Some(c) => c,
-            None => return Ok(false),
-        };
-        for svc in desired.services.iter().chain(desired.observers.iter()) {
-            let wd = self
-                .resolve_workdir_for(&svc.id, svc.workdir.as_ref())
-                .await?;
-            let st = LocalRunState::load(&wd).unwrap_or_default();
-            if st.consecutive_health_failures == 0 && st.consecutive_alive_failures == 0 {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    async fn trigger_rollback(&self, revision_id: &str) -> Result<()> {
-        let prev = match RevisionStore::get_previous_config(Some(self.root_dir.clone()))? {
-            Some(p) => p,
-            None => {
-                tracing::warn!("rollback requested but no previous revision");
-                return Ok(());
-            }
-        };
-        let new_rev_id = prev.id.clone().unwrap_or_default();
-        self.set_desired_units(prev, vec![]).await?;
-
-        let _ = enqueue_event(
-            DeployReportKind::RollbackReport(RollbackReport {
-                revision_id: revision_id.to_string(),
-                new_revision_id: Some(new_rev_id),
-            }),
-            Some(self.root_dir.clone()),
-        )
-        .await;
-
         Ok(())
     }
 
@@ -1392,7 +1299,25 @@ impl DeploymentManager {
         attempt: u32,
         is_undo: bool,
     ) -> Result<()> {
-        let res = run_command(run_id, wd, env, &step.run, step.timeout, MAX_TAIL_BYTES).await;
+        // Always pass a timeout to run_command. `step.timeout = None` would
+        // otherwise mean "wait forever", and a hung user command (e.g. a
+        // setup script blocked on an unreachable network resource) blocks
+        // `execute_steps` → blocks `reconcile_dirty` → blocks the entire
+        // supervisor loop, which is the classic "runtime stuck" signature.
+        // 1 hour is a generous upper bound that won't cut off legitimate
+        // long-running setup work while still bounding the worst case.
+        let effective_timeout = step
+            .timeout
+            .unwrap_or_else(|| Duration::from_secs(3600));
+        let res = run_command(
+            run_id,
+            wd,
+            env,
+            &step.run,
+            Some(effective_timeout),
+            MAX_TAIL_BYTES,
+        )
+        .await;
 
         let (success, exit_code, error_msg, log_tail) = match &res {
             Ok(out) => (true, Some(0i32), None::<String>, out.clone()),

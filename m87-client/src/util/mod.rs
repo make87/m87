@@ -23,5 +23,6 @@ pub mod format;
 pub mod fs;
 pub mod servers_parallel;
 pub mod ssh;
+pub mod time;
 pub mod tls;
 pub mod udp;

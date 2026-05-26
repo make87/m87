@@ -1888,6 +1888,7 @@ version = "0.0.0-dev0"
 dependencies = [
  "regex",
  "reqwest",
+ "serde_json",
  "tempfile",
  "testcontainers",
  "thiserror",
