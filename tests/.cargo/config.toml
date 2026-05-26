@@ -1,0 +1,17 @@
+# Default `cargo test` for the e2e crate to single-threaded execution.
+#
+# Each test spins up its own mongo + m87-server + runtime + cli container
+# set (4 containers per test). With `cargo test`'s default parallelism
+# (one-thread-per-core) this becomes ~32-64 simultaneous containers on an
+# 8-16 core machine, which floods the docker daemon, slows mongo and server
+# startup, and produces spurious auth-request / device-registration timeouts.
+#
+# Override at the call site if you really want parallel runs — but the
+# host needs serious headroom to handle it.
+[target.'cfg(all())']
+rustflags = []
+
+[env]
+# `cargo test` reads RUST_TEST_THREADS at startup and applies it as the
+# default test thread count when no `--test-threads` flag is passed.
+RUST_TEST_THREADS = "1"

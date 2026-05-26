@@ -1153,21 +1153,40 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
 
         DeviceCommand::Logs(args) => {
             // Mode resolution:
-            //   --follow                    → live stream (no history)
-            //   anything else               → history view (default 200 events)
+            //   --follow                       → live stream
+            //   any selector / filter / id /   → history (default 200 events)
+            //     --json / --logs
+            //   bare `logs` (or just --tail N) → live stream  (back-compat
+            //                                     with the pre-unified `logs`
+            //                                     command, which streamed by
+            //                                     default and silently ignored
+            //                                     --tail without --steps)
             //
-            // --follow with --jobs is an error: jobs are one-shot, there's no
-            // live job stream to follow. Filters that only make sense for
-            // history are also rejected when paired with --follow.
-            if args.follow {
-                if args.jobs {
-                    bail!("--follow is not compatible with --jobs (jobs have no live stream)");
-                }
-                if args.failed || args.since.is_some() || args.until.is_some() {
-                    bail!(
-                        "--follow shows the live observe stream; --failed / --since / --until \
-                         only apply to history. Omit --follow to query history."
-                    );
+            // `--json` and `--logs` count as history-implying because the
+            // live stream isn't structured output and doesn't have per-event
+            // tails to expand. `--tail` is intentionally treated as bare-live
+            // compatible so older `m87 dev logs --tail 10` invocations on a
+            // device with no spec continue to succeed (return empty stream).
+            let bare_invocation = args.id.is_none()
+                && !args.services
+                && !args.jobs
+                && !args.failed
+                && args.since.is_none()
+                && args.until.is_none()
+                && !args.json
+                && !args.logs;
+
+            if args.follow || bare_invocation {
+                if args.follow {
+                    if args.jobs {
+                        bail!("--follow is not compatible with --jobs (jobs have no live stream)");
+                    }
+                    if args.failed || args.since.is_some() || args.until.is_some() {
+                        bail!(
+                            "--follow shows the live observe stream; --failed / --since / --until \
+                             only apply to history. Omit --follow to query history."
+                        );
+                    }
                 }
                 if let Some(ref uid) = args.id {
                     tracing::warn!(

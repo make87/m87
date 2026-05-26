@@ -32,12 +32,14 @@ impl<'a> DeviceRegistration<'a> {
 
     /// Step 2: Wait for auth request to appear and return its ID
     ///
-    /// We extract the auth-request UUID from the runtime container's login
-    /// log rather than parsing `m87 devices list`, because the CLI's table
-    /// view truncates the REQUEST column to ~12 chars (the UUID prefix). The
-    /// runtime login emits the full UUID via `tracing::info!("Posted auth
-    /// request. To approve, check request id <UUID>")`, which gives us a
-    /// stable parse target.
+    /// We extract the auth-request UUID from whichever of the two runtime
+    /// log files contains it: `runtime login` writes to
+    /// `/tmp/runtime-login.log`, `runtime run` (the daemon) writes to
+    /// `/tmp/runtime-run.log`. Both emit
+    /// `tracing::info!("Posted auth request. To approve, check request id
+    /// <UUID>")` when triggering registration. We can't rely on the CLI's
+    /// `devices list` table because it truncates the REQUEST column to
+    /// ~12 chars.
     pub async fn wait_for_auth_request(&self) -> Result<String, E2EError> {
         let uuid_re = Regex::new(
             r"check request id ([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})",
@@ -47,13 +49,16 @@ impl<'a> DeviceRegistration<'a> {
         wait_for_result(
             WaitConfig::with_description("auth request"),
             || async {
-                let log = self
-                    .infra
-                    .get_runtime_login_log()
-                    .await
-                    .map_err(|e| E2EError::Exec(e.to_string()))?;
+                // Concatenate both candidate log files. A single `cat`
+                // gracefully ignores missing files so we don't need two
+                // separate exec round-trips.
+                let combined = crate::e2e_containers::helpers::exec_shell(
+                    &self.infra.runtime,
+                    "cat /tmp/runtime-login.log /tmp/runtime-run.log 2>/dev/null || true",
+                )
+                .await?;
                 Ok(uuid_re
-                    .captures(&log)
+                    .captures(&combined)
                     .map(|cap| cap[1].to_string()))
             },
         )

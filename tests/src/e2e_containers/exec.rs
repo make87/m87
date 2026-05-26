@@ -112,13 +112,19 @@ async fn test_shell_basic() -> Result<(), E2EError> {
 
     tracing::info!("shell output: {}", output);
 
-    // The shell should execute our command or indicate it needs a TTY
-    // Note: This may timeout or produce partial output, which is acceptable
-    // The main test is that the shell command doesn't error out immediately
-    // ioctl errors are expected when running without a TTY
+    // The shell should execute our command or fail gracefully because the
+    // exec session has no TTY. We've seen two forms of the "no TTY" error
+    // depending on how m87 was built: `ioctl(...)` (from a low-level pty
+    // setup attempt) and `Not a tty (os error 25)` (from the pre-flight
+    // isatty check). Either is acceptable; what we reject are network /
+    // command-resolution failures.
+    let lower = output.to_lowercase();
+    let no_tty = lower.contains("ioctl")
+        || lower.contains("not a tty")
+        || lower.contains("inappropriate ioctl");
     let is_acceptable = !output.contains("connection refused")
         && !output.contains("not found")
-        && (!output.to_lowercase().contains("error:") || output.contains("ioctl"));
+        && (!lower.contains("error:") || no_tty);
 
     assert!(
         is_acceptable,
