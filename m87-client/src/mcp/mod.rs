@@ -588,130 +588,23 @@ impl M87McpServer {
             "deployment" => device::deploy::SpecType::Deployment,
             _ => device::deploy::SpecType::Auto,
         };
-        device::deploy::deploy_file(&req.device, std::path::PathBuf::from(&req.file), spec_type, req.name, req.deployment_id).await
+        device::deploy::deploy_file(&req.device, std::path::PathBuf::from(&req.file), spec_type, req.name).await
             .map_err(internal_err)?;
         Ok(CallToolResult::success(vec![Content::text(serde_json::json!({"status": "deployed"}).to_string())]))
     }
 
     #[tool(description = "Remove a deployment spec from a device")]
     async fn device_undeploy(&self, Parameters(req): Parameters<DeviceUndeployReq>) -> Result<CallToolResult, ErrorData> {
-        device::deploy::undeploy_file(&req.device, req.job_id, req.deployment_id).await
+        device::deploy::undeploy_file(&req.device, req.job_id).await
             .map_err(internal_err)?;
         Ok(CallToolResult::success(vec![Content::text(serde_json::json!({"status": "undeployed"}).to_string())]))
     }
 
-    #[tool(description = "List all deployments for a device. Supports batch: pass 'devices' array instead of 'device' to query multiple devices at once.")]
-    async fn device_deployment_list(&self, Parameters(req): Parameters<DeviceDeploymentListReq>) -> Result<CallToolResult, ErrorData> {
-        let (devices, is_batch) = req.target.resolve()?;
-
-        let results = run_batch(devices, |device| async move {
-            match device::deploy::get_deployments(&device).await {
-                Ok(revs) => match serde_json::to_value(&revs) {
-                    Ok(v) => serde_json::json!({ "deployments": v }),
-                    Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
-                },
-                Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
-            }
-        }).await;
-
-        if is_batch {
-            let text = serde_json::json!({ "results": results }).to_string();
-            Ok(CallToolResult::success(vec![Content::text(text)]))
-        } else {
-            Ok(CallToolResult::success(vec![Content::text(results[0].to_string())]))
-        }
-    }
-
-    #[tool(description = "Create a new deployment for a device")]
-    async fn device_deployment_new(&self, Parameters(req): Parameters<DeviceDeploymentNewReq>) -> Result<CallToolResult, ErrorData> {
-        let active = req.active.unwrap_or(false);
-        let rev = device::deploy::create_deployment(&req.device, active).await
-            .map_err(internal_err)?;
-        let text = serde_json::to_string(&rev)
-            .map_err(internal_err)?;
-        Ok(CallToolResult::success(vec![Content::text(text)]))
-    }
-
-    #[tool(description = "Show deployment details")]
-    async fn device_deployment_show(&self, Parameters(req): Parameters<DeviceDeploymentShowReq>) -> Result<CallToolResult, ErrorData> {
-        let deployment_id = match req.deployment_id {
-            Some(id) => id,
-            None => device::deploy::get_active_deployment_id(&req.device).await
-                .map_err(internal_err)?
-                .ok_or_else(|| ErrorData::internal_error("No active deployment".to_string(), None))?,
-        };
-        let rev = device::deploy::get_deployment(&req.device, &deployment_id).await
-            .map_err(internal_err)?;
-        let text = serde_json::to_string(&rev)
-            .map_err(internal_err)?;
-        Ok(CallToolResult::success(vec![Content::text(text)]))
-    }
-
-    #[tool(description = "Remove a deployment")]
-    async fn device_deployment_rm(&self, Parameters(req): Parameters<DeviceDeploymentRmReq>) -> Result<CallToolResult, ErrorData> {
-        device::deploy::remove_deployment(&req.device, req.deployment_id).await
-            .map_err(internal_err)?;
-        Ok(CallToolResult::success(vec![Content::text(serde_json::json!({"status": "removed"}).to_string())]))
-    }
-
-    #[tool(description = "Get the currently active deployment")]
-    async fn device_deployment_active(&self, Parameters(req): Parameters<DeviceDeploymentActiveReq>) -> Result<CallToolResult, ErrorData> {
-        let active_id = device::deploy::get_active_deployment_id(&req.device).await
-            .map_err(internal_err)?;
-        let text = serde_json::json!({"active_deployment_id": active_id}).to_string();
-        Ok(CallToolResult::success(vec![Content::text(text)]))
-    }
-
-    #[tool(description = "Set the active deployment")]
-    async fn device_deployment_activate(&self, Parameters(req): Parameters<DeviceDeploymentActivateReq>) -> Result<CallToolResult, ErrorData> {
-        device::deploy::deployment_active_set(&req.device, req.deployment_id).await
-            .map_err(internal_err)?;
-        Ok(CallToolResult::success(vec![Content::text(serde_json::json!({"status": "activated"}).to_string())]))
-    }
-
-    #[tool(description = "Get deployment status. Supports batch: pass 'devices' array instead of 'device' to query multiple devices at once.")]
-    async fn device_deployment_status(&self, Parameters(req): Parameters<DeviceDeploymentStatusReq>) -> Result<CallToolResult, ErrorData> {
-        let (devices, is_batch) = req.target.resolve()?;
-        let deployment_id = req.deployment_id;
-
-        let results = run_batch(devices, |device| {
-            let dep_id = deployment_id.clone();
-            async move {
-                let id = match dep_id {
-                    Some(id) => id,
-                    None => match device::deploy::get_active_deployment_id(&device).await {
-                        Ok(Some(id)) => id,
-                        Ok(None) => return serde_json::json!({ "error": "No active deployment" }),
-                        Err(e) => return serde_json::json!({ "error": format!("{e:?}") }),
-                    },
-                };
-                match device::deploy::get_deployment_snapshot(&device, &id).await {
-                    Ok(snapshot) => match serde_json::to_value(&snapshot) {
-                        Ok(v) => v,
-                        Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
-                    },
-                    Err(e) => serde_json::json!({ "error": format!("{e:?}") }),
-                }
-            }
-        }).await;
-
-        if is_batch {
-            let text = serde_json::json!({ "results": results }).to_string();
-            Ok(CallToolResult::success(vec![Content::text(text)]))
-        } else {
-            Ok(CallToolResult::success(vec![Content::text(results[0].to_string())]))
-        }
-    }
-
-    #[tool(description = "Clone a deployment")]
-    async fn device_deployment_clone(&self, Parameters(req): Parameters<DeviceDeploymentCloneReq>) -> Result<CallToolResult, ErrorData> {
-        let active = req.active.unwrap_or(false);
-        let rev = device::deploy::clone_deployment(&req.device, req.deployment_id, active).await
-            .map_err(internal_err)?;
-        let text = serde_json::to_string(&rev)
-            .map_err(internal_err)?;
-        Ok(CallToolResult::success(vec![Content::text(text)]))
-    }
+    // The legacy `device_deployment_*` MCP tools (list/new/show/rm/active/
+    // activate/status/clone) were removed alongside the CLI when the
+    // multi-revision model was dropped. Each device has a single in-place
+    // spec — inspect it with `device_spec` / `device_units` / `device_health`,
+    // edit it with `device_deploy` / `device_undeploy`.
 
     // Organization commands
 

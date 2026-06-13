@@ -1,0 +1,53 @@
+[
+  {
+    "label": "Run m87 cli(debug)",
+    "type": "lldb",
+    "request": "launch",
+    "adapter": "CodeLLDB",
+    "program": "$ZED_WORKTREE_ROOT/target/debug/m87",
+    "args": ["-v", "stage-de", "status"],
+    "cwd": "$ZED_WORKTREE_ROOT/m87-client",
+    "sourceLanguages": ["rust"],
+    "env": {
+      "CERTIFICATE_PATH": "/tmp/certificates/",
+    },
+    "build": {
+      "command": "cargo",
+      "args": ["build"],
+    },
+  },
+  {
+    "label": "Run m87-client (debug)",
+    "type": "lldb",
+    "request": "launch",
+    "adapter": "CodeLLDB",
+    "program": "$ZED_WORKTREE_ROOT/target/debug/m87",
+    "args": ["runtime", "run"],
+    "cwd": "$ZED_WORKTREE_ROOT/m87-client",
+    "sourceLanguages": ["rust"],
+    "env": {
+      "CERTIFICATE_PATH": "/tmp/certificates/",
+    },
+    "build": {
+      "command": "cargo",
+      "args": ["build"],
+    },
+  },
+  {
+    "label": "Run m87-server (debug)",
+    "type": "lldb",
+    "env": {
+      "CERTIFICATE_PATH": "/tmp/certificates/",
+    },
+    "request": "launch",
+    "adapter": "CodeLLDB",
+    "program": "$ZED_WORKTREE_ROOT/target/debug/m87-server",
+    "args": [],
+    "cwd": "$ZED_WORKTREE_ROOT/m87-server",
+    "sourceLanguages": ["rust"],
+    "build": {
+      "command": "cargo",
+      "args": ["build"],
+    },
+  },
+]

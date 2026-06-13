@@ -8,6 +8,23 @@ on:
         required: false
         default: false
         type: boolean
+  pull_request:
+    paths:
+      - 'm87-client/**'
+      - 'm87-server/**'
+      - 'm87-shared/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/e2e-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'm87-client/**'
+      - 'm87-server/**'
+      - 'm87-shared/**'
+      - 'tests/**'
 
 permissions:
   contents: read
@@ -17,10 +34,37 @@ env:
   RUST_LOG: ${{ inputs.debug == 'true' && 'debug' || 'info' }}
 
 jobs:
+  # Fast gate that runs on every triggered PR: catches API drift between the
+  # tests crate and m87-client/m87-server/m87-shared without spinning up Docker.
+  e2e-check:
+    name: E2E compile check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-e2e-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-e2e-check-
+      - name: Compile tests crate (with e2e feature)
+        # `tests` is excluded from the root workspace (see Cargo.toml) so the
+        # Dockerfiles can build without copying it. Use --manifest-path to
+        # check it in isolation.
+        run: cargo check --manifest-path tests/Cargo.toml --features e2e --tests
+
   e2e-tests:
     name: Run E2E Tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    needs: e2e-check
 
     steps:
       - name: Checkout code
@@ -30,7 +74,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -46,12 +90,13 @@ jobs:
             ${{ runner.os }}-cargo-e2e-
 
       - name: Run E2E tests
-        working-directory: tests
-        run: |
-          cargo test --features e2e -- --nocapture --test-threads=1
+        run: cargo test --manifest-path tests/Cargo.toml --features e2e -- --nocapture --test-threads=1
 
+      # Cleanup is scoped by the `e2e-*` name prefix that tests apply when
+      # creating containers (see tests/src/e2e_containers/containers.rs).
+      # Avoids nuking unrelated containers on self-hosted runners.
       - name: Cleanup Docker
         if: always()
         run: |
-          docker ps -aq | xargs -r docker rm -f || true
-          docker network ls -q --filter name=m87 | xargs -r docker network rm || true
+          docker ps -aq --filter 'name=^e2e-' | xargs -r docker rm -f || true
+          docker network ls -q --filter 'name=^m87-e2e' | xargs -r docker network rm || true

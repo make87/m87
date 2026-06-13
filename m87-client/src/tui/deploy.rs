@@ -1,5 +1,6 @@
 use m87_shared::deploy_spec::{
-    DeploymentRevision, DeploymentStatusSnapshot, Outcome, RunStatus, StepState,
+    DeployReport, DeployReportKind, DeploymentRevision, DeploymentStatusSnapshot, JobRun,
+    JobRunStatus, Outcome, RunStatus, StepState, UnitKind,
 };
 
 use crate::tui::helper;
@@ -32,19 +33,316 @@ pub fn print_revision_verbose(rev: &DeploymentRevision) {
 }
 
 pub fn print_revision_short_detail(rev: &DeploymentRevision) {
-    // print header
+    print_units_list(rev);
+}
+
+// ---------------------------------------------------------------------------
+// Unified unit listing
+// ---------------------------------------------------------------------------
+
+/// Terse table of every service, observer, and job definition in one view.
+pub fn print_units_list(rev: &DeploymentRevision) {
+    let total = rev.services.len() + rev.observers.len() + rev.jobs.len();
+    if total == 0 {
+        println!("No units in the active deployment.");
+        return;
+    }
+
     println!(
-        "{:<36} {:>8} {:>8} {:>8} {:>8}",
-        "JOB ID", "ENABLED", "STEPS", "OBSERVE", "FILES"
+        "{:<10} {:<36} {:<10} {:>5} {:>8}",
+        "TYPE", "ID", "LIFECYCLE", "STEPS", "OBSERVE"
     );
-    for job in &rev.jobs {
+    println!("{}", "-".repeat(76));
+
+    for svc in &rev.services {
         println!(
-            "  {:<36} {:>8} {:>8} {:>8} {:>8}",
-            job.id,
-            job.enabled,
-            job.steps.len(),
-            job.observe.is_some(),
-            job.files.len()
+            "  {:<10} {:<36} {:<10} {:>5} {:>8}",
+            "service",
+            svc.id,
+            svc.lifecycle.to_string(),
+            svc.steps.len(),
+            if svc.observe.is_some() { "yes" } else { "no" }
+        );
+    }
+    for obs in &rev.observers {
+        println!(
+            "  {:<10} {:<36} {:<10} {:>5} {:>8}",
+            "observer",
+            obs.id,
+            obs.lifecycle.to_string(),
+            "-",
+            if obs.observe.is_some() { "yes" } else { "no" }
+        );
+    }
+    for jd in &rev.jobs {
+        println!(
+            "  {:<10} {:<36} {:<10} {:>5} {:>8}",
+            "job",
+            jd.id,
+            jd.lifecycle.to_string(),
+            jd.steps.len(),
+            "-"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-type listing helpers (used by deployment show)
+// ---------------------------------------------------------------------------
+
+pub fn print_services_list(rev: &DeploymentRevision) {
+    if rev.services.is_empty() {
+        println!("No services in active deployment.");
+        return;
+    }
+    println!(
+        "{:<36} {:>10} {:>6} {:>8} {:>6}",
+        "SERVICE ID", "LIFECYCLE", "STEPS", "OBSERVE", "FILES"
+    );
+    for svc in &rev.services {
+        println!(
+            "  {:<36} {:>10} {:>6} {:>8} {:>6}",
+            svc.id,
+            svc.lifecycle,
+            svc.steps.len(),
+            svc.observe.is_some(),
+            svc.files.len()
+        );
+    }
+}
+
+pub fn print_observers_list(rev: &DeploymentRevision) {
+    if rev.observers.is_empty() {
+        println!("No observers in active deployment.");
+        return;
+    }
+    println!(
+        "{:<36} {:>10} {:>8} {:>6}",
+        "OBSERVER ID", "LIFECYCLE", "OBSERVE", "FILES"
+    );
+    for obs in &rev.observers {
+        println!(
+            "  {:<36} {:>10} {:>8} {:>6}",
+            obs.id,
+            obs.lifecycle,
+            obs.observe.is_some(),
+            obs.files.len()
+        );
+    }
+}
+
+pub fn print_job_defs_list(rev: &DeploymentRevision) {
+    if rev.jobs.is_empty() {
+        println!("No job definitions in active deployment.");
+        return;
+    }
+    println!(
+        "{:<36} {:>10} {:>6} {:>6}",
+        "JOB ID", "LIFECYCLE", "STEPS", "FILES"
+    );
+    for jd in &rev.jobs {
+        println!(
+            "  {:<36} {:>10} {:>6} {:>6}",
+            jd.id,
+            jd.lifecycle,
+            jd.steps.len(),
+            jd.files.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step log display
+// ---------------------------------------------------------------------------
+
+/// Render `StepReport` entries fetched from server-side deploy_reports.
+/// Pass `unit_id` to show a heading; pass `None` for a generic heading.
+pub fn print_step_logs(unit_id: Option<&str>, reports: &[DeployReport]) {
+    let opts = helper::RenderOpts::default();
+
+    // Collect only step reports, newest first (server returns newest first already)
+    let steps: Vec<_> = reports
+        .iter()
+        .filter_map(|r| match &r.kind {
+            DeployReportKind::StepReport(s) => Some((r.created_at, s)),
+            _ => None,
+        })
+        .collect();
+
+    if steps.is_empty() {
+        match unit_id {
+            Some(id) => println!("No step logs found for '{id}'."),
+            None => println!("No step logs found."),
+        }
+        return;
+    }
+
+    match unit_id {
+        Some(id) => println!("Step logs for '{id}'  ({} entries)\n", steps.len()),
+        None => println!("Step logs  ({} entries)\n", steps.len()),
+    }
+
+    for (created_at, step) in &steps {
+        let ts = helper::format_time(*created_at, false);
+        let status_glyph = if step.success { "✓" } else { "✗" };
+        let status_color = if step.success {
+            helper::AnsiColor::Green
+        } else {
+            helper::AnsiColor::Red
+        };
+        let name = step.name.as_deref().unwrap_or("(step)");
+        let status_str = format!(
+            "{} {}",
+            status_glyph,
+            if step.success { "ok" } else { "failed" }
+        );
+        let colored_status = helper::colorize(opts.use_color, &status_str, status_color);
+
+        // Header line: timestamp  status  name  attempt N  [exit X]
+        let mut header = format!("[{}]  {}  {}", ts, colored_status, helper::bold(name));
+        if step.attempts > 1 {
+            header.push_str(&format!("  attempt {}", step.attempts));
+        }
+        if let Some(code) = step.exit_code {
+            if !step.success {
+                header.push_str(&format!("  exit {}", code));
+            }
+        }
+        if step.is_undo {
+            header.push_str("  (undo)");
+        }
+        println!("{}", header);
+
+        // Log tail
+        if let Some(tail) = &step.log_tail {
+            let trimmed = tail.trim();
+            if !trimmed.is_empty() {
+                for line in trimmed.lines() {
+                    println!("    {}", helper::gray(line));
+                }
+            }
+        }
+
+        // Error message (if any, not already in tail)
+        if let Some(err) = &step.error {
+            if !step.success {
+                let err_trimmed = err.trim();
+                if !err_trimmed.is_empty() {
+                    println!(
+                        "    {}",
+                        helper::colorize(opts.use_color, err_trimmed, helper::AnsiColor::Red)
+                    );
+                }
+            }
+        }
+
+        println!();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Job run display
+// ---------------------------------------------------------------------------
+
+fn job_run_status_str(s: &JobRunStatus) -> &'static str {
+    match s {
+        JobRunStatus::Queued => "queued",
+        JobRunStatus::Running => "running",
+        JobRunStatus::Success => "✓ success",
+        JobRunStatus::Failed => "✗ failed",
+    }
+}
+
+fn job_run_status_color(s: &JobRunStatus) -> helper::AnsiColor {
+    match s {
+        JobRunStatus::Queued => helper::AnsiColor::Dim,
+        JobRunStatus::Running => helper::AnsiColor::Yellow,
+        JobRunStatus::Success => helper::AnsiColor::Green,
+        JobRunStatus::Failed => helper::AnsiColor::Red,
+    }
+}
+
+pub fn print_job_run(run: &JobRun) {
+    let opts = helper::RenderOpts::default();
+    let term_w = helper::terminal_width().unwrap_or(96).max(60);
+    let status = job_run_status_str(&run.status);
+    let status_colored =
+        helper::colorize(opts.use_color, status, job_run_status_color(&run.status));
+
+    println!("{}", helper::kv_line(term_w, "run_id", &run.run_id, &opts));
+    println!("{}", helper::kv_line(term_w, "job", &run.job_def_id, &opts));
+    println!(
+        "{}",
+        helper::kv_line(term_w, "revision", &run.revision_id, &opts)
+    );
+    println!(
+        "{}",
+        helper::kv_line(term_w, "status", &status_colored, &opts)
+    );
+
+    let enqueued = helper::format_time(run.enqueued_at, false);
+    println!("{}", helper::kv_line(term_w, "enqueued", &enqueued, &opts));
+
+    if let Some(started) = run.started_at {
+        println!(
+            "{}",
+            helper::kv_line(
+                term_w,
+                "started",
+                &helper::format_time(started, false),
+                &opts
+            )
+        );
+    }
+    if let Some(completed) = run.completed_at {
+        println!(
+            "{}",
+            helper::kv_line(
+                term_w,
+                "completed",
+                &helper::format_time(completed, false),
+                &opts
+            )
+        );
+    }
+    if let Some(err) = &run.error {
+        println!("{}", helper::kv_line(term_w, "error", err, &opts));
+    }
+    if !run.env_overrides.is_empty() {
+        let pairs: Vec<String> = run
+            .env_overrides
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        println!(
+            "{}",
+            helper::kv_line(term_w, "env", &pairs.join("  "), &opts)
+        );
+    }
+}
+
+pub fn print_job_run_list(runs: &[JobRun]) {
+    if runs.is_empty() {
+        println!("No job runs found.");
+        return;
+    }
+
+    let opts = helper::RenderOpts::default();
+    println!(
+        "{:<36} {:<20} {:>10} {:>24}",
+        "RUN ID", "JOB", "STATUS", "ENQUEUED"
+    );
+    for run in runs {
+        let status = job_run_status_str(&run.status);
+        let status_colored =
+            helper::colorize(opts.use_color, status, job_run_status_color(&run.status));
+        let enqueued = helper::format_time(run.enqueued_at, false);
+        println!(
+            "  {:<36} {:<20} {:>10} {:>24}",
+            run.run_id,
+            helper::truncate_visible(&run.job_def_id, 18),
+            status_colored,
+            enqueued
         );
     }
 }
@@ -151,6 +449,11 @@ pub fn print_deployment_status_snapshot(
             helper::colorize(opts.use_color, "✗ disabled", helper::AnsiColor::Red)
         };
 
+        let kind_txt = match run.unit_kind {
+            UnitKind::Service => "service",
+            UnitKind::Observer => "observer",
+            UnitKind::Job => "job",
+        };
         let outcome_txt = match run.outcome {
             Outcome::Success => "✓ success",
             Outcome::Failed => "✗ failure",
@@ -168,8 +471,9 @@ pub fn print_deployment_status_snapshot(
         let (steps_ok, steps_total, max_attempts, undone_steps) = step_stats_from_snapshot(run);
 
         let mut run_info = format!(
-            "{}  {}   last update {}   steps {}/{}  max attempts {}  undone {}",
+            "{}  [{}]  {}   last update {}   steps {}/{}  max attempts {}  undone {}",
             helper::bold(&run.run_id),
+            kind_txt,
             enabled,
             last,
             steps_ok,

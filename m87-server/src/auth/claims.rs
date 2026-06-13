@@ -11,7 +11,7 @@ use mongodb::{
 };
 
 use crate::{
-    auth::access_control::AccessControlled,
+    auth::access_control::{AccessControlled, ADMIN_WILDCARD_SCOPE},
     config::AppConfig,
     db::Mongo,
     models::{
@@ -51,6 +51,12 @@ impl FromRequestParts<AppState> for Claims {
 
 impl Claims {
     fn scopes_with_min_role(&self, required: Role) -> Result<Vec<String>, ServerError> {
+        // Admins bypass scope/role checks entirely. The sentinel scope is
+        // recognized by `AccessControlled::access_filter` and produces a
+        // match-all query.
+        if self.is_admin {
+            return Ok(vec![ADMIN_WILDCARD_SCOPE.to_string()]);
+        }
         let scopes: Vec<String> = self
             .roles
             .iter()
@@ -246,17 +252,23 @@ impl Claims {
     where
         T: AccessControlled + serde::de::DeserializeOwned + Unpin + Send + Sync,
     {
-        // Get all scopes for which user has >= required_role
-        let allowed_scopes: Vec<String> = self
-            .roles
-            .iter()
-            .filter(|r| Role::allows(&r.role, &required_role))
-            .map(|r| r.scope.clone())
-            .collect();
+        // Admins bypass per-scope role checks. See `scopes_with_min_role` for
+        // the rationale.
+        let allowed_scopes: Vec<String> = if self.is_admin {
+            vec![ADMIN_WILDCARD_SCOPE.to_string()]
+        } else {
+            let scopes: Vec<String> = self
+                .roles
+                .iter()
+                .filter(|r| Role::allows(&r.role, &required_role))
+                .map(|r| r.scope.clone())
+                .collect();
 
-        if allowed_scopes.is_empty() {
-            return Err(ServerError::forbidden("Insufficient role for any scope"));
-        }
+            if scopes.is_empty() {
+                return Err(ServerError::forbidden("Insufficient role for any scope"));
+            }
+            scopes
+        };
 
         let mut filter = base_filter.clone();
         filter.extend(T::access_filter(&allowed_scopes));
@@ -277,6 +289,11 @@ impl Claims {
     where
         T: AccessControlled,
     {
+        // Admins are treated as Owner of every object.
+        if self.is_admin {
+            return Ok(Role::Owner);
+        }
+
         // Build set of scopes that grant access to this object
         // (owner scope always present; allowed scopes optional)
         let mut object_scopes: Vec<String> = Vec::new();
@@ -309,12 +326,18 @@ impl Claims {
     }
 
     pub fn has_scope_and_role(&self, scope: &str, required_role: Role) -> bool {
+        if self.is_admin {
+            return true;
+        }
         self.roles
             .iter()
             .any(|r| r.scope == scope && Role::allows(&r.role, &required_role))
     }
 
     pub fn get_role_for_scope(&self, scope: &str) -> ServerResult<Role> {
+        if self.is_admin {
+            return Ok(Role::Owner);
+        }
         self.roles
             .iter()
             .find(|r| r.scope == scope)

@@ -1,22 +1,33 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use m87_shared::deploy_spec::{
-    CreateDeployRevisionBody, DeployReport, DeploymentRevision, DeploymentStatusSnapshot,
-    UpdateDeployRevisionBody,
+    CreateDeployRevisionBody, DeployReport, DeploymentRevision, DeploymentStatusSnapshot, JobRun,
+    Lifecycle, LifecycleUpdate, TriggerJobBody, UpdateDeployRevisionBody,
 };
 use m87_shared::roles::Role;
 use mongodb::bson::{doc, oid::ObjectId};
+use serde::Deserialize;
 
 use crate::auth::claims::Claims;
 use crate::models::audit_logs::AuditLogDoc;
 use crate::models::deploy_spec::{
-    DeployReportDoc, DeployRevisionDoc, to_report_delete_doc, to_update_doc,
+    DeployReportDoc, DeployRevisionDoc, JobRunDoc, to_report_delete_doc, to_update_doc,
 };
 use crate::models::device::DeviceDoc;
 use crate::response::{ResponsePagination, ServerAppResult, ServerError, ServerResponse};
 use crate::util::app_state::AppState;
 use crate::util::pagination::RequestPagination;
+
+#[derive(Deserialize)]
+struct LifecycleUpdateBody {
+    pub lifecycle: Lifecycle,
+}
+
+#[derive(Deserialize, Default)]
+struct JobRunsQuery {
+    job_id: Option<String>,
+}
 
 pub fn create_route() -> Router<AppState> {
     // This router is mounted under /devices already.
@@ -44,6 +55,19 @@ pub fn create_route() -> Router<AppState> {
         .route(
             "/{device_id}/revisions/{revision_id}/snapshot",
             get(get_device_revision_snapshot),
+        )
+        .route(
+            "/{device_id}/units/{unit_id}/lifecycle",
+            axum::routing::post(update_unit_lifecycle),
+        )
+        .route(
+            "/{device_id}/revisions/{revision_id}/jobs/{job_id}/trigger",
+            axum::routing::post(trigger_job_run),
+        )
+        .route("/{device_id}/job-runs", axum::routing::get(list_job_runs))
+        .route(
+            "/{device_id}/job-runs/{run_id}",
+            axum::routing::get(get_job_run),
         )
 }
 
@@ -139,12 +163,25 @@ async fn create_device_revision(
         m87_shared::deploy_spec::DeploymentRevision::from_yaml(&payload.revision)
             .map_err(|e| ServerError::internal_error(&format!("{:?}", e)))?;
 
+    // Single-revision model: if a spec already exists for this device,
+    // return it instead of creating a second one. The `payload.active`
+    // field is accepted for wire compat but no longer meaningful — every
+    // device has exactly one spec which is always the active one.
+    if let Some(existing) =
+        DeployRevisionDoc::get_active_device_deployment(&state.db, device_oid).await?
+    {
+        return Ok(ServerResponse::builder()
+            .body(existing.revision)
+            .status_code(axum::http::StatusCode::OK)
+            .build());
+    }
+
     let doc = DeployRevisionDoc::create(
         &state.db,
         revision,
         Some(device_oid),
         None,
-        payload.active.unwrap_or(true),
+        true,
         device.owner_scope,
         device.allowed_scopes,
     )
@@ -206,6 +243,24 @@ async fn update_revision_by_id(
     let device_oid = ObjectId::parse_str(&device_id)
         .map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
 
+    // Handle lifecycle_update early – no revision document change needed
+    if let Some(upd) = &payload.lifecycle_update {
+        let dev_opt = claims
+            .find_one_with_scope_and_role(
+                &state.db.devices(),
+                doc! { "_id": device_oid },
+                Role::Editor,
+            )
+            .await?;
+        if dev_opt.is_none() {
+            return Err(ServerError::not_found("Device not found"));
+        }
+        DeviceDoc::push_lifecycle_update(&state.db, &device_oid, upd.clone()).await?;
+        return Ok(ServerResponse::builder()
+            .status_code(axum::http::StatusCode::NO_CONTENT)
+            .build());
+    }
+
     let _ = AuditLogDoc::add(
         &state.db,
         &claims,
@@ -230,30 +285,46 @@ async fn update_revision_by_id(
         return Err(ServerError::not_found("Device not found"));
     }
 
+    // Legacy rerun: trigger a new job run for the named job definition.
+    if let Some(run_id) = &payload.rerun_run_spec_id {
+        let rev_doc = state
+            .db
+            .deploy_revisions()
+            .find_one(doc! { "revision.id": &id, "device_id": &device_oid })
+            .await?
+            .ok_or_else(|| ServerError::not_found("Revision not found"))?;
+
+        if rev_doc.revision.get_job_by_id(run_id).is_some() {
+            let device = dev_opt.unwrap();
+            let _ = JobRunDoc::create(
+                &state.db,
+                device_oid,
+                id.clone(),
+                run_id.clone(),
+                Default::default(),
+                device.owner_scope,
+                device.allowed_scopes,
+            )
+            .await?;
+            let _ = DeviceDoc::invalidate_deployment_hash(&state.db, &device_oid).await?;
+        }
+
+        return Ok(ServerResponse::builder()
+            .status_code(axum::http::StatusCode::NO_CONTENT)
+            .build());
+    }
+
     let (update_doc, extra_filter) = to_update_doc(&payload)?;
     let report_delete_doc = to_report_delete_doc(&payload, &id, &device_oid)?;
 
-    // if its an update with a new revision that is set as active. set the old active to false
-    let set_inactive = match &payload.active {
-        Some(true) => {
-            let out =
-                DeployRevisionDoc::get_active_device_deployment(&state.db, device_oid).await?;
-            match out {
-                Some(doc) => {
-                    let filter = doc! { "revision.id": &doc.id, "device_id": &device_oid };
-                    let update_doc = doc! { "active": false };
-                    Some((filter, update_doc))
-                }
-                None => None,
-            }
-        }
-        _ => None,
-    };
+    // `payload.active` is accepted for wire compat but has no effect under
+    // the single-revision model — there's nothing to switch away from.
 
     let mut filter = doc! { "revision.id": &id, "device_id": &device_oid };
     if let Some(extra) = extra_filter {
         filter.extend(extra);
     }
+
     let res = state
         .db
         .deploy_revisions()
@@ -263,19 +334,7 @@ async fn update_revision_by_id(
     if res.matched_count == 0 {
         return Err(ServerError::not_found("Revision not found"));
     }
-    if let Some((filter, update_doc)) = set_inactive {
-        let res = state
-            .db
-            .deploy_revisions()
-            .update_one(filter, update_doc)
-            .await?;
-        if res.matched_count == 0 {
-            // TODO: check if and how we might need to recover to a stable state
-            return Err(ServerError::not_found("Revision not found"));
-        }
-    }
 
-    // update device last_deployment_hash. Pesimistic update as we might update an inactive revision. TODO for later
     let _ = DeviceDoc::invalidate_deployment_hash(&state.db, &device_oid).await?;
 
     if let Some(delete_doc) = report_delete_doc {
@@ -283,7 +342,6 @@ async fn update_revision_by_id(
         tracing::info!("Deleted {} deploy reports", res.deleted_count);
     }
 
-    // if we removed a run_id also remove form current_run_states
     if let Some(run_id) = &payload.remove_run_spec_id {
         let _ = state
             .db
@@ -450,3 +508,166 @@ async fn get_device_revision_snapshot(
         .status_code(axum::http::StatusCode::OK)
         .build())
 }
+
+async fn update_unit_lifecycle(
+    claims: Claims,
+    State(state): State<AppState>,
+    Path((device_id, unit_id)): Path<(String, String)>,
+    Json(payload): Json<LifecycleUpdateBody>,
+) -> ServerAppResult<()> {
+    let device_oid = ObjectId::parse_str(&device_id)
+        .map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
+
+    let dev_opt = claims
+        .find_one_with_scope_and_role(
+            &state.db.devices(),
+            doc! { "_id": device_oid },
+            Role::Editor,
+        )
+        .await?;
+    if dev_opt.is_none() {
+        return Err(ServerError::not_found("Device not found"));
+    }
+
+    let update = LifecycleUpdate {
+        unit_id: unit_id.clone(),
+        lifecycle: payload.lifecycle.clone(),
+    };
+    DeviceDoc::push_lifecycle_update(&state.db, &device_oid, update).await?;
+
+    // Also persist the lifecycle to the active revision so the desired-state
+    // view (`spec`/`units`/`health`) reflects the change. Without this,
+    // `RunStatus.enabled` (computed from `revision.lifecycle` in
+    // `compute_deployment_status_snapshot_for_device`) keeps reading the
+    // original lifecycle from when the unit was deployed, and a `stop` would
+    // never flip `enabled` to false on inspection.
+    let lifecycle_bson =
+        mongodb::bson::to_bson(&payload.lifecycle).map_err(|e| {
+            ServerError::internal_error(&format!("lifecycle bson failed: {e}"))
+        })?;
+    let array_filter = doc! { "elem.id": &unit_id };
+    let options = mongodb::options::UpdateOptions::builder()
+        .array_filters(vec![array_filter])
+        .build();
+    for section in ["services", "observers", "jobs"] {
+        let path = format!("revision.{section}.$[elem].lifecycle");
+        let _ = state
+            .db
+            .deploy_revisions()
+            .update_one(
+                doc! { "device_id": &device_oid, "active": true },
+                doc! { "$set": { path: &lifecycle_bson } },
+            )
+            .with_options(options.clone())
+            .await?;
+    }
+
+    Ok(ServerResponse::builder()
+        .status_code(axum::http::StatusCode::NO_CONTENT)
+        .build())
+}
+
+async fn trigger_job_run(
+    claims: Claims,
+    State(state): State<AppState>,
+    Path((device_id, revision_id, job_id)): Path<(String, String, String)>,
+    Json(payload): Json<TriggerJobBody>,
+) -> ServerAppResult<JobRun> {
+    let device_oid = ObjectId::parse_str(&device_id)
+        .map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
+
+    let dev_opt = claims
+        .find_one_with_scope_and_role(
+            &state.db.devices(),
+            doc! { "_id": device_oid },
+            Role::Editor,
+        )
+        .await?;
+    if dev_opt.is_none() {
+        return Err(ServerError::not_found("Device not found"));
+    }
+    let device = dev_opt.unwrap();
+
+    // Verify the job exists in the revision
+    let revision_doc = state
+        .db
+        .deploy_revisions()
+        .find_one(doc! { "revision.id": &revision_id, "device_id": &device_oid })
+        .await?
+        .ok_or_else(|| ServerError::not_found("Revision not found"))?;
+
+    if revision_doc.revision.get_job_by_id(&job_id).is_none() {
+        return Err(ServerError::not_found("Job not found in revision"));
+    }
+
+    let job_run = JobRunDoc::create(
+        &state.db,
+        device_oid,
+        revision_id,
+        job_id,
+        payload.env_overrides,
+        device.owner_scope,
+        device.allowed_scopes,
+    )
+    .await?;
+
+    DeviceDoc::invalidate_deployment_hash(&state.db, &device_oid).await?;
+
+    Ok(ServerResponse::builder()
+        .body(job_run.to_pub_job_run())
+        .status_code(axum::http::StatusCode::CREATED)
+        .build())
+}
+
+async fn list_job_runs(
+    claims: Claims,
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Query(params): Query<JobRunsQuery>,
+) -> ServerAppResult<Vec<JobRun>> {
+    let device_oid = ObjectId::parse_str(&device_id)
+        .map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
+
+    let dev_opt = claims
+        .find_one_with_access(&state.db.devices(), doc! { "_id": &device_oid })
+        .await?;
+    if dev_opt.is_none() {
+        return Err(ServerError::not_found("Device not found"));
+    }
+
+    let docs = JobRunDoc::list_for_device(&state.db, &device_oid, params.job_id.as_deref()).await?;
+    let runs: Vec<JobRun> = docs.into_iter().map(|d| d.to_pub_job_run()).collect();
+
+    Ok(ServerResponse::builder()
+        .body(runs)
+        .status_code(axum::http::StatusCode::OK)
+        .build())
+}
+
+async fn get_job_run(
+    claims: Claims,
+    State(state): State<AppState>,
+    Path((device_id, run_id)): Path<(String, String)>,
+) -> ServerAppResult<JobRun> {
+    let device_oid = ObjectId::parse_str(&device_id)
+        .map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
+
+    let dev_opt = claims
+        .find_one_with_access(&state.db.devices(), doc! { "_id": &device_oid })
+        .await?;
+    if dev_opt.is_none() {
+        return Err(ServerError::not_found("Device not found"));
+    }
+
+    let doc = JobRunDoc::get_by_run_id(&state.db, &device_oid, &run_id)
+        .await?
+        .ok_or_else(|| ServerError::not_found("Job run not found"))?;
+
+    Ok(ServerResponse::builder()
+        .body(doc.to_pub_job_run())
+        .status_code(axum::http::StatusCode::OK)
+        .build())
+}
+
+// `rollback_device` was removed alongside the multi-revision model.
+// Each device has a single in-place spec; redeploy is the way to revert.

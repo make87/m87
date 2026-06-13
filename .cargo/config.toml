@@ -1,0 +1,17 @@
+# Cargo aliases available anywhere in the workspace.
+#
+# The `tests/` crate is deliberately excluded from the root workspace (the
+# Dockerfile would break — it doesn't `COPY tests/` into the build context),
+# so it can't be reached with `cargo test -p tests` from the repo root.
+# These aliases give it a one-liner regardless of where you cd'd to.
+
+[alias]
+# Run the full e2e suite (Docker required).
+#
+# Defaults to RUST_TEST_THREADS=4 via tests/.cargo/config.toml. Override
+# at the call site if needed: `RUST_TEST_THREADS=1 cargo e2e`.
+e2e = "test --manifest-path tests/Cargo.toml --features e2e"
+
+# Cheap compile-time check for the e2e crate — catches API drift between
+# tests/ and m87-* without spinning up Docker. Used by CI on every PR.
+e2e-check = "check --manifest-path tests/Cargo.toml --features e2e --tests"

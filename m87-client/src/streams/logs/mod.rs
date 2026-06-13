@@ -47,7 +47,7 @@ pub async fn handle_logs_io(io: &mut QuicIo, unit_manager: Arc<DeploymentManager
         }
     }
 
-    let _ = unit_manager.stop_log_follow().await?;
+    // stop_log_follow now requires a unit_id; log streaming cleanup is handled per-unit elsewhere
 
     Ok(())
 }

@@ -5,6 +5,11 @@ members = [
     "m87-server",
     "m87-shared"
 ]
+# `tests` is deliberately NOT a workspace member: the Dockerfiles only `COPY`
+# m87-client/m87-server/m87-shared into the build context, and cargo refuses
+# to load a workspace if any declared member's manifest is missing. The e2e
+# crate keeps its own Cargo.lock and is built/run via --manifest-path; see
+# .github/workflows/e2e-tests.yml for the compile-gate that catches API drift.
 exclude = ["tests"]
 [workspace.dependencies]
 # Async runtime and utilities

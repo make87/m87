@@ -85,7 +85,6 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
     let manager_clone = unit_manager.clone();
     let _receiver = tokio::spawn({
         let state = state.clone();
-        let update_mutex = Arc::new(tokio::sync::Mutex::new(()));
         use crate::device::deployment_manager::ack_event;
         async move {
             loop {
@@ -93,41 +92,70 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                     _ = shutdown.changed() => break,
 
                     msg = read_msg::<HeartbeatResponse>(&mut recv) => {
-                        let _ = update_mutex.lock().await;
                         let resp = msg?;
-                        tracing::info!("Received heartbeat response");
+                        tracing::debug!("Received heartbeat response");
 
-                        let mut st = state.lock().await;
-
+                        // Don't hold `state` across `set_desired_units` /
+                        // `apply_lifecycle_updates` / `ack_event` — those can
+                        // run user-defined `stop` steps or filesystem IO that
+                        // takes seconds-to-minutes. While `state` is held the
+                        // sender task can't send heartbeats, which is the
+                        // textbook "runtime stuck" signature from the server's
+                        // perspective. We only need the lock for the small
+                        // `heartbeat_interval` / `last_instruction_hash`
+                        // updates — take it briefly, twice.
                         if let Some(cfg) = resp.config {
                             tracing::info!("Received new config");
                             let mut new_cfg = Config::load()?;
                             if let Some(new) = cfg.heartbeat_interval_secs {
+                                let mut st = state.lock().await;
                                 st.heartbeat_interval = new as u64;
                                 new_cfg.heartbeat_interval_secs = new as u64;
                             }
                             new_cfg.save()?;
                         }
+
                         if let Some(target_units_config) = resp.target_revision {
                             tracing::info!("Received new target deployment");
-                            let res = manager_clone.set_desired_units(target_units_config).await;
-                            if let Err(e) = res {
+                            let lifecycle_updates = resp.lifecycle_updates.clone();
+                            if let Err(e) = manager_clone
+                                .set_desired_units(target_units_config, lifecycle_updates)
+                                .await
+                            {
                                 tracing::error!("Failed to set target deployment: {}", e);
                                 continue;
                             }
+                        } else if !resp.lifecycle_updates.is_empty() {
+                            // Server returns lifecycle_updates on every heartbeat
+                            // where updates are queued, regardless of whether the
+                            // revision hash changed. On the "up to date" path
+                            // (no target_revision) apply them directly so
+                            // `stop` / `start` / `pause` / `resume` take effect.
+                            if let Err(e) = manager_clone
+                                .apply_lifecycle_updates(resp.lifecycle_updates.clone())
+                                .await
+                            {
+                                tracing::error!("Failed to apply lifecycle updates: {}", e);
+                            }
                         }
+
+                        if !resp.pending_job_runs.is_empty() {
+                            manager_clone
+                                .enqueue_job_runs(resp.pending_job_runs.clone())
+                                .await;
+                        }
+
                         if let Some(received_report_hashes) = resp.received_report_hashes {
-                            tracing::info!("Received new received report hashes");
                             for hash in received_report_hashes {
-                                tracing::info!("Received report hash: {}", hash);
                                 if let Err(e) = ack_event(&hash, None).await {
-                                    // not an issue. client will resend and well ack next time
-                                    tracing::error!("Failed to ack event: {}", e);
+                                    // Not fatal: client will resend and ack next round.
+                                    tracing::warn!("Failed to ack event {hash}: {e}");
                                 }
                             }
                         }
 
-                        st.last_instruction_hash = resp.instruction_hash;
+                        // Final lock — small + fast.
+                        state.lock().await.last_instruction_hash = resp.instruction_hash;
                     }
                 }
             }
@@ -151,17 +179,37 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
 
                     data = on_new_event(None) => {
                         let Some(claimed) = data else { continue };
-                        let st = state.lock().await;
 
-                        let req = HeartbeatRequest {
-                            last_instruction_hash: st.last_instruction_hash.clone(),
-                            deploy_report: Some(claimed.report.clone()),
-                            ..Default::default()
+                        // Build the request under the lock, then drop it
+                        // before doing any network IO. Holding `state` across
+                        // `write_msg` blocks the receiver task (which also
+                        // locks `state`) whenever the QUIC stream backpressures
+                        // — the runtime then looks "stuck" because heartbeat
+                        // responses can't be processed until the send unblocks.
+                        let req = {
+                            let st = state.lock().await;
+                            HeartbeatRequest {
+                                last_instruction_hash: st.last_instruction_hash.clone(),
+                                deploy_report: Some(claimed.report.clone()),
+                                supported_revision_format: Some(2),
+                                ..Default::default()
+                            }
                         };
 
-                        tracing::info!("Sending heartbeat with event udpate");
-
+                        tracing::debug!("Sending heartbeat with event update");
                         let _ = write_msg(&mut send, &req).await;
+
+                        // Rate-limit event emission so a large `pending/`
+                        // backlog can't pin a core. `on_new_event` returns
+                        // immediately while events are queued; without this
+                        // gap the loop spins as fast as filesystem +
+                        // serialization + QUIC writes complete (easily
+                        // thousands per second), starving the reconcile
+                        // loop and the receiver. 25ms caps the upload rate
+                        // at ~40 events/s, which is plenty for normal load
+                        // and survives a crash-report storm without melting
+                        // the CPU.
+                        tokio::time::sleep(Duration::from_millis(25)).await;
                     },
 
 
@@ -171,6 +219,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
 
                             let mut req = HeartbeatRequest {
                                 last_instruction_hash: st.last_instruction_hash.clone(),
+                                supported_revision_format: Some(2),
                                 ..Default::default()
                             };
 

@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use m87_shared::deploy_spec::{
-    CommandSpec, CreateDeployRevisionBody, DeployReport, DeploymentRevision,
-    DeploymentStatusSnapshot, LogSpec, ObserveHooks, ObserveSpec, OnFailure, RebootMode, RetrySpec,
-    RunSpec, RunType, Step, StopSpec, Undo, UndoMode, UpdateDeployRevisionBody, Workdir,
-    WorkdirMode,
+    CommandSpec, CreateDeployRevisionBody, DeployReport, DeployReportKind, DeploymentRevision,
+    DeploymentStatusSnapshot, JobDef, JobRun, Lifecycle, LogSpec, ObserveHooks, ObserveSpec,
+    OnFailure, RebootMode, RetrySpec, ServiceSpec, Step, StopSpec, TriggerJobBody, Undo, UndoMode,
+    UpdateDeployRevisionBody, Workdir, WorkdirMode,
 };
 use serde_yaml::Value;
 use std::collections::BTreeMap;
@@ -79,77 +79,73 @@ pub async fn deploy_file(
     file: PathBuf,
     ty: SpecType,
     name: Option<String>,
-    deployment_id: Option<String>,
 ) -> Result<()> {
     let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
 
+    // Each device has a single in-place spec. Resolve it; create an empty
+    // one if this is the device's first deploy.
     let target_dep_id =
-        resolve_target_deployment_id(&device_id, &api_url, &token, trust_invalid, deployment_id)
-            .await?;
+        server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id).await?;
     let target_dep_id = match target_dep_id {
         Some(id) => id,
         None => {
-            tracing::info!("No active deployment found, creating a new one");
-            let new = create_deployment(device_name, true).await?;
-
-            let new_id = new.id.unwrap();
-            tracing::info!("Created new deployment with ID: {}", new_id);
-            new_id
+            tracing::info!("No spec on device yet; creating one");
+            let new = create_deployment(device_name).await?;
+            new.id.unwrap()
         }
     };
     let base_dir = file.parent().map(|f| f.to_path_buf());
     // Convert input -> run-spec YAML string (typed for runspec)
     let update_body = match ty {
         SpecType::Compose => {
-            let run_spec = compose_file_to_runspec_yaml(&file, name.as_deref())
-                .await?
-                .to_yaml()?;
+            let svc = compose_file_to_service_spec(&file, name.as_deref()).await?;
             UpdateDeployRevisionBody {
-                add_run_spec: Some(run_spec),
+                add_service: Some(svc.to_yaml()?),
                 ..Default::default()
             }
         }
         SpecType::Runspec => {
+            // Auto-detect service vs job from the file
             let s = load_file_to_string(&file)?;
-            let mut rs = RunSpec::from_yaml(&s)?;
-            rs.resolve_file_references(base_dir)?;
-            UpdateDeployRevisionBody {
-                add_run_spec: Some(rs.to_yaml()?),
-                ..Default::default()
-            }
+            let update = parse_unit_yaml(&s, base_dir)?;
+            update
         }
         SpecType::Auto => {
             let s = load_file_to_string(&file)?;
             if is_docker_compose_yaml(&s) {
-                let run_spec = compose_file_to_runspec_yaml(&file, name.as_deref())
-                    .await?
-                    .to_yaml()?;
+                let svc = compose_file_to_service_spec(&file, name.as_deref()).await?;
                 UpdateDeployRevisionBody {
-                    add_run_spec: Some(run_spec),
+                    add_service: Some(svc.to_yaml()?),
                     ..Default::default()
                 }
             } else {
-                match RunSpec::from_yaml(&s) {
-                    Ok(mut rs) => {
-                        let _ = rs.resolve_file_references(base_dir)?;
-                        UpdateDeployRevisionBody {
-                            add_run_spec: Some(rs.to_yaml()?),
-                            ..Default::default()
-                        }
+                // Structural detection: a full DeploymentRevision YAML carries
+                // one of the section keys (`services` / `observers` /
+                // `jobs` / `job_defs`). A single-unit YAML (ServiceSpec or
+                // JobDef) does not. We can't rely on `DeploymentRevision::
+                // from_yaml` succeeding to mean "this is a revision" because
+                // its custom Deserialize silently ignores unknown keys — a
+                // single-unit YAML parses as a revision with only `id` set,
+                // which then $set-overwrites the device's whole revision
+                // with an empty one.
+                let probe: serde_yaml::Value =
+                    serde_yaml::from_str(&s).context("failed to parse deploy YAML")?;
+                let is_revision = matches!(probe, serde_yaml::Value::Mapping(_))
+                    && ["services", "observers", "jobs", "job_defs"]
+                        .iter()
+                        .any(|k| probe.get(*k).is_some());
+
+                if is_revision {
+                    let mut dr = DeploymentRevision::from_yaml(&s)
+                        .context("failed to parse as DeploymentRevision")?;
+                    let _ = dr.resolve_file_references(base_dir);
+                    UpdateDeployRevisionBody {
+                        revision: Some(dr.to_yaml()?),
+                        ..Default::default()
                     }
-                    Err(_) => {
-                        let deployment = DeploymentRevision::from_yaml(&s);
-                        if let Ok(mut dr) = deployment {
-                            let _ = dr.resolve_file_references(base_dir)?;
-                            UpdateDeployRevisionBody {
-                                revision: Some(dr.to_yaml()?),
-                                ..Default::default()
-                            }
-                        } else {
-                            let err_msg = deployment.err().unwrap().to_string();
-                            bail!("Failed to parse deployment YAML: {}", err_msg);
-                        }
-                    }
+                } else {
+                    // Single ServiceSpec or JobDef.
+                    parse_unit_yaml(&s, base_dir)?
                 }
             }
         }
@@ -177,38 +173,27 @@ pub async fn deploy_file(
     Ok(())
 }
 
-pub async fn undeploy_file(
-    device_name: &str,
-    job_id: String,
-    deployment_id: Option<String>,
-) -> Result<()> {
+pub async fn undeploy_file(device_name: &str, unit_id: String) -> Result<()> {
     let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
 
     let target_dep_id =
-        resolve_target_deployment_id(&device_id, &api_url, &token, trust_invalid, deployment_id)
-            .await?;
-    let target_dep_id = match target_dep_id {
-        Some(id) => id,
-        None => {
-            tracing::info!("No active deployment found, creating a new one");
-            let new = create_deployment(device_name, true).await?;
+        server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id)
+            .await?
+            .context("device has no spec to remove from")?;
 
-            let new_id = new.id.unwrap();
-            tracing::info!("Created new deployment with ID: {}", new_id);
-            new_id
-        }
-    };
-
-    deployment_update(
-        device_name,
-        DeploymentUpdateArgs {
-            deployment_id: Some(target_dep_id),
-            rm: vec![job_id],
+    server::update_deployment(
+        &api_url,
+        &token,
+        trust_invalid,
+        &device_id,
+        &target_dep_id,
+        UpdateDeployRevisionBody {
+            remove_unit_id: Some(unit_id),
             ..Default::default()
         },
     )
     .await
-    .context("failed to undeploy job")?;
+    .context("failed to remove unit")?;
     Ok(())
 }
 
@@ -261,7 +246,9 @@ pub async fn get_deployment(device_name: &str, deployment_id: &str) -> Result<De
     Ok(deployment)
 }
 
-pub async fn create_deployment(device_name: &str, active: bool) -> Result<DeploymentRevision> {
+/// Create the device's spec (one per device). Called only from
+/// `deploy_file` when the device has no spec yet.
+pub async fn create_deployment(device_name: &str) -> Result<DeploymentRevision> {
     let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
 
     let deployment = DeploymentRevision::empty();
@@ -273,7 +260,7 @@ pub async fn create_deployment(device_name: &str, active: bool) -> Result<Deploy
         &device_id,
         CreateDeployRevisionBody {
             revision: deployment.to_yaml()?,
-            active: Some(active),
+            active: Some(true),
         },
     )
     .await
@@ -419,8 +406,17 @@ pub async fn deployment_update(
             let (spec_id, path) = parse_kv_eq(rep)?;
             let path = PathBuf::from(path);
 
-            let spec = file_to_run_spec(&path, args.r#type).await?;
-            let yml = spec.to_yaml()?;
+            let s = load_file_to_string(&path)?;
+            let base = path.parent().map(|p| p.to_path_buf());
+            let update = if is_docker_compose_yaml(&s) {
+                let svc = compose_file_to_service_spec(&path, Some(&spec_id)).await?;
+                UpdateDeployRevisionBody {
+                    add_service: Some(svc.to_yaml()?),
+                    ..Default::default()
+                }
+            } else {
+                parse_unit_yaml(&s, base)?
+            };
 
             server::update_deployment(
                 &api_url,
@@ -428,10 +424,7 @@ pub async fn deployment_update(
                 trust_invalid,
                 &device_id,
                 &deployment_id,
-                UpdateDeployRevisionBody {
-                    update_run_spec: Some(yml),
-                    ..Default::default()
-                },
+                update,
             )
             .await
             .with_context(|| format!("failed to update run spec {spec_id}"))?;
@@ -450,49 +443,90 @@ pub async fn deployment_update(
             .context("failed to fetch deployment")?;
 
     for id in &args.rm {
+        dep.services.retain(|s| s.id != *id);
+        dep.observers.retain(|s| s.id != *id);
         dep.jobs.retain(|s| s.id != *id);
     }
 
     for rep in &args.replace {
         let (spec_id, path) = parse_kv_eq(rep)?;
         let path = PathBuf::from(path);
-
-        let mut rs = file_to_run_spec(&path, args.r#type).await?;
-        rs.id = spec_id.clone();
-
-        let idx = dep
-            .jobs
-            .iter()
-            .position(|s| s.id == spec_id)
-            .with_context(|| format!("spec_id not found for --replace: {spec_id}"))?;
-        dep.jobs[idx] = rs;
+        let s = load_file_to_string(&path)?;
+        // Try service first, then job
+        if let Ok(mut svc) = ServiceSpec::from_yaml(&s) {
+            svc.id = spec_id.clone();
+            if let Some(idx) = dep.services.iter().position(|s| s.id == spec_id) {
+                dep.services[idx] = svc;
+            } else if let Some(idx) = dep.observers.iter().position(|s| s.id == spec_id) {
+                dep.observers[idx] = svc;
+            } else {
+                bail!("spec_id not found for --replace: {spec_id}");
+            }
+        } else if let Ok(mut jd) = JobDef::from_yaml(&s) {
+            jd.id = spec_id.clone();
+            let idx = dep
+                .jobs
+                .iter()
+                .position(|j| j.id == spec_id)
+                .with_context(|| format!("spec_id not found for --replace: {spec_id}"))?;
+            dep.jobs[idx] = jd;
+        } else {
+            bail!("failed to parse replacement spec for {spec_id}");
+        }
     }
 
     for r in &args.rename {
         let (spec_id, new_name) = parse_kv_eq(r)?;
-        let rs = dep
-            .jobs
-            .iter_mut()
-            .find(|s| s.id == spec_id)
-            .with_context(|| format!("spec_id not found for --rename: {spec_id}"))?;
-        rs.id = new_name;
+        let mut found = false;
+        for svc in dep.services.iter_mut().chain(dep.observers.iter_mut()) {
+            if svc.id == spec_id {
+                svc.id = new_name.clone();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            if let Some(jd) = dep.jobs.iter_mut().find(|j| j.id == spec_id) {
+                jd.id = new_name;
+            } else {
+                bail!("spec_id not found for --rename: {spec_id}");
+            }
+        }
     }
 
     for id in &args.enable {
-        let rs = dep
-            .jobs
-            .iter_mut()
-            .find(|s| s.id == *id)
-            .with_context(|| format!("spec_id not found for --enable: {id}"))?;
-        rs.enabled = true;
+        let mut found = false;
+        for svc in dep.services.iter_mut().chain(dep.observers.iter_mut()) {
+            if svc.id == *id {
+                svc.lifecycle = Lifecycle::Running;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            if let Some(jd) = dep.jobs.iter_mut().find(|j| j.id == *id) {
+                jd.lifecycle = Lifecycle::Running;
+            } else {
+                bail!("spec_id not found for --enable: {id}");
+            }
+        }
     }
     for id in &args.disable {
-        let rs = dep
-            .jobs
-            .iter_mut()
-            .find(|s| s.id == *id)
-            .with_context(|| format!("spec_id not found for --disable: {id}"))?;
-        rs.enabled = false;
+        let mut found = false;
+        for svc in dep.services.iter_mut().chain(dep.observers.iter_mut()) {
+            if svc.id == *id {
+                svc.lifecycle = Lifecycle::Stopped;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            if let Some(jd) = dep.jobs.iter_mut().find(|j| j.id == *id) {
+                jd.lifecycle = Lifecycle::Stopped;
+            } else {
+                bail!("spec_id not found for --disable: {id}");
+            }
+        }
     }
 
     server::update_deployment(
@@ -519,37 +553,27 @@ fn parse_kv_eq(s: &str) -> Result<(String, String)> {
     Ok((k.to_string(), v.to_string()))
 }
 
-async fn file_to_run_spec(path: &Path, spec_type: SpecType) -> Result<RunSpec> {
-    let res = match spec_type {
-        SpecType::Compose => compose_file_to_runspec_yaml(path, None).await?,
-        SpecType::Runspec => {
-            let s = load_file_to_string(path)?;
-            RunSpec::from_yaml(&s)?
-        }
-        SpecType::Auto => {
-            let s = load_file_to_string(path)?;
-            if is_docker_compose_yaml(&s) {
-                compose_file_to_runspec_yaml(path, None).await?
-            } else {
-                match RunSpec::from_yaml(&s) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        let deployment = DeploymentRevision::from_yaml(&s);
-                        if let Ok(_) = deployment {
-                            bail!("--type deployment is not valid for --replace")
-                        } else {
-                            bail!("Failed to parse deployment YAML");
-                        }
-                    }
-                }
-            }
-        }
-        SpecType::Deployment => bail!("--type deployment is not valid for --replace"),
-    };
-    Ok(res)
+/// Parse a unit YAML (ServiceSpec or JobDef) and return the appropriate UpdateDeployRevisionBody.
+fn parse_unit_yaml(yaml: &str, base_dir: Option<PathBuf>) -> Result<UpdateDeployRevisionBody> {
+    // Try ServiceSpec first (has more fields; JobDef is a subset)
+    if let Ok(mut svc) = ServiceSpec::from_yaml(yaml) {
+        svc.resolve_file_references(base_dir)?;
+        return Ok(UpdateDeployRevisionBody {
+            add_service: Some(svc.to_yaml()?),
+            ..Default::default()
+        });
+    }
+    if let Ok(mut jd) = JobDef::from_yaml(yaml) {
+        jd.resolve_file_references(base_dir)?;
+        return Ok(UpdateDeployRevisionBody {
+            add_job: Some(jd.to_yaml()?),
+            ..Default::default()
+        });
+    }
+    bail!("failed to parse as ServiceSpec or JobDef")
 }
 
-pub async fn compose_file_to_runspec_yaml(file: &Path, name: Option<&str>) -> Result<RunSpec> {
+pub async fn compose_file_to_service_spec(file: &Path, name: Option<&str>) -> Result<ServiceSpec> {
     // Read compose file (kept verbatim; we do not attempt to interpret/transform compose contents).
     let compose = tokio::fs::read_to_string(file)
         .await
@@ -571,7 +595,7 @@ pub async fn compose_file_to_runspec_yaml(file: &Path, name: Option<&str>) -> Re
         stem.to_string()
     } else {
         return Err(anyhow!(
-            "cannot derive RunSpec id: pass name or use a compose file with a valid name"
+            "cannot derive ServiceSpec id: pass name or use a compose file with a valid name"
         ));
     };
 
@@ -584,8 +608,8 @@ pub async fn compose_file_to_runspec_yaml(file: &Path, name: Option<&str>) -> Re
         timeout: Some(Duration::from_secs(15 * 60)),
         retry: Some(RetrySpec {
             attempts: 2,
-            backoff: Duration::from_secs(15),
-            on_exit_codes: None,
+            backoff: Some(Duration::from_secs(15)),
+            on_exit_codes: vec![],
         }),
         undo: None,
     };
@@ -654,25 +678,25 @@ pub async fn compose_file_to_runspec_yaml(file: &Path, name: Option<&str>) -> Re
         }),
     };
 
-    Ok(RunSpec::new(
+    Ok(ServiceSpec {
         id,
-        RunType::Service,
-        true,
-        Some(Workdir {
+        lifecycle: Lifecycle::Running,
+        workdir: Some(Workdir {
             mode: WorkdirMode::Ephemeral,
             path: None,
         }),
         files,
-        BTreeMap::new(),
-        vec![pull, up],
-        Some(OnFailure {
+        env: BTreeMap::new(),
+        steps: vec![pull, up],
+        on_failure: Some(OnFailure {
             undo: UndoMode::ExecutedSteps,
             continue_on_failure: false,
         }),
-        Some(stop),
-        RebootMode::None,
-        Some(observe),
-    ))
+        stop: Some(stop),
+        reboot: RebootMode::None,
+        observe: Some(observe),
+        restart: m87_shared::deploy_spec::RestartPolicy::OnFailure,
+    })
 }
 
 pub async fn get_deployment_reports(
@@ -706,4 +730,195 @@ pub async fn get_deployment_snapshot(
     .context("failed to fetch source deployment")?;
 
     Ok(snapshot)
+}
+
+// ---------------------------------------------------------------------------
+// get_active_revision – fetch the active DeploymentRevision for a device
+// ---------------------------------------------------------------------------
+
+pub async fn get_active_revision(device_name: &str) -> Result<DeploymentRevision> {
+    let id = get_active_deployment_id(device_name)
+        .await?
+        .context("no active deployment on device")?;
+    get_deployment(device_name, &id).await
+}
+
+// ---------------------------------------------------------------------------
+// deploy_file_replace_all – atomically replace the whole device state
+// ---------------------------------------------------------------------------
+
+pub async fn deploy_file_replace_all(device_name: &str, file: PathBuf) -> Result<()> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+
+    let target_dep_id =
+        server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id).await?;
+    let target_dep_id = match target_dep_id {
+        Some(id) => id,
+        None => {
+            let new = create_deployment(device_name).await?;
+            new.id.unwrap()
+        }
+    };
+
+    let base_dir = file.parent().map(|f| f.to_path_buf());
+    let s = load_file_to_string(&file)?;
+    let mut dr = DeploymentRevision::from_yaml(&s).context("failed to parse revision YAML")?;
+    dr.resolve_file_references(base_dir)?;
+
+    server::update_deployment(
+        &api_url,
+        &token,
+        trust_invalid,
+        &device_id,
+        &target_dep_id,
+        UpdateDeployRevisionBody {
+            revision: Some(dr.to_yaml()?),
+            ..Default::default()
+        },
+    )
+    .await
+    .context("failed to replace deployment state")?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// send_lifecycle – send a runtime lifecycle update for a unit
+// ---------------------------------------------------------------------------
+
+pub async fn send_lifecycle(device_name: &str, unit_id: &str, lifecycle: Lifecycle) -> Result<()> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+    server::send_lifecycle_update(
+        &api_url,
+        &token,
+        trust_invalid,
+        &device_id,
+        unit_id,
+        lifecycle,
+    )
+    .await
+    .with_context(|| format!("failed to send lifecycle update for '{unit_id}'"))
+}
+
+// ---------------------------------------------------------------------------
+// trigger_job – create a new JobRun for a job definition
+// ---------------------------------------------------------------------------
+
+pub async fn trigger_job(
+    device_name: &str,
+    job_id: &str,
+    env_overrides: BTreeMap<String, String>,
+) -> Result<JobRun> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+
+    // We need the active revision id
+    let revision_id = server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id)
+        .await
+        .context("failed to get active deployment id")?
+        .context("no active deployment — deploy a revision first")?;
+
+    let body = TriggerJobBody { env_overrides };
+
+    server::trigger_job(
+        &api_url,
+        &token,
+        trust_invalid,
+        &device_id,
+        &revision_id,
+        job_id,
+        body,
+    )
+    .await
+    .with_context(|| format!("failed to trigger job '{job_id}'"))
+}
+
+// ---------------------------------------------------------------------------
+// list_job_runs / get_job_run
+// ---------------------------------------------------------------------------
+
+pub async fn list_job_runs(device_name: &str, job_id: Option<&str>) -> Result<Vec<JobRun>> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+    server::list_job_runs(&api_url, &token, trust_invalid, &device_id, job_id)
+        .await
+        .context("failed to list job runs")
+}
+
+pub async fn get_job_run(device_name: &str, run_id: &str) -> Result<JobRun> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+    server::get_job_run(&api_url, &token, trust_invalid, &device_id, run_id)
+        .await
+        .with_context(|| format!("failed to get job run '{run_id}'"))
+}
+
+// ---------------------------------------------------------------------------
+// rollback_device
+// ---------------------------------------------------------------------------
+
+pub async fn rollback_device(device_name: &str) -> Result<()> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+    server::rollback_device(&api_url, &token, trust_invalid, &device_id)
+        .await
+        .context("failed to rollback device")
+}
+
+// ---------------------------------------------------------------------------
+// Step log access — fetches StepReport entries from server-side deploy_reports
+// ---------------------------------------------------------------------------
+
+/// Return all StepReport entries for the active revision, optionally filtered
+/// by `unit_id` (the service/observer id or the job run_id).
+/// Fetch all deploy reports for the active revision and return them
+/// unfiltered. The unified `logs` command applies the actual filtering
+/// (kind / id / failed / time window) in
+/// [`crate::device::events::aggregate_events`], which is pure and tested.
+pub async fn get_active_revision_reports(device_name: &str) -> Result<Vec<DeployReport>> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+
+    let revision_id = server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id)
+        .await
+        .context("failed to get active deployment id")?
+        .context("no active deployment — deploy a revision first")?;
+
+    server::get_deployment_reports(&api_url, &token, trust_invalid, &device_id, &revision_id)
+        .await
+        .context("failed to fetch deployment reports")
+}
+
+pub async fn get_unit_step_logs(
+    device_name: &str,
+    unit_id: Option<&str>,
+) -> Result<Vec<DeployReport>> {
+    let (device_id, api_url, token, trust_invalid) = ctx_for_device(device_name).await?;
+
+    let revision_id = server::get_active_deployment_id(&api_url, &token, trust_invalid, &device_id)
+        .await
+        .context("failed to get active deployment id")?
+        .context("no active deployment — deploy a revision first")?;
+
+    let all =
+        server::get_deployment_reports(&api_url, &token, trust_invalid, &device_id, &revision_id)
+            .await
+            .context("failed to fetch deployment reports")?;
+
+    let filtered = all
+        .into_iter()
+        .filter(|r| {
+            // Keep only step reports …
+            if !matches!(&r.kind, DeployReportKind::StepReport(_)) {
+                return false;
+            }
+            // … and optionally filter by unit / run id
+            match unit_id {
+                Some(id) => r.kind.get_run_id() == Some(id),
+                None => true,
+            }
+        })
+        .collect();
+
+    Ok(filtered)
+}
+
+/// Convenience wrapper: step logs for a specific job run id.
+pub async fn get_job_run_logs(device_name: &str, run_id: &str) -> Result<Vec<DeployReport>> {
+    get_unit_step_logs(device_name, Some(run_id)).await
 }

@@ -67,7 +67,7 @@ async fn test_devices_list() -> Result<(), E2EError> {
 /// Test that `m87 devices reject` works for pending devices
 #[tokio::test]
 async fn test_devices_reject() -> Result<(), E2EError> {
-    use super::helpers::extract_auth_requests;
+    use regex::Regex;
 
     let infra = E2EInfra::init().await?;
 
@@ -78,15 +78,23 @@ async fn test_devices_reject() -> Result<(), E2EError> {
         .map_err(|e| E2EError::Exec(e.to_string()))?;
     tracing::info!("Agent login started");
 
-    // Step 2: Wait for auth request to appear
+    // Step 2: Wait for auth request to appear. We parse the full UUID out
+    // of the runtime container's login log rather than the CLI table view
+    // — the CLI's `devices list` truncates the REQUEST column to ~12 chars,
+    // so the captured "auth_id" was a UUID prefix that can't be used with
+    // `devices reject <id>`.
+    let uuid_re = Regex::new(
+        r"check request id ([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})",
+    )
+    .expect("uuid regex compiles");
     let auth_id = super::helpers::wait_for_result(
         super::helpers::WaitConfig::with_description("auth request for reject test"),
         || async {
-            let output = infra
-                .cli_exec(&["devices", "list"])
+            let log = infra
+                .get_runtime_login_log()
                 .await
                 .map_err(|e| E2EError::Exec(e.to_string()))?;
-            Ok(extract_auth_requests(&output).first().cloned())
+            Ok(uuid_re.captures(&log).map(|cap| cap[1].to_string()))
         },
     )
     .await?;

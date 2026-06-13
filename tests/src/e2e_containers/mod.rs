@@ -1,9 +1,12 @@
 //! E2E test containers and infrastructure
 
 mod runtime_args;
+mod backward_compat;
 pub mod containers;
+mod deployment;
 mod device_registration;
 mod docker;
+mod logs_status;
 mod exec;
 pub mod fixtures;
 mod fs;

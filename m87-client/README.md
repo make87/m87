@@ -40,30 +40,274 @@ m87 <device> forward 8080      # forward port 8080
 ### Remote Device Access
 
 ```
-m87 <device> status            # status of the device (crashes, health and incidents)
+m87 <device> status            # health snapshot (--short / --quiet / --json / --since)
+m87 <device> logs              # last 200 events (history); -f for live stream
 m87 <device> shell             # interactive shell
 m87 <device> exec -- <cmd>     # run command
 m87 <device> forward <ports>   # port forwarding (see below)
 m87 <device> docker <args>     # docker passthrough
-m87 <device> logs              # logs from the runtime and observed containers
 m87 <device> metrics           # system metrics
 m87 <device> serial <name>     # serial mount forwarding
 m87 <device> audit --details   # audit logs on who interacted with the device
 ```
 
-### Async Deployment
+### Deployment
 
-In case your devices are not always online, you can register jobs
-to be executed when the device comes online.
-With this you can deploy arbitrary runtimes like docker systemd servers etc
-or observe services and get notified upon events.
+Deploy services, observers, and job definitions to a device — even when it is
+offline. The device picks up changes as soon as it comes back online.
 
+**Units** come in three kinds:
+
+| Kind         | Description                                                                                      |
+| ------------ | ------------------------------------------------------------------------------------------------ |
+| **service**  | Long-running process. Has startup steps, optional stop steps, optional health / liveness checks. |
+| **observer** | Polling-only unit. No startup steps — just health / liveness checks that run on a schedule.      |
+| **job**      | One-shot definition triggered explicitly. Runs once per trigger; each run is tracked separately. |
+
+#### Deploying
+
+```sh
+# Deploy a single unit — type is auto-detected from the YAML
+m87 <device> deploy ./web-server.yaml
+m87 <device> deploy ./api-health.yaml      # observer if it has no steps
+m87 <device> deploy ./db-migrate.yaml      # job definition
+m87 <device> deploy ./docker-compose.yml   # docker compose — auto-converted
+
+# Atomically replace the entire device state from a full revision file
+# (contains services / observers / job_defs sections)
+m87 <device> deploy ./my-stack.yaml --replace-all
+
+# Remove a unit from the active deployment
+m87 <device> undeploy web-server
+
+# List everything currently deployed
+m87 <device> units
+
+# Show full status (health, step outcomes, last update times)
+m87 <device> health             # all units
+m87 <device> health web-server  # one unit
+m87 <device> health --logs      # with captured step output inline
 ```
-m87 <device> deploy ./my-compose.yml             # register a docker compsoe file to be run and observed (Auto converted by our cli)
-m87 <device> undeploy my-compose                 # remove the compose spec fomr the current deployment
-m87 <device> deploy ./custom_run_spec.yml        # register a custom run spec. See docs for schema
-m87 <device> deployment status --logs            # get the status and logs of the currently active deployment
-m87 <device> deployment show --yaml              # show the yaml spec of the currently active deployment
+
+#### Runtime lifecycle control
+
+Change a unit's state at runtime — no YAML file or revision bump required.
+Changes are delivered to the device on its next heartbeat (typically within
+a few seconds).
+
+```sh
+m87 <device> start web-server       # run startup steps (if not already running)
+m87 <device> stop web-server        # run stop steps and tear down
+m87 <device> stop web-server --force  # skip stop steps, tear down immediately
+m87 <device> pause web-server       # suspend observe polling; process keeps running
+m87 <device> resume web-server      # resume a paused unit
+m87 <device> restart web-server     # stop then start
+```
+
+#### Triggering jobs
+
+```sh
+# Trigger a job run (creates a tracked run instance)
+m87 <device> job trigger db-migrate
+m87 <device> job trigger db-migrate --env TARGET=prod --env DRY_RUN=false
+
+# Inspect runs
+m87 <device> job list                       # all runs across all jobs
+m87 <device> job list --job db-migrate      # runs for one job definition
+m87 <device> job status <run-id>            # status, times, error
+
+# List job definitions (not runs)
+m87 <device> job defs
+```
+
+Step-by-step output for a specific run is part of the unified `logs`
+command — pass the run id as a positional:
+
+```sh
+m87 <device> logs <run-id>                  # everything for that run
+m87 <device> logs <run-id> --logs           # + captured stdout/stderr tails
+```
+
+#### Inspecting the deployed spec
+
+```sh
+m87 <device> spec               # raw YAML of what is currently deployed
+m87 <device> spec --json        # JSON format
+```
+
+#### Logs
+
+A single `logs` command answers three different questions depending on
+the flags you pass:
+
+| Question                          | Command                            |
+| --------------------------------- | ---------------------------------- |
+| What's been going on lately?      | `m87 <dev> logs`                   |
+| What happened to this unit?       | `m87 <dev> logs <unit-or-run-id>`  |
+| What's happening right now?       | `m87 <dev> logs --follow`          |
+
+By default, `logs` shows the **last 200 events** from history, sorted by
+time, across services, observers, and jobs. The positional id scopes to
+one unit (service / observer / job-def id) or to a specific job run.
+
+```sh
+# Recent history
+m87 <device> logs                              # last 200 events, all units
+m87 <device> logs web-server                   # last 200 events for one unit
+m87 <device> logs <run-id>                     # everything for one job run
+m87 <device> logs --tail 50                    # last 50
+
+# Kind scoping (additive — omit both = all)
+m87 <device> logs --services                   # services + observers only
+m87 <device> logs --jobs                       # job defs + runs only
+
+# Failures-only and time windows
+m87 <device> logs --failed                     # only failed events
+m87 <device> logs --failed --since 1h          # failures in the last hour
+m87 <device> logs --since 2026-05-25T13:00:00Z # since an absolute timestamp
+m87 <device> logs web-server --logs --since 1h # include captured stdout/stderr
+
+# Live stream (not history)
+m87 <device> logs --follow                     # live observe stream
+m87 <device> logs -f                           # short form
+
+# JSON for scripting (NDJSON — one event per line)
+m87 <device> logs --failed --since 1h --json
+```
+
+Time formats accepted by `--since` / `--until`: relative durations like
+`30s`, `5m`, `1h`, `24h`, `7d`, `2w`; or any RFC 3339 timestamp
+(`2026-05-25T13:00:00Z`); or a date alone (`2026-05-25`, treated as
+UTC midnight).
+
+#### Status
+
+`status` answers a single question: **is the device healthy?**
+
+Without flags it prints a snapshot — per-observe liveness/health, open
+incidents. With `--since`, it also aggregates events over the window
+(failure / success / restart counts per unit). The exit code reflects
+the answer, which makes it scriptable.
+
+```sh
+m87 <device> status                         # snapshot table
+m87 <device> status --since 24h             # snapshot + 24h aggregate
+m87 <device> status --since 1h --json       # JSON for scripts
+
+m87 <device> status --short                 # one-line summary
+m87 <device> status --quiet                 # no output, exit code only
+```
+
+**Exit codes:**
+
+| Code | Meaning                                                        |
+| ---: | -------------------------------------------------------------- |
+|    0 | Healthy — no current issues, no failures in the window         |
+|    1 | Issues detected (unhealthy unit, open incident, or window has failures) |
+|    2 | The command itself failed (network / auth / no such device)    |
+
+So you can write health gates:
+
+```sh
+m87 dev1 status --quiet && echo "healthy" || page-oncall
+```
+
+A typical drill-down from an alarm:
+
+```sh
+m87 dev1 status                                   # see what's red
+m87 dev1 status --since 1h                        # has it been bad for long?
+m87 dev1 logs web-server --failed --since 1h --logs   # show actual errors
+```
+
+#### Reverting a change
+
+Each device has a single in-place spec — there is no revision history to
+flip between. To revert, redeploy the previous YAML:
+
+```sh
+m87 <device> deploy ./last-known-good.yaml --replace-all
+```
+
+`--replace-all` atomically swaps the entire spec; anything not in the new
+file is removed.
+
+#### YAML format reference
+
+A **service** YAML:
+
+```yaml
+# web-server.yaml
+id: web-server
+steps:
+  - name: start
+    run: docker compose up -d
+stop:
+  steps:
+    - name: stop
+      run: docker compose down
+observe:
+  liveness:
+    every: 30s
+    observe: docker compose ps | grep -q Up
+restart: on_failure # auto-restart when liveness fails (default)
+```
+
+An **observer** YAML (no `steps` — purely polling):
+
+```yaml
+# api-health.yaml
+id: api-health
+observe:
+  health:
+    every: 60s
+    observe: curl -sf http://api.internal/health
+    fails_after: 3 # trigger after 3 consecutive failures
+```
+
+A **job** YAML:
+
+```yaml
+# db-migrate.yaml
+id: db-migrate
+steps:
+  - name: migrate
+    run: ./migrate.sh
+    timeout: 10m
+  - name: verify
+    run: ./verify.sh
+```
+
+A **full revision** file (atomic multi-unit deploy with `--replace-all`):
+
+```yaml
+# my-stack.yaml
+services:
+  - id: web-server
+    steps:
+      - name: start
+        run: docker compose up -d
+    stop:
+      steps:
+        - name: stop
+          run: docker compose down
+    observe:
+      liveness:
+        every: 30s
+        observe: docker compose ps | grep -q Up
+
+observers:
+  - id: api-health
+    observe:
+      health:
+        every: 60s
+        observe: curl -sf http://api.internal/health
+
+job_defs:
+  - id: db-migrate
+    steps:
+      - name: migrate
+        run: ./migrate.sh
 ```
 
 ### File Transfer
@@ -135,6 +379,7 @@ m87 runtime disable --now   # disable at boot and stop
 The CLI automatically handles privilege escalation by invoking `sudo`. The runtime service runs as your user, not root.
 
 **Command behavior:**
+
 - `start` / `enable --now`: Installs the service file, enables it to start on boot, and starts it immediately
 - `stop`: Stops the running service but keeps it enabled for next boot
 - `restart`: Matches systemd behavior — restarts if running, starts if stopped

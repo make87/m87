@@ -307,13 +307,13 @@ pub enum DeviceCommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Stream container logs from the device
-    Logs {
-        #[arg(short = 'f', long)]
-        follow: bool,
-        #[arg(long, default_value = "100")]
-        tail: usize,
-    },
+    /// Unified logs view across services, observers, and jobs.
+    ///
+    /// Default (no flags): last 200 events from history, all units, all kinds.
+    /// Pass an id to scope to one unit (service / observer / job-def) or to
+    /// a specific job run-id. Use `--follow` to switch to a live observe
+    /// stream instead of history.
+    Logs(LogsArgs),
     /// Show device system metrics
     #[clap(alias = "stats")]
     Metrics,
@@ -336,7 +336,14 @@ pub enum DeviceCommand {
         baud: Option<u32>,
     },
 
-    Status,
+    /// Show device health.
+    ///
+    /// Without --since, prints the current snapshot (per-observe
+    /// liveness/health, open incidents). With --since, also aggregates
+    /// events over the window.
+    ///
+    /// Exit code: 0 = healthy, 1 = issues detected, 2 = command failed.
+    Status(StatusArgs),
 
     Audit {
         // rfc date like 2026-01-31 or 2026-01-31T13:00:00
@@ -350,18 +357,142 @@ pub enum DeviceCommand {
         details: bool,
     },
 
-    /// Add a run spec to a deployment (defaults to active deployment)
+    /// Deploy a service, observer, or job definition (upsert by id).
+    /// Pass --replace-all to atomically replace the entire state.
     Deploy(DeployArgs),
 
-    /// Remove a run spec from a deployment (defaults to active deployment)
+    /// Remove a unit from the device's spec by id
     Undeploy(UndeployArgs),
 
-    /// Manage deployments on the device
+    /// Start a unit (runs startup steps). Works for services and observers.
+    Start {
+        /// Unit id
+        id: String,
+    },
+
+    /// Stop a unit (runs stop steps). Works for services and observers.
+    Stop {
+        /// Unit id
+        id: String,
+        /// Skip stop steps and tear down immediately
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Pause a unit — suspends observe polling without stopping the process.
+    Pause {
+        /// Unit id
+        id: String,
+    },
+
+    /// Resume a paused or stopped unit.
+    Resume {
+        /// Unit id
+        id: String,
+    },
+
+    /// Restart a unit (stop then start).
+    Restart {
+        /// Unit id
+        id: String,
+        /// Skip stop steps
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// List all services, observers, and job definitions in the active deployment
+    Units {
+        /// Output as JSON (serialized `DeploymentRevision`)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show the current step state of all units (or one unit): which steps passed,
+    /// failed, or are pending, plus the latest health/liveness check result.
+    /// Use --logs to include captured step output inline.
+    ///
+    /// For live streaming observe logs use: m87 <device> logs
+    /// For historical step logs use:        m87 <device> logs [unit] --steps
+    Health {
+        /// Optional unit id — show state for this unit only
+        unit: Option<String>,
+        /// Include captured step output inline
+        #[arg(long)]
+        logs: bool,
+        /// Output as JSON (serialized `DeploymentStatusSnapshot`)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show the raw YAML spec of what is currently deployed on this device.
+    Spec {
+        /// Output as JSON instead of YAML
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Trigger and inspect job runs
     #[command(subcommand)]
-    Deployment(DeploymentCommand),
+    Job(JobCommand),
 
     #[clap(subcommand)]
     Access(AccessAction),
+}
+
+// ---------------------------------------------------------------------------
+// Job commands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand, Debug)]
+pub enum JobCommand {
+    /// Trigger a run of a job definition
+    Trigger {
+        /// Job definition id
+        id: String,
+        /// Environment variable overrides in KEY=value format
+        #[arg(long = "env", value_parser = parse_kv_pair, action = clap::ArgAction::Append)]
+        env: Vec<(String, String)>,
+        /// Output the triggered `JobRun` as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List job runs for this device (optionally filter by job definition id)
+    List {
+        /// Filter by job definition id
+        #[arg(long)]
+        job: Option<String>,
+        /// Output as JSON (serialized `Vec<JobRun>`)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show status of a specific job run
+    Status {
+        /// Job run id
+        run_id: String,
+        /// Output as JSON (serialized `JobRun`)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show step execution logs for a specific job run
+    Logs {
+        /// Job run id
+        run_id: String,
+        /// Output as JSON (serialized `Vec<DeployReport>`)
+        #[arg(long)]
+        json: bool,
+    },
+    /// List all job definitions in the active deployment
+    Defs {
+        /// Output as JSON (serialized `Vec<JobDef>`)
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn parse_kv_pair(s: &str) -> Result<(String, String), String> {
+    s.split_once('=')
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .ok_or_else(|| format!("expected KEY=value, got '{s}'"))
 }
 
 fn parse_role(s: &str) -> Result<Role, String> {
@@ -387,8 +518,83 @@ pub enum AccessAction {
 }
 
 #[derive(Parser, Debug)]
+pub struct LogsArgs {
+    /// Unit id (service, observer, or job-def) — or a job run id.
+    /// If omitted, shows events across all units.
+    pub id: Option<String>,
+
+    /// Restrict to service + observer events only.
+    /// Composable with --jobs; if neither is set, both are included.
+    #[arg(long)]
+    pub services: bool,
+
+    /// Restrict to job (def + run) events only.
+    /// Composable with --services; if neither is set, both are included.
+    #[arg(long)]
+    pub jobs: bool,
+
+    /// Only show failed events.
+    #[arg(long)]
+    pub failed: bool,
+
+    /// Start of the window: `30m`, `1h`, `24h`, `7d`, or an absolute
+    /// timestamp like `2026-05-25T13:00:00Z`.
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// End of the window (defaults to now). Same formats as --since.
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Last N events (default 200 for history; ignored with --follow).
+    #[arg(short = 'n', long, default_value = "200")]
+    pub tail: usize,
+
+    /// Switch to a live observe stream instead of history.
+    /// Not compatible with --jobs (jobs have no live stream).
+    #[arg(short = 'f', long)]
+    pub follow: bool,
+
+    /// Expand each event's captured stdout/stderr tail underneath the row.
+    #[arg(long)]
+    pub logs: bool,
+
+    /// Output as NDJSON, one event per line.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct StatusArgs {
+    /// Start of the aggregation window: `30m`, `1h`, `24h`, `7d`, or an
+    /// absolute timestamp. When omitted, only the current snapshot is shown.
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// End of the aggregation window (defaults to now).
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// One-line summary suitable for shell `if` conditions.
+    /// Exit code mirrors the health state (0 ok, 1 issues).
+    #[arg(short = 's', long)]
+    pub short: bool,
+
+    /// No output; exit code only (0 ok, 1 issues, 2 command failed).
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+
+    /// Output the full summary as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
 pub struct DeployArgs {
-    /// File to add (docker-compose.yml or run spec yaml)
+    /// File to deploy: docker-compose.yml, a single service / observer / job YAML,
+    /// or a full revision YAML with services / observers / jobs sections.
+    /// The type is auto-detected; use --replace-all to atomically replace the
+    /// entire device state from a full revision file.
     pub file: PathBuf,
 
     /// Spec type (auto detects by default)
@@ -399,80 +605,15 @@ pub struct DeployArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Add to a specific deployment (otherwise active deployment)
+    /// Atomically replace the entire device state with this file
     #[arg(long)]
-    pub deployment_id: Option<String>,
+    pub replace_all: bool,
 }
 
 #[derive(Parser, Debug)]
 pub struct UndeployArgs {
-    /// File path or run spec name
+    /// Unit id to remove from the device's spec.
     pub job_id: String,
-
-    /// Add to a specific deployment (otherwise active deployment)
-    #[arg(long)]
-    pub deployment_id: Option<String>,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum DeploymentCommand {
-    /// List deployments for this device
-    List,
-
-    /// Create a new deployment
-    New {
-        /// Make this deployment active immediately
-        #[arg(long)]
-        active: bool,
-    },
-
-    /// Show details for a deployment (includes run specs)
-    Show {
-        /// specifiv deplyoment to show. Defautls to the active deployment
-        #[arg(long)]
-        deployment_id: Option<String>,
-
-        /// Output YAML (optional)
-        #[arg(long)]
-        yaml: bool,
-    },
-
-    /// Remove a deployment
-    Rm {
-        deployment_id: String,
-
-        /// Do not prompt (if you later add prompts)
-        #[arg(long)]
-        force: bool,
-    },
-
-    /// Print the currently active deployment
-    Active,
-
-    /// Set the active deployment
-    Activate { deployment_id: String },
-    /// Set the active deployment
-    Status {
-        /// specifiv deplyoment to show. Defautls to the active deployment
-        #[arg(long)]
-        deployment_id: Option<String>,
-
-        /// Show logs of the steps
-        #[arg(long)]
-        logs: bool,
-    },
-
-    /// Clone an existing deployment into a new one
-    Clone {
-        deployment_id: String,
-
-        /// Make the cloned deployment active immediately
-        #[arg(long)]
-        active: bool,
-    },
-
-    /// Update a deployment (remove/replace/move/rename specs; change name)
-    Update(DeploymentUpdateArgs),
 }
 
 #[cfg(feature = "runtime")]
@@ -597,7 +738,11 @@ enum InternalCommands {
 #[derive(Subcommand)]
 enum DevicesCommands {
     /// List all accessible devices
-    List,
+    List {
+        /// Output as JSON: `{"devices": [...], "auth_requests": [...]}`
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Show detailed information about a specific device
     Show {
@@ -768,10 +913,22 @@ pub async fn cli() -> anyhow::Result<()> {
         },
 
         Commands::Devices(cmd) => match cmd {
-            DevicesCommands::List => {
+            DevicesCommands::List { json } => {
                 let devices = devices::list_devices().await?;
                 let requests = auth::list_auth_requests().await?;
-                tui::device::print_devices_table(&devices, &requests);
+                if json {
+                    let combined = serde_json::json!({
+                        "devices": devices,
+                        "auth_requests": requests,
+                    });
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&combined)
+                            .context("failed to serialize devices+requests as JSON")?
+                    );
+                } else {
+                    tui::device::print_devices_table(&devices, &requests);
+                }
             }
             DevicesCommands::Show { device } => {
                 eprintln!("Error: 'devices show' command is not yet implemented");
@@ -973,6 +1130,9 @@ pub async fn cli() -> anyhow::Result<()> {
 }
 
 async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
+    use device::deploy as dp;
+    use m87_shared::deploy_spec::Lifecycle;
+
     let device = cmd.device;
 
     match cmd.command {
@@ -991,8 +1151,85 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             Ok(())
         }
 
-        DeviceCommand::Logs { follow: _, tail: _ } => {
-            tui::log::run_logs(&device).await?;
+        DeviceCommand::Logs(args) => {
+            // Mode resolution:
+            //   --follow                       → live stream
+            //   any selector / filter / id /   → history (default 200 events)
+            //     --json / --logs
+            //   bare `logs` (or just --tail N) → live stream  (back-compat
+            //                                     with the pre-unified `logs`
+            //                                     command, which streamed by
+            //                                     default and silently ignored
+            //                                     --tail without --steps)
+            //
+            // `--json` and `--logs` count as history-implying because the
+            // live stream isn't structured output and doesn't have per-event
+            // tails to expand. `--tail` is intentionally treated as bare-live
+            // compatible so older `m87 dev logs --tail 10` invocations on a
+            // device with no spec continue to succeed (return empty stream).
+            let bare_invocation = args.id.is_none()
+                && !args.services
+                && !args.jobs
+                && !args.failed
+                && args.since.is_none()
+                && args.until.is_none()
+                && !args.json
+                && !args.logs;
+
+            if args.follow || bare_invocation {
+                if args.follow {
+                    if args.jobs {
+                        bail!("--follow is not compatible with --jobs (jobs have no live stream)");
+                    }
+                    if args.failed || args.since.is_some() || args.until.is_some() {
+                        bail!(
+                            "--follow shows the live observe stream; --failed / --since / --until \
+                             only apply to history. Omit --follow to query history."
+                        );
+                    }
+                }
+                if let Some(ref uid) = args.id {
+                    tracing::warn!(
+                        "Live log filtering by unit is not yet supported — streaming all logs. \
+                         Drop --follow and pass `{uid}` to see this unit's recorded history."
+                    );
+                }
+                tui::log::run_logs(&device).await?;
+                return Ok(());
+            }
+
+            // History path.
+            use crate::device::events::{aggregate_events, EventFilter};
+            use crate::util::time::{now_ms, parse_time};
+
+            let now = now_ms();
+            let since_ms = args
+                .since
+                .as_deref()
+                .map(|s| parse_time(s, now))
+                .transpose()?;
+            let until_ms = args
+                .until
+                .as_deref()
+                .map(|s| parse_time(s, now))
+                .transpose()?;
+
+            let reports = dp::get_active_revision_reports(&device).await?;
+            let filter = EventFilter {
+                id: args.id.as_deref(),
+                services: args.services,
+                jobs: args.jobs,
+                failed_only: args.failed,
+                since_ms,
+                until_ms,
+            };
+            let events = aggregate_events(reports, &filter, args.tail);
+
+            if args.json {
+                tui::events::print_events_ndjson(&events);
+            } else {
+                tui::events::print_events_table(&events, args.logs);
+            }
             Ok(())
         }
 
@@ -1017,11 +1254,7 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             Ok(())
         }
 
-        DeviceCommand::Status => {
-            let status = devices::get_device_status(&device).await?;
-            tui::device::print_device_status(&device, &status);
-            Ok(())
-        }
+        DeviceCommand::Status(args) => run_status(&device, args).await,
 
         DeviceCommand::Audit {
             until,
@@ -1066,33 +1299,146 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
         },
 
         DeviceCommand::Deploy(args) => {
-            let _ = device::deploy::deploy_file(
-                &device,
-                args.file,
-                args.r#type,
-                args.name,
-                args.deployment_id,
-            )
-            .await?;
-
-            tracing::info!("Added job spec to deployment");
+            if args.replace_all {
+                dp::deploy_file_replace_all(&device, args.file).await?;
+                tracing::info!("Replaced entire device spec");
+            } else {
+                dp::deploy_file(&device, args.file, args.r#type, args.name).await?;
+                tracing::info!("Deployed unit to device");
+            }
             Ok(())
         }
 
         DeviceCommand::Undeploy(args) => {
-            let _ = device::deploy::undeploy_file(&device, args.job_id.clone(), args.deployment_id)
-                .await?;
-
-            tracing::info!("Removed {} from deployment", args.job_id);
+            dp::undeploy_file(&device, args.job_id.clone()).await?;
+            tracing::info!("Removed {} from device spec", args.job_id);
             Ok(())
         }
 
-        DeviceCommand::Deployment(cmd) => match cmd {
-            DeploymentCommand::List => {
+        // ── Flat lifecycle commands ────────────────────────────────────────
+        DeviceCommand::Start { id } => {
+            dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
+            tracing::info!("Start requested for '{id}' — will apply on next heartbeat");
+            Ok(())
+        }
+
+        DeviceCommand::Stop { id, force: _ } => {
+            dp::send_lifecycle(&device, &id, Lifecycle::Stopped).await?;
+            tracing::info!("Stop requested for '{id}' — will apply on next heartbeat");
+            Ok(())
+        }
+
+        DeviceCommand::Pause { id } => {
+            dp::send_lifecycle(&device, &id, Lifecycle::Paused).await?;
+            tracing::info!(
+                "Pause requested for '{id}' — observe polling suspended on next heartbeat"
+            );
+            Ok(())
+        }
+
+        DeviceCommand::Resume { id } => {
+            dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
+            tracing::info!("Resume requested for '{id}' — will apply on next heartbeat");
+            Ok(())
+        }
+
+        DeviceCommand::Restart { id, force: _ } => {
+            // Two sequential lifecycle updates: server queues both, device
+            // applies them in order across successive heartbeat ticks.
+            dp::send_lifecycle(&device, &id, Lifecycle::Stopped).await?;
+            dp::send_lifecycle(&device, &id, Lifecycle::Running).await?;
+            tracing::info!("Restart requested for '{id}'");
+            Ok(())
+        }
+
+        DeviceCommand::Units { json } => {
+            let rev = dp::get_active_revision(&device).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&rev)
+                        .context("failed to serialize revision as JSON")?
+                );
+            } else {
+                tui::deploy::print_units_list(&rev);
+            }
+            Ok(())
+        }
+
+        // ── Health snapshot ────────────────────────────────────────────────
+        // Current step state (pending/success/failed) + health/liveness.
+        // NOT the same as:
+        //   status      — device connectivity + observation history
+        //   logs --steps — historical step log entries
+        DeviceCommand::Health { unit, logs, json } => {
+            let deployment_id = dp::get_active_deployment_id(&device)
+                .await?
+                .context("no active deployment on device")?;
+            let snapshot = dp::get_deployment_snapshot(&device, &deployment_id).await?;
+            let mut opts = tui::helper::RenderOpts::default();
+            opts.show_logs_inline = logs;
+            // Filter snapshot to a single unit if requested
+            let filtered = match &unit {
+                None => snapshot,
+                Some(id) => {
+                    use m87_shared::deploy_spec::DeploymentStatusSnapshot;
+                    let runs = snapshot
+                        .runs
+                        .into_iter()
+                        .filter(|r| &r.run_id == id)
+                        .collect();
+                    DeploymentStatusSnapshot { runs, ..snapshot }
+                }
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&filtered)
+                        .context("failed to serialize snapshot as JSON")?
+                );
+            } else {
+                tui::deploy::print_deployment_status_snapshot(&filtered, &opts);
+            }
+            Ok(())
+        }
+
+        // ── Spec viewer ────────────────────────────────────────────────────
+        // The raw spec that is deployed — what services/observers/jobs are
+        // defined. Use `units` for the runtime lifecycle view.
+        DeviceCommand::Spec { json } => {
+            let rev = dp::get_active_revision(&device).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&rev)
+                        .context("failed to serialize revision as JSON")?
+                );
+            } else {
+                tui::deploy::print_revision_verbose(&rev);
+            }
+            Ok(())
+        }
+
+        // ───────────────────────────────────────────────────────────────────
+        // NOTE: the multi-revision `deployment` subcommand and the `rollback`
+        // command have been removed. Each device has a single in-place spec
+        // edited by `m87 <dev> deploy` / `m87 <dev> undeploy`. Use `spec` /
+        // `units` to inspect it.
+        // ───────────────────────────────────────────────────────────────────
+
+        /* removed_block_start
                 let deployments = device::deploy::get_deployments(&device).await?;
 
-                tracing::info!("Loaded deployments");
-                tui::deploy::print_revision_list_short(&deployments);
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&deployments)
+                            .context("failed to serialize deployments as JSON")?
+                    );
+                } else {
+                    tracing::info!("Loaded deployments");
+                    tui::deploy::print_revision_list_short(&deployments);
+                }
                 Ok(())
             }
 
@@ -1110,23 +1456,20 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
                 deployment_id,
                 logs,
             } => {
+                // Hint: prefer `m87 <device> health [--logs]` for the active deployment.
+                // This command still works for inspecting non-active revisions by id.
                 let deployment_id = match deployment_id {
                     Some(d) => d,
                     None => match device::deploy::get_active_deployment_id(&device).await? {
                         Some(d) => d,
                         None => {
-                            tracing::error!(
-                                "No active deployment set for device {}. You either need to activate one or specify an --deployment-id",
-                                device
-                            );
+                            tracing::error!("No active deployment. Try: m87 {} health", device);
                             return Ok(());
                         }
                     },
                 };
                 let snapshot =
                     device::deploy::get_deployment_snapshot(&device, &deployment_id).await?;
-
-                tracing::info!("Received deployment reports");
                 let mut config = tui::helper::RenderOpts::default();
                 config.show_logs_inline = logs;
                 tui::deploy::print_deployment_status_snapshot(&snapshot, &config);
@@ -1137,26 +1480,22 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
                 deployment_id,
                 yaml,
             } => {
+                // Hint: prefer `m87 <device> spec` for the active deployment.
+                // This command still works for inspecting non-active revisions by id.
                 let deployment_id = match deployment_id {
                     Some(d) => d,
                     None => match device::deploy::get_active_deployment_id(&device).await? {
                         Some(d) => d,
                         None => {
-                            tracing::error!(
-                                "No active deployment set for device {}. You either need to activate one or specify an --deployment-id",
-                                device
-                            );
+                            tracing::error!("No active deployment. Try: m87 {} spec", device);
                             return Ok(());
                         }
                     },
                 };
                 let deployment = device::deploy::get_deployment(&device, &deployment_id).await?;
-                tracing::info!("Loaded deployment");
                 match yaml {
                     true => tui::deploy::print_revision_verbose(&deployment),
-                    false => {
-                        tui::deploy::print_revision_short_detail(&deployment);
-                    }
+                    false => tui::deploy::print_revision_short_detail(&deployment),
                 }
                 Ok(())
             }
@@ -1215,9 +1554,6 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
             }
 
             DeploymentCommand::Update(args) => {
-                // Validate intent: require at least one operation flag
-                //
-
                 let deployment = device::deploy::deployment_update(&device, args).await?;
                 tracing::info!(
                     "Successfully updated deployment. New ID {}",
@@ -1227,5 +1563,177 @@ async fn handle_device_command(cmd: DeviceRoot) -> anyhow::Result<()> {
                 Ok(())
             }
         },
+        */
+
+        // ── Job commands ───────────────────────────────────────────────────
+        DeviceCommand::Job(cmd) => match cmd {
+            JobCommand::Trigger { id, env, json } => {
+                use std::collections::BTreeMap;
+                let env_overrides: BTreeMap<String, String> = env.into_iter().collect();
+                let run = dp::trigger_job(&device, &id, env_overrides).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&run)
+                            .context("failed to serialize job run as JSON")?
+                    );
+                } else {
+                    tracing::info!("Triggered job '{}' → run id: {}", id, run.run_id);
+                    tui::deploy::print_job_run(&run);
+                }
+                Ok(())
+            }
+            JobCommand::List { job, json } => {
+                let runs = dp::list_job_runs(&device, job.as_deref()).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&runs)
+                            .context("failed to serialize job runs as JSON")?
+                    );
+                } else {
+                    tui::deploy::print_job_run_list(&runs);
+                }
+                Ok(())
+            }
+            JobCommand::Status { run_id, json } => {
+                let run = dp::get_job_run(&device, &run_id).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&run)
+                            .context("failed to serialize job run as JSON")?
+                    );
+                } else {
+                    tui::deploy::print_job_run(&run);
+                }
+                Ok(())
+            }
+            JobCommand::Logs { run_id, json } => {
+                let reports = dp::get_unit_step_logs(&device, Some(&run_id)).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&reports)
+                            .context("failed to serialize step logs as JSON")?
+                    );
+                } else {
+                    tui::deploy::print_step_logs(Some(&run_id), &reports);
+                }
+                Ok(())
+            }
+            JobCommand::Defs { json } => {
+                let rev = dp::get_active_revision(&device).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&rev.jobs)
+                            .context("failed to serialize job defs as JSON")?
+                    );
+                } else {
+                    tui::deploy::print_job_defs_list(&rev);
+                }
+                Ok(())
+            }
+        },
+
     }
+}
+
+// ---------------------------------------------------------------------------
+// `m87 <device> status` — runs the snapshot + optional windowed aggregate
+// and exits with a status-coded process result:
+//   0 = healthy
+//   1 = issues detected (anything in `current_issues` or window failures)
+//   2 = command itself failed (handled by the caller's `?` propagation)
+// ---------------------------------------------------------------------------
+
+async fn run_status(device: &str, args: StatusArgs) -> anyhow::Result<()> {
+    use crate::device::deploy as dp;
+    use crate::device::events::{aggregate_events, EventFilter};
+    use crate::device::status::{attach_window, summarize};
+    use crate::util::time::{now_ms, parse_time};
+
+    let status = devices::get_device_status(device).await?;
+    let mut summary = summarize(device, &status);
+
+    // Optional windowed aggregate.
+    if args.since.is_some() || args.until.is_some() {
+        let now = now_ms();
+        let since_ms = args
+            .since
+            .as_deref()
+            .map(|s| parse_time(s, now))
+            .transpose()?
+            .unwrap_or(0);
+        let until_ms = args
+            .until
+            .as_deref()
+            .map(|s| parse_time(s, now))
+            .transpose()?
+            .unwrap_or(now);
+
+        // Best-effort: if there's no active deployment we just leave the
+        // window out instead of failing the whole status call.
+        if let Ok(reports) = dp::get_active_revision_reports(device).await {
+            let filter = EventFilter {
+                since_ms: Some(since_ms),
+                until_ms: Some(until_ms),
+                ..Default::default()
+            };
+            let events = aggregate_events(reports, &filter, 0);
+            attach_window(&mut summary, &events, since_ms, until_ms);
+        }
+    }
+
+    let healthy = summary.is_healthy();
+
+    if args.quiet {
+        // No output. Exit code only.
+    } else if args.json {
+        let json = serde_json::to_string_pretty(&summary)
+            .context("failed to serialize status summary as JSON")?;
+        println!("{json}");
+    } else if args.short {
+        println!("{}", summary.short_line());
+    } else {
+        // Default: pretty current-state table (existing renderer) plus a
+        // window section when present. The existing renderer takes the raw
+        // server `DeviceStatus`, not our summary, so we hand it through.
+        tui::device::print_device_status(device, &status);
+        if let Some(w) = &summary.window {
+            use crate::util::time::format_ms;
+            println!();
+            println!(
+                "Window  {} → {}   ({} events, {} failures)",
+                format_ms(w.since_ms),
+                format_ms(w.until_ms),
+                w.total_events,
+                w.total_failures
+            );
+            if w.units.is_empty() {
+                println!("  (no events in window)");
+            } else {
+                println!(
+                    "  {:<22}  {:<10}  {:>8}  {:>8}  {:>6}  {}",
+                    "UNIT", "KIND", "FAILURES", "SUCCESS", "STARTS", "LAST"
+                );
+                for u in &w.units {
+                    let last = u
+                        .last_event_ms
+                        .map(|t| format_ms(t))
+                        .unwrap_or_else(|| "-".to_string());
+                    println!(
+                        "  {:<22}  {:<10}  {:>8}  {:>8}  {:>6}  {}",
+                        u.unit, u.category, u.failures, u.successes, u.starts, last
+                    );
+                }
+            }
+        }
+    }
+
+    if !healthy {
+        std::process::exit(1);
+    }
+    Ok(())
 }

@@ -1,0 +1,15 @@
+# Default test parallelism for the e2e crate.
+#
+# Each e2e test owns its own container set (mongo + m87-server + runtime
+# + cli — 4 containers per test). Cargo's default parallelism is one
+# thread per CPU core, which on a typical dev laptop produces dozens of
+# simultaneous container starts and overwhelms the Docker daemon — auth
+# requests and device registrations time out, tests flake.
+#
+# 4 is a reasonable middle ground: ~4× faster than serial, low enough
+# that the daemon stays responsive on most machines. Override at the
+# call site for tighter or looser parallelism, e.g.:
+#   RUST_TEST_THREADS=1 cargo e2e         (resource-constrained host)
+#   RUST_TEST_THREADS=8 cargo e2e         (beefy CI runner)
+[env]
+RUST_TEST_THREADS = "4"
