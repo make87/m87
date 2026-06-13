@@ -1,12 +1,90 @@
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/logo-dark.svg">
+  <img alt="make87" src="./.github/assets/logo-light.svg" width="200">
+</picture>
+
 # m87
 
-**Secure, outbound-only access to physical devices — with a native-feeling development, debugging, and software deployment experience.**
+**Secure, outbound-only access to physical devices — a native-feeling development, debugging, and software deployment experience.**
+
+[![E2E Tests](https://github.com/make87/make87/actions/workflows/e2e-tests.yml/badge.svg)](https://github.com/make87/make87/actions/workflows/e2e-tests.yml)
+[![Latest release](https://img.shields.io/github/v/release/make87/make87?sort=semver)](https://github.com/make87/make87/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20%7C%20AGPL--3.0-blue)](./LICENSE.md)
+[![Stars](https://img.shields.io/github/stars/make87/make87)](https://github.com/make87/make87/stargazers)
+
+</div>
+
+---
 
 **m87 is make87's command line and device runtime** for connecting to, debugging, and deploying software to distributed hardware fleets — all over a single outbound connection and without VPNs or inbound firewall rules.
 
 In this repo:
 - **`m87` command** = what you type in your terminal
 - **m87 runtime** = the on-device process that maintains the outbound connection and executes actions
+
+---
+
+## ✨ What Makes m87 Different
+
+m87 isn't *just* remote access — it's designed so **working with real devices feels like local development and deployment**:
+
+* **Outbound-only access:** works behind NATs / firewalls without opening inbound ports.
+* **Identity-based access — no SSH keys to copy:** sign in through your organization's identity provider (e.g. Google) and grant or revoke access **by role**. Share devices and fleets with your team through your org instead of distributing and rotating keys.
+* **Native dev experience:** shell, port/sockets forwarding, logs, and live debugging feel like you're working locally.
+* **Deployment-ready:** one command line that transitions from access to orchestrating software deployments across fleets.
+
+If you've ever SSH'd into an embedded device only to run into network traps or scaling pain, m87 makes those workflows easy and repeatable.
+
+---
+
+## ⚡ See it in action
+
+Once a device is connected, everything below runs over that single outbound connection — the device could be behind a carrier NAT on the other side of the planet and these still work as if it were on your desk.
+
+```bash
+m87 devices list                       # see every device you can reach
+```
+
+**Work on the device like it's local** — drop into a shell, or run one-off commands:
+
+```bash
+m87 <device> shell                     # interactive shell on the device
+m87 <device> exec -- uptime            # run a single command, get the output
+m87 <device> docker ps                 # inspect running containers
+m87 <device> metrics                   # live CPU / memory / disk
+```
+
+**Reach services running on the device** — forward a remote port to localhost, then open it in your browser or hit it with curl:
+
+```bash
+m87 <device> forward 8080              # localhost:8080 → device:8080
+m87 <device> forward 3000:80           # localhost:3000 → device:80
+```
+
+**Move files both ways** — copy artifacts up, or live-sync your code as you edit it:
+
+```bash
+m87 cp ./firmware.bin <device>:/tmp/   # SCP-style copy to the device
+m87 sync --watch ./src <device>:/app   # rsync-style sync that follows your edits
+```
+
+**Deploy and watch software** — ship containers and stream logs as they run:
+
+```bash
+m87 <device> docker compose up -d      # deploy with familiar tooling
+m87 <device> logs -f                   # follow live logs from the device
+```
+
+**Use your own SSH tooling** — enable host resolution and `ssh` (and `scp`, IDE remote dev, etc.) just work:
+
+```bash
+m87 ssh enable
+ssh <device>.m87                       # native ssh over the m87 tunnel
+```
+
+New to m87? Jump to the [Quick Start](#-quick-start-try-in-5-minutes) to install and connect your first device.
 
 ---
 
@@ -96,32 +174,7 @@ m87 devices approve <request-id>
 
 *(You can also approve via the web UI.)*
 
-Once approved, you can interact with your device:
-
-```bash
-m87 devices list
-m87 <device> shell
-m87 <device> docker ps
-```
-
 Now you're connected — no inbound access, no firewall rules, and no VPN required.
-
-👀 Try this next:
-
-* forward a local port to a remote service
-* run an IDE remote development session
-
----
-
-## ✨ What Makes m87 Different
-
-m87 isn't *just* remote access — it's designed so **working with real devices feels like local development and deployment**:
-
-* **Outbound-only access:** works behind NATs / firewalls without opening inbound ports.
-* **Native dev experience:** shell, port/sockets forwarding, logs, and live debugging feel like you're working locally.
-* **Deployment-ready:** one command line that transitions from access to orchestrating software deployments across fleets.
-
-If you've ever SSH'd into an embedded device only to run into network traps or scaling pain, m87 makes those workflows easy and repeatable.
 
 ---
 

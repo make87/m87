@@ -335,6 +335,42 @@ m87 devices list                # list accessible devices
 m87 devices approve <device>    # approve a pending device registration
 ```
 
+### Profiles
+
+Profiles let you stay logged into several accounts on one machine and switch
+between them — no more deleting your config and logging back in each time.
+
+Each profile keeps its own credentials and config. The `default` profile is
+the one you already use (existing installs need no migration); additional
+profiles are created on demand.
+
+```sh
+m87 profile list                # show all profiles (* marks the active one)
+m87 profile current             # print the active profile name
+m87 profile add work            # create a profile and switch to it
+m87 profile use default         # switch to an existing profile
+m87 profile rename work office  # rename a profile
+m87 profile remove work         # delete a profile and its credentials
+```
+
+Typical flow — add a second account and switch back and forth:
+
+```sh
+m87 profile add work            # create + switch to "work"
+m87 login                       # authenticate the work account
+m87 devices list                # work account's devices
+
+m87 profile use default         # back to your original account — no re-login
+m87 devices list                # original account's devices
+```
+
+Set `M87_PROFILE` to override the active profile for a single command (handy
+in scripts), without changing the persisted default:
+
+```sh
+M87_PROFILE=work m87 devices list
+```
+
 ### Updating
 
 ```sh

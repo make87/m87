@@ -8,6 +8,8 @@ use tracing::{error, info, warn};
 #[cfg(feature = "runtime")]
 use crate::util::mac;
 
+pub mod profile;
+
 fn default_heartbeat_interval() -> u64 {
     300 // 5 min
 }
@@ -170,8 +172,7 @@ impl Config {
     }
 
     pub fn config_file_path() -> Result<PathBuf> {
-        let config_dir = Self::get_config_dir()?;
-        Ok(config_dir.join("m87").join("config.json"))
+        Ok(profile::active_profile_dir()?.join("config.json"))
     }
 
     /// Get config directory, respecting SUDO_USER on Unix systems.
