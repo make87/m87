@@ -81,14 +81,35 @@ feature-depth = 1
 id = "RUSTSEC-2025-0119" # number_prefix unmaintained
 reason = "Transitively pulled in via indicatif/self_update; only used for human-facing progress formatting, no security impact. Tracked upstream; will switch if/when dependency updates."
 
-[[advisories.ignore]]
-id = "RUSTSEC-2024-0436" # paste unmaintained
-reason = "Transitively pulled in via ratatui; no security impact, just macros. Will adopt upstream fix once ratatui moves away from paste."
-
 # Only add this IF you have a clear mitigation story:
 [[advisories.ignore]]
 id = "RUSTSEC-2023-0071" # rsa Marvin Attack
 reason = "rsa is present transitively via russh/openidconnect but we do not use RSA private keys: only ED25519/ECDSA SSH keys and public-key verification for OpenID Connect. No private RSA operations in our process."
+
+# --- russh family: blocked by the `libc = \"=0.2.177\"` pin in m87-client ---
+# The fix for all four of these is russh >=0.60.3, but russh 0.60.3 pulls
+# nix 0.31 -> libc >=0.2.180, which conflicts with our deliberate
+# `libc = \"=0.2.177\"` pin (CLI pty creation; pinned to keep the server build
+# working). Until that pin can move, russh stays on 0.55. russh here is a
+# *client* that opens outbound SFTP connections to user-specified, trusted
+# deploy hosts during `m87 deploy` — it is not a network-exposed SSH server,
+# so the DoS/allocation surface is only reachable by a host the user already
+# chose to connect to.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0154" # russh: unbounded 32-bit allocation
+reason = "russh >=0.60.3 needed, blocked by the libc =0.2.177 pin. Outbound SFTP client to trusted, user-specified deploy hosts only; not a network-exposed server. Will upgrade once the libc pin can move."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0153" # russh-cryptovec: unchecked CryptoVec allocation/growth
+reason = "russh-cryptovec >=0.60.3 needed (pulled via russh), blocked by the libc =0.2.177 pin. Same outbound-client trust boundary as RUSTSEC-2026-0154. Will upgrade once the libc pin can move."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0074" # libcrux-sha3: incorrect incremental SHAKE output
+reason = "Pulled via russh's libcrux-ml-kem 0.0.4 (post-quantum KEX). Fix requires a russh bump, blocked by the libc =0.2.177 pin. Correctness bug in the incremental SHAKE API on the same outbound-client SSH path; will clear when russh upgrades."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0173" # proc-macro-error2 unmaintained
+reason = "Build-time-only proc-macro, pulled via russh's libcrux-ml-kem -> hax-lib-macros. No runtime or security impact. Will clear when russh (and its libcrux deps) upgrade past the libc pin."
 
 
 [licenses]
