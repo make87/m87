@@ -239,7 +239,11 @@ jobs:
           toolchain: stable
 
       - name: Install cargo-about
-        run: cargo install cargo-about --locked
+        # `--features cli` is required: as of cargo-about 0.9.0 the binary is
+        # gated behind the (non-default) `cli` feature. Without it the install
+        # compiles the lib, prints a warning, installs NO binary, and still
+        # exits 0 — so the next step fails with `no such command: about`.
+        run: cargo install cargo-about --locked --features cli
 
       - name: Generate THIRDPARTY_LICENSES for m87-client
         run: |
