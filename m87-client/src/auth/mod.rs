@@ -109,8 +109,7 @@ impl APIConfig {
     }
 
     pub fn default_credentials_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir().context("Failed to get config directory")?;
-        let path = config_dir.join("m87").join("credentials.json");
+        let path = crate::config::profile::active_profile_dir()?.join("credentials.json");
         Ok(path)
     }
 

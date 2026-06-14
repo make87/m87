@@ -156,6 +156,13 @@ enum Commands {
     #[command(subcommand)]
     Org(OrgCommands),
 
+    /// Manage login profiles to switch between accounts
+    ///
+    /// Each profile keeps its own config and credentials, so you can stay
+    /// logged into several accounts at once and switch without re-login.
+    #[command(subcommand)]
+    Profile(ProfileCommands),
+
     /// Start MCP server (Model Context Protocol) for AI agent integration
     ///
     /// The server runs on stdin/stdout and exposes m87 platform commands
@@ -268,6 +275,41 @@ enum ConfigCommands {
 
     Show,
     File,
+}
+
+#[derive(Subcommand)]
+enum ProfileCommands {
+    /// List all profiles and their login state
+    List,
+
+    /// Show the name of the currently active profile
+    Current,
+
+    /// Create a new profile and switch to it (then run `m87 login`)
+    Add {
+        /// Name for the new profile
+        name: String,
+    },
+
+    /// Switch to an existing profile
+    Use {
+        /// Name of the profile to switch to
+        name: String,
+    },
+
+    /// Remove a profile and its stored credentials
+    Remove {
+        /// Name of the profile to remove
+        name: String,
+    },
+
+    /// Rename an existing profile
+    Rename {
+        /// Current profile name
+        old: String,
+        /// New profile name
+        new: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1121,8 +1163,68 @@ pub async fn cli() -> anyhow::Result<()> {
             //     }
             // },
         },
+        Commands::Profile(cmd) => handle_profile_command(cmd)?,
+
         Commands::Mcp => {
             crate::mcp::run_mcp_server().await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_profile_command(cmd: ProfileCommands) -> anyhow::Result<()> {
+    use crate::config::profile;
+
+    match cmd {
+        ProfileCommands::List => {
+            let profiles = profile::list_profiles()?;
+            println!(
+                "  {:<3} {:<20} {:<10} {}",
+                "", "PROFILE", "LOGGED IN", "OWNER"
+            );
+            for p in profiles {
+                let marker = if p.active { "*" } else { " " };
+                let logged_in = if p.logged_in { "yes" } else { "no" };
+                let owner = p.owner_reference.as_deref().unwrap_or("-");
+                println!(
+                    "  {:<3} {:<20} {:<10} {}",
+                    marker, p.name, logged_in, owner
+                );
+            }
+            println!("\n* = active profile");
+        }
+
+        ProfileCommands::Current => {
+            println!("{}", profile::active_profile()?);
+        }
+
+        ProfileCommands::Add { name } => {
+            profile::create_profile(&name)?;
+            profile::switch_profile(&name)?;
+            println!("Created and switched to profile '{name}'.");
+            println!("Run `m87 login` to authenticate this profile.");
+        }
+
+        ProfileCommands::Use { name } => {
+            profile::switch_profile(&name)?;
+            println!("Switched to profile '{name}'.");
+            if !profile::list_profiles()?
+                .into_iter()
+                .any(|p| p.name == name && p.logged_in)
+            {
+                println!("This profile is not logged in yet. Run `m87 login`.");
+            }
+        }
+
+        ProfileCommands::Remove { name } => {
+            profile::remove_profile(&name)?;
+            println!("Removed profile '{name}'.");
+        }
+
+        ProfileCommands::Rename { old, new } => {
+            profile::rename_profile(&old, &new)?;
+            println!("Renamed profile '{old}' to '{new}'.");
         }
     }
 
