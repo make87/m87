@@ -6,6 +6,7 @@ pub mod containers;
 mod deployment;
 mod device_registration;
 mod docker;
+mod iroh_p2p;
 mod logs_status;
 mod exec;
 pub mod fixtures;
