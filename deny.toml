@@ -111,6 +111,25 @@ reason = "Pulled via russh's libcrux-ml-kem 0.0.4 (post-quantum KEX). Fix requir
 id = "RUSTSEC-2026-0173" # proc-macro-error2 unmaintained
 reason = "Build-time-only proc-macro, pulled via russh's libcrux-ml-kem -> hax-lib-macros. No runtime or security impact. Will clear when russh (and its libcrux deps) upgrade past the libc pin."
 
+# --- rmcp: not reachable, we only use the stdio transport ---
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0189" # rmcp: DNS rebinding in Streamable HTTP server transport
+reason = "m87-client exposes MCP over the stdio transport only (rmcp::transport::io::stdio() in src/mcp/mod.rs). The advisory explicitly states non-HTTP transports (stdio/child-process) are not affected; the vulnerable Streamable HTTP server transport is never instantiated. The fix is an rmcp 0.16 -> 1.4+ major bump; will adopt when we upgrade rmcp."
+
+# --- quick-xml: transitive via self_update, not run on untrusted XML ---
+# self_update pulls quick-xml for its S3 (XML) backend. m87-client's updater
+# uses the GitHub-releases backend and parses the release JSON with our own
+# serde types (src/update/mod.rs), so the vulnerable quick-xml attribute /
+# NsReader paths are never fed attacker-controlled XML. No stable self_update
+# moves off quick-xml 0.38 yet (fix is >=0.41); both clear when it does.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0194" # quick-xml: quadratic duplicate-attribute-name check (CPU DoS)
+reason = "Transitive via self_update's S3 XML backend, which m87-client does not use (updates come from GitHub releases parsed as JSON in src/update/mod.rs). Not run on untrusted XML. Blocked on self_update adopting quick-xml >=0.41."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0195" # quick-xml: unbounded NsReader namespace-declaration allocation (mem DoS)
+reason = "Same transitive self_update path as RUSTSEC-2026-0194; m87-client uses the GitHub (JSON) update backend, not the S3 XML backend, so NsReader never parses untrusted XML. Blocked on self_update adopting quick-xml >=0.41."
+
 
 [licenses]
 # List of explicitly allowed licenses
