@@ -89,8 +89,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-e2e-
 
+      # Compile the binaries once, on the host, reusing the cached `target/`.
+      # setup.rs bakes these into slim COPY-only images (Dockerfile.e2e) instead
+      # of doing two cold in-Docker compiles. Doing it as its own step keeps the
+      # heavy compile out of the test process and cache-friendly.
+      - name: Build e2e binaries (host, cached)
+        run: |
+          cargo build -p m87-server
+          cargo build -p m87-client --features runtime,cli
+
+      # Tests isolate by a per-run_id prefix on every container name and address
+      # each other by those names / by iroh node-id, so they run concurrently.
+      # 4 threads => up to 4 container stacks at once on the 4-vCPU/16GB runner.
       - name: Run E2E tests
-        run: cargo test --manifest-path tests/Cargo.toml --features e2e -- --nocapture --test-threads=1
+        run: cargo test --manifest-path tests/Cargo.toml --features e2e -- --test-threads=4
 
       # Cleanup is scoped by the `e2e-*` name prefix that tests apply when
       # creating containers (see tests/src/e2e_containers/containers.rs).

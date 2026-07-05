@@ -1,0 +1,21 @@
+# E2E-only image. Copies a host-built (native glibc) m87-server binary into a
+# glibc-matched base — NO cargo build happens here. The binary is compiled once
+# on the host (reusing the cargo `target/` cache) and staged into this build
+# context by tests/src/e2e_containers/setup.rs, so this image builds in seconds.
+#
+# NOT used for production releases — see m87-server/Dockerfile for the portable
+# manylinux2014 -> distroless build. ubuntu:24.04 is chosen so its glibc matches
+# the GitHub `ubuntu-24.04` runner that compiles the binary (glibc is backward-
+# but not forward-compatible, so the runtime base must be >= the build host).
+FROM ubuntu:24.04
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Binary is staged next to this Dockerfile by setup.rs (build context = temp dir).
+COPY m87-server /app/m87-server
+
+ENTRYPOINT ["/app/m87-server"]
