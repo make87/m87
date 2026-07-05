@@ -129,7 +129,7 @@ async fn copy_file_between_containers(
 /// Infrastructure for install script tests
 struct InstallTestInfra {
     container: ContainerAsync<GenericImage>,
-    /// Container to extract the binary from (m87-client:latest)
+    /// Container to extract the `m87` binary from (the e2e client image).
     binary_source: ContainerAsync<GenericImage>,
 }
 
@@ -142,14 +142,19 @@ impl InstallTestInfra {
         // Build the install-test image
         ensure_install_test_image().map_err(E2EError::Setup)?;
 
-        // Ensure m87-client:latest is built (need it to extract binary)
+        // Ensure the e2e images are built (we extract the `m87` binary from the
+        // e2e client image; the old prod `m87-client:latest` image is no longer
+        // built — see setup.rs).
         super::setup::ensure_images_built()
             .await
             .map_err(E2EError::Setup)?;
 
-        // Start a container from m87-client:latest to extract the binary
-        let binary_source = GenericImage::new("m87-client", "latest")
-            .with_entrypoint("sh")
+        // Start a container from the e2e client image to extract the binary.
+        let binary_source = GenericImage::new(
+            super::setup::CLIENT_IMAGE_NAME,
+            super::setup::CLIENT_IMAGE_TAG,
+        )
+        .with_entrypoint("sh")
             .with_cmd(vec!["-c", "sleep infinity"])
             .start()
             .await
