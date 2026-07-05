@@ -284,24 +284,41 @@ impl RevisionStore {
     }
 
     pub fn get_previous_config(dir_path: Option<PathBuf>) -> Result<Option<DeploymentRevision>> {
-        let path = Self::previous_path(dir_path)?;
-        if !path.exists() {
-            return Ok(None);
-        }
-        let s = std::fs::read_to_string(&path).context("read previous_units.json")?;
-        let c: DeploymentRevision =
-            serde_json::from_str(&s).context("parse previous_units.json")?;
-        Ok(Some(c))
+        Self::read_revision_file(&Self::previous_path(dir_path)?)
     }
 
     pub fn get_desired_config(dir_path: Option<PathBuf>) -> Result<Option<DeploymentRevision>> {
-        let path = Self::desired_path(dir_path)?;
+        Self::read_revision_file(&Self::desired_path(dir_path)?)
+    }
+
+    /// Read and parse a stored revision file. A corrupt or incompatible-schema
+    /// file (e.g. written by an older client) is NOT propagated as an error —
+    /// that would wedge every reconcile cycle forever, forcing a manual file
+    /// deletion. Instead we quarantine the bad file (`<name>.corrupt`) and
+    /// return `None`, so the loop makes progress and the server can re-push a
+    /// fresh revision on the next heartbeat.
+    fn read_revision_file(path: &Path) -> Result<Option<DeploymentRevision>> {
         if !path.exists() {
             return Ok(None);
         }
-        let s = std::fs::read_to_string(&path).context("read desired_units.json")?;
-        let c: DeploymentRevision = serde_json::from_str(&s).context("parse desired_units.json")?;
-        Ok(Some(c))
+        let s = std::fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?;
+        match serde_json::from_str::<DeploymentRevision>(&s) {
+            Ok(c) => Ok(Some(c)),
+            Err(e) => {
+                let quarantine = path.with_file_name(format!(
+                    "{}.corrupt",
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("revision")
+                ));
+                tracing::warn!(
+                    "failed to parse {}, quarantining to {} and continuing: {e}",
+                    path.display(),
+                    quarantine.display()
+                );
+                let _ = std::fs::rename(path, &quarantine);
+                Ok(None)
+            }
+        }
     }
 
     /// Write a new desired config, backing up the current one to previous.
@@ -1496,14 +1513,20 @@ pub async fn claim_next_event(dir_path: Option<PathBuf>) -> Result<Option<Claime
         }
         let s = match fs::read_to_string(&dst).await {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(e) => {
+                // Unreadable / non-UTF-8 event: drop it rather than leaving it
+                // to be replayed from inflight on every restart.
+                tracing::warn!("failed to read event {dst:?}, removing: {e}");
+                let _ = fs::remove_file(&dst).await;
+                continue;
+            }
         };
         match serde_json::from_str::<DeployReportKind>(&s) {
             Ok(report) => {
                 return Ok(Some(ClaimedEvent { path: dst, report }));
             }
             Err(e) => {
-                tracing::warn!("failed to parse event: {e}");
+                tracing::warn!("failed to parse event {dst:?}, removing: {e}");
                 let _ = fs::remove_file(&dst).await;
             }
         }
@@ -2032,6 +2055,35 @@ mod tests {
 
         let loaded = RevisionStore::get_desired_config(Some(mgr.root_dir.clone()))?;
         assert!(loaded.unwrap().get_observer_map().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_desired_config_is_quarantined_not_stuck() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let root = mgr.root_dir.clone();
+
+        // Establish a valid desired config, then corrupt it on disk to simulate
+        // an old / incompatible-schema `desired_units.json`.
+        mgr.set_desired_units(mk_rev("r1", vec![], vec![], vec![]), vec![])
+            .await?;
+        let path = RevisionStore::desired_path(Some(root.clone()))?;
+        std::fs::write(&path, "{ not a valid DeploymentRevision")?;
+
+        // Must NOT return Err (that would wedge every reconcile cycle forever,
+        // requiring a manual file deletion). It recovers: returns None and moves
+        // the bad file aside so the server can re-push a fresh revision.
+        let loaded = RevisionStore::get_desired_config(Some(root.clone()))?;
+        assert!(loaded.is_none(), "corrupt config should read as None, not error");
+        assert!(!path.exists(), "corrupt config should be moved aside");
+        assert!(
+            path.with_file_name("desired_units.json.corrupt").exists(),
+            "corrupt config should be quarantined for inspection"
+        );
+
+        // A subsequent read is clean — no repeated error, file already handled.
+        assert!(RevisionStore::get_desired_config(Some(root))?.is_none());
         Ok(())
     }
 
