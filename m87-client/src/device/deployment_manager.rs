@@ -812,13 +812,20 @@ impl DeploymentManager {
             start_map.insert(s.id.clone(), s);
         }
 
-        // Phase 2a: stop first
+        // Phase 2a: stop first. A failing stop step must NOT be silently
+        // swallowed — it leaves a half-torn-down unit. Record the failure so the
+        // service stays dirty (and is retried) and the error is surfaced to the
+        // caller, rather than reconcile reporting success.
+        let mut failed_hashes: HashSet<String> = HashSet::new();
         for (_, spec) in &stop_map {
             let wd = self
                 .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
                 .await?;
             let rev = prev_rev.clone().unwrap_or_else(|| desired_rev.clone());
-            let _ = self.stop_service(spec, &rev, &wd).await;
+            if let Err(e) = self.stop_service(spec, &rev, &wd).await {
+                tracing::error!("stop_service for '{}' failed: {e:#}", spec.id);
+                failed_hashes.insert(spec.get_hash());
+            }
         }
 
         // Phase 2b: start
@@ -829,10 +836,21 @@ impl DeploymentManager {
             self.apply_service(spec, &desired_rev, &wd).await?;
         }
 
-        // Clear processed hashes
+        // Clear processed hashes, but keep any whose stop failed so it is retried
+        // on the next reconcile instead of being dropped.
         let mut ds = self.dirty_services.write().await;
         for h in dirty_hashes {
-            ds.remove(&h);
+            if !failed_hashes.contains(&h) {
+                ds.remove(&h);
+            }
+        }
+        drop(ds);
+
+        if !failed_hashes.is_empty() {
+            return Err(anyhow!(
+                "{} stop step(s) failed during reconcile",
+                failed_hashes.len()
+            ));
         }
 
         Ok(())
@@ -1808,6 +1826,41 @@ mod tests {
         mgr.set_desired_units(v2, vec![]).await?;
         mgr.reconcile_dirty().await?;
         assert!(!marker.exists(), "stop cmd should have removed marker");
+        Ok(())
+    }
+
+    // Reproduces the reporting/handling gap on the teardown path (Fix 2).
+    //
+    // When a service is removed from the desired revision, reconcile runs its
+    // stop steps. Today the stop is invoked as `let _ = self.stop_service(...)`
+    // (reconcile_dirty), so a FAILING stop step is silently discarded: reconcile
+    // returns Ok and clears the dirty flag, leaving a half-torn-down unit with no
+    // error surfaced and no retry. A failing stop must not be swallowed.
+    #[tokio::test]
+    async fn failed_stop_step_is_not_silently_swallowed() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        // Service whose stop step always fails.
+        let v1 = mk_rev(
+            "r1",
+            vec![mk_svc("svc", sh("true"), sh("exit 1"))],
+            vec![],
+            vec![],
+        );
+        mgr.set_desired_units(v1, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+
+        // Remove the service → its (failing) stop steps get scheduled.
+        let v2 = mk_rev("r2", vec![], vec![], vec![]);
+        mgr.set_desired_units(v2, vec![]).await?;
+
+        let res = mgr.reconcile_dirty().await;
+        assert!(
+            res.is_err(),
+            "a failing stop step must surface as an error from reconcile, not be \
+             swallowed by `let _ = stop_service(...)`"
+        );
         Ok(())
     }
 
