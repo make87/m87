@@ -65,24 +65,80 @@ impl RelayState {
     }
 
     /// Returns true only if device has an active and *not lost* tunnel.
+    ///
+    /// Locks are acquired `tunnels` before `lost`, matching `remove_if_match`
+    /// and `replace_tunnel`. A consistent order across all methods is what
+    /// prevents the AB-BA deadlock between the two relay locks.
     pub async fn has_tunnel(&self, device_short_id: &str) -> bool {
-        let lost = self.lost.read().await;
-        if lost.contains_key(device_short_id) {
+        let tunnels = self.tunnels.read().await;
+        if !tunnels.contains_key(device_short_id) {
             return false;
         }
 
-        let tunnels = self.tunnels.read().await;
-        tunnels.contains_key(device_short_id)
+        let lost = self.lost.read().await;
+        !lost.contains_key(device_short_id)
     }
 
-    /// Return active (non-lost) tunnel
+    /// Return active (non-lost) tunnel.
+    ///
+    /// Locks are acquired `tunnels` before `lost` (see `has_tunnel`).
     pub async fn get_tunnel(&self, device_short_id: &str) -> Option<Connection> {
+        let tunnels = self.tunnels.read().await;
+        let conn = tunnels.get(device_short_id).cloned()?;
+
         let lost = self.lost.read().await;
         if lost.contains_key(device_short_id) {
             return None;
         }
+        Some(conn)
+    }
+}
 
-        let tunnels = self.tunnels.read().await;
-        tunnels.get(device_short_id).cloned()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    /// Reproduces the AB-BA deadlock between `tunnels` and `lost`.
+    ///
+    /// `remove_if_match` acquires `tunnels.write()` then `lost.write()`
+    /// (tunnels -> lost), while `has_tunnel`/`get_tunnel` acquire
+    /// `lost.read()` then `tunnels.read()` (lost -> tunnels). With a reader
+    /// in flight, a writer holding `tunnels` can never obtain `lost` and the
+    /// whole relay wedges.
+    ///
+    /// We simulate the writer side by holding `tunnels.write()` (exactly what
+    /// `remove_if_match` holds when it reaches `lost.write()`), run the *real*
+    /// `has_tunnel` concurrently, then assert the writer can still acquire
+    /// `lost.write()`. On the pre-fix reader ordering this times out.
+    #[tokio::test]
+    async fn writer_is_not_deadlocked_by_concurrent_reader() {
+        let state = RelayState::new();
+
+        // Writer side: hold `tunnels.write()`, as `remove_if_match` does.
+        let tunnels_guard = state.tunnels.write().await;
+
+        // Reader side: real `has_tunnel`, running concurrently.
+        let reader_state = state.clone();
+        let reader = tokio::spawn(async move { reader_state.has_tunnel("device-1").await });
+
+        // Let the reader reach its first lock acquisition and park on the
+        // second one. On current-thread runtime this yields to `reader`.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Now complete the writer's second acquisition. With a consistent
+        // `tunnels -> lost` order this succeeds immediately; with the buggy
+        // `lost -> tunnels` reader order the reader holds `lost.read()` while
+        // blocked on `tunnels.read()`, so this blocks forever.
+        let acquired = timeout(Duration::from_secs(3), state.lost.write()).await;
+        assert!(
+            acquired.is_ok(),
+            "writer holding `tunnels` could not acquire `lost` while a reader \
+             was in flight — AB-BA deadlock between the relay locks"
+        );
+
+        drop(tunnels_guard);
+        let _ = reader.await;
     }
 }

@@ -189,7 +189,7 @@ impl ObserveKind {
 
     fn decide_on_error(
         &self,
-        _st: &LocalRunState,
+        st: &LocalRunState,
         hooks: &ObserveHooks,
         consecutive: u32,
     ) -> ObserveDecision {
@@ -200,9 +200,25 @@ impl ObserveKind {
         } else {
             consecutive / fails_after
         };
+        // Edge-trigger the report: only emit on a healthy -> unhealthy
+        // transition, not on every `fails_after`-th consecutive failure. Once
+        // we've reported the unit unhealthy we stay silent until it recovers
+        // (the success path is likewise edge-triggered). Without this, a
+        // persistently-failing observe — e.g. an error line stuck inside a
+        // `logs --tail | grep` health check — re-enqueues a fresh RunState
+        // every `fails_after * every` seconds for as long as the line stays in
+        // the window. Because each RunState carries a unique `report_time` +
+        // `log_tail`, the `enqueue_event` content-hash dedup can't collapse
+        // them, so the pending-event queue grows unbounded and the 40/s drain
+        // pins a core. `is_failure`/`consecutive` are left untouched so the
+        // restart policy still fires on its own cadence.
+        let previously_healthy = match self {
+            ObserveKind::Liveness => !st.reported_alive_once || st.last_alive,
+            ObserveKind::Health => !st.reported_health_once || st.last_health,
+        };
         ObserveDecision {
             is_failure,
-            needs_send: is_failure,
+            needs_send: is_failure && previously_healthy,
             consecutive: consecutive_out,
         }
     }
@@ -268,24 +284,41 @@ impl RevisionStore {
     }
 
     pub fn get_previous_config(dir_path: Option<PathBuf>) -> Result<Option<DeploymentRevision>> {
-        let path = Self::previous_path(dir_path)?;
-        if !path.exists() {
-            return Ok(None);
-        }
-        let s = std::fs::read_to_string(&path).context("read previous_units.json")?;
-        let c: DeploymentRevision =
-            serde_json::from_str(&s).context("parse previous_units.json")?;
-        Ok(Some(c))
+        Self::read_revision_file(&Self::previous_path(dir_path)?)
     }
 
     pub fn get_desired_config(dir_path: Option<PathBuf>) -> Result<Option<DeploymentRevision>> {
-        let path = Self::desired_path(dir_path)?;
+        Self::read_revision_file(&Self::desired_path(dir_path)?)
+    }
+
+    /// Read and parse a stored revision file. A corrupt or incompatible-schema
+    /// file (e.g. written by an older client) is NOT propagated as an error —
+    /// that would wedge every reconcile cycle forever, forcing a manual file
+    /// deletion. Instead we quarantine the bad file (`<name>.corrupt`) and
+    /// return `None`, so the loop makes progress and the server can re-push a
+    /// fresh revision on the next heartbeat.
+    fn read_revision_file(path: &Path) -> Result<Option<DeploymentRevision>> {
         if !path.exists() {
             return Ok(None);
         }
-        let s = std::fs::read_to_string(&path).context("read desired_units.json")?;
-        let c: DeploymentRevision = serde_json::from_str(&s).context("parse desired_units.json")?;
-        Ok(Some(c))
+        let s = std::fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?;
+        match serde_json::from_str::<DeploymentRevision>(&s) {
+            Ok(c) => Ok(Some(c)),
+            Err(e) => {
+                let quarantine = path.with_file_name(format!(
+                    "{}.corrupt",
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("revision")
+                ));
+                tracing::warn!(
+                    "failed to parse {}, quarantining to {} and continuing: {e}",
+                    path.display(),
+                    quarantine.display()
+                );
+                let _ = std::fs::rename(path, &quarantine);
+                Ok(None)
+            }
+        }
     }
 
     /// Write a new desired config, backing up the current one to previous.
@@ -796,13 +829,20 @@ impl DeploymentManager {
             start_map.insert(s.id.clone(), s);
         }
 
-        // Phase 2a: stop first
+        // Phase 2a: stop first. A failing stop step must NOT be silently
+        // swallowed — it leaves a half-torn-down unit. Record the failure so the
+        // service stays dirty (and is retried) and the error is surfaced to the
+        // caller, rather than reconcile reporting success.
+        let mut failed_hashes: HashSet<String> = HashSet::new();
         for (_, spec) in &stop_map {
             let wd = self
                 .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
                 .await?;
             let rev = prev_rev.clone().unwrap_or_else(|| desired_rev.clone());
-            let _ = self.stop_service(spec, &rev, &wd).await;
+            if let Err(e) = self.stop_service(spec, &rev, &wd).await {
+                tracing::error!("stop_service for '{}' failed: {e:#}", spec.id);
+                failed_hashes.insert(spec.get_hash());
+            }
         }
 
         // Phase 2b: start
@@ -813,10 +853,21 @@ impl DeploymentManager {
             self.apply_service(spec, &desired_rev, &wd).await?;
         }
 
-        // Clear processed hashes
+        // Clear processed hashes, but keep any whose stop failed so it is retried
+        // on the next reconcile instead of being dropped.
         let mut ds = self.dirty_services.write().await;
         for h in dirty_hashes {
-            ds.remove(&h);
+            if !failed_hashes.contains(&h) {
+                ds.remove(&h);
+            }
+        }
+        drop(ds);
+
+        if !failed_hashes.is_empty() {
+            return Err(anyhow!(
+                "{} stop step(s) failed during reconcile",
+                failed_hashes.len()
+            ));
         }
 
         Ok(())
@@ -1462,14 +1513,20 @@ pub async fn claim_next_event(dir_path: Option<PathBuf>) -> Result<Option<Claime
         }
         let s = match fs::read_to_string(&dst).await {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(e) => {
+                // Unreadable / non-UTF-8 event: drop it rather than leaving it
+                // to be replayed from inflight on every restart.
+                tracing::warn!("failed to read event {dst:?}, removing: {e}");
+                let _ = fs::remove_file(&dst).await;
+                continue;
+            }
         };
         match serde_json::from_str::<DeployReportKind>(&s) {
             Ok(report) => {
                 return Ok(Some(ClaimedEvent { path: dst, report }));
             }
             Err(e) => {
-                tracing::warn!("failed to parse event: {e}");
+                tracing::warn!("failed to parse event {dst:?}, removing: {e}");
                 let _ = fs::remove_file(&dst).await;
             }
         }
@@ -1795,6 +1852,41 @@ mod tests {
         Ok(())
     }
 
+    // Reproduces the reporting/handling gap on the teardown path (Fix 2).
+    //
+    // When a service is removed from the desired revision, reconcile runs its
+    // stop steps. Today the stop is invoked as `let _ = self.stop_service(...)`
+    // (reconcile_dirty), so a FAILING stop step is silently discarded: reconcile
+    // returns Ok and clears the dirty flag, leaving a half-torn-down unit with no
+    // error surfaced and no retry. A failing stop must not be swallowed.
+    #[tokio::test]
+    async fn failed_stop_step_is_not_silently_swallowed() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        // Service whose stop step always fails.
+        let v1 = mk_rev(
+            "r1",
+            vec![mk_svc("svc", sh("true"), sh("exit 1"))],
+            vec![],
+            vec![],
+        );
+        mgr.set_desired_units(v1, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+
+        // Remove the service → its (failing) stop steps get scheduled.
+        let v2 = mk_rev("r2", vec![], vec![], vec![]);
+        mgr.set_desired_units(v2, vec![]).await?;
+
+        let res = mgr.reconcile_dirty().await;
+        assert!(
+            res.is_err(),
+            "a failing stop step must surface as an error from reconcile, not be \
+             swallowed by `let _ = stop_service(...)`"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn service_stopped_via_lifecycle_runs_stop() -> Result<()> {
         let td = TempDir::new()?;
@@ -1963,6 +2055,35 @@ mod tests {
 
         let loaded = RevisionStore::get_desired_config(Some(mgr.root_dir.clone()))?;
         assert!(loaded.unwrap().get_observer_map().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_desired_config_is_quarantined_not_stuck() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let root = mgr.root_dir.clone();
+
+        // Establish a valid desired config, then corrupt it on disk to simulate
+        // an old / incompatible-schema `desired_units.json`.
+        mgr.set_desired_units(mk_rev("r1", vec![], vec![], vec![]), vec![])
+            .await?;
+        let path = RevisionStore::desired_path(Some(root.clone()))?;
+        std::fs::write(&path, "{ not a valid DeploymentRevision")?;
+
+        // Must NOT return Err (that would wedge every reconcile cycle forever,
+        // requiring a manual file deletion). It recovers: returns None and moves
+        // the bad file aside so the server can re-push a fresh revision.
+        let loaded = RevisionStore::get_desired_config(Some(root.clone()))?;
+        assert!(loaded.is_none(), "corrupt config should read as None, not error");
+        assert!(!path.exists(), "corrupt config should be moved aside");
+        assert!(
+            path.with_file_name("desired_units.json.corrupt").exists(),
+            "corrupt config should be quarantined for inspection"
+        );
+
+        // A subsequent read is clean — no repeated error, file already handled.
+        assert!(RevisionStore::get_desired_config(Some(root))?.is_none());
         Ok(())
     }
 
@@ -2375,6 +2496,130 @@ mod tests {
         .await?;
         mgr.reconcile_dirty().await?;
         assert!(!marker.exists(), "stop should have run");
+        Ok(())
+    }
+
+    // ── Observe reporting: edge-trigger / anti-spam ──────────────────────────
+    //
+    // Regression guard for the heartbeat-spam + CPU-spike bug: a persistently
+    // unhealthy observe (e.g. an error line stuck in a `logs | grep` health
+    // check) must report the unhealthy state ONCE per healthy->unhealthy
+    // transition — not on every failing poll. Before the fix the failure
+    // branch of `decide_on_error` was level-triggered (`needs_send = is_failure`),
+    // so it re-enqueued a fresh RunState every `fails_after`-th failure forever;
+    // each carried a unique `report_time`/`log_tail` so the content-hash dedup
+    // in `enqueue_event` never collapsed them and the pending queue grew
+    // without bound.
+
+    fn failing_health_hooks(fails_after: Option<u32>) -> ObserveHooks {
+        ObserveHooks {
+            every: Duration::from_secs(10),
+            observe: sh("exit 1"),
+            observe_timeout: None,
+            record: None,
+            record_timeout: None,
+            report: None,
+            report_timeout: None,
+            fails_after,
+        }
+    }
+
+    fn healthy_health_hooks(fails_after: Option<u32>) -> ObserveHooks {
+        ObserveHooks {
+            observe: sh("true"),
+            ..failing_health_hooks(fails_after)
+        }
+    }
+
+    /// Drain every pending event and return the RunState reports in order.
+    async fn drain_runstates(mgr: &DeploymentManager) -> Vec<RunState> {
+        let mut out = Vec::new();
+        while let Some(ev) = claim_next_event(Some(mgr.root_dir.clone())).await.unwrap() {
+            if let DeployReportKind::RunState(rs) = ev.report {
+                out.push(rs);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn health_persistently_unhealthy_reports_once_not_per_poll() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let spec = mk_observer_spec("obs");
+        let hooks = failing_health_hooks(Some(1));
+
+        // Simulate 5 consecutive failing health polls of the same service.
+        for _ in 0..5 {
+            mgr.run_observe(ObserveKind::Health, "run1", "r1", &spec, &hooks)
+                .await?;
+        }
+
+        let states = drain_runstates(&mgr).await;
+        let unhealthy = states.iter().filter(|s| s.healthy == Some(false)).count();
+        assert_eq!(
+            unhealthy, 1,
+            "a persistently unhealthy service must report exactly once, \
+             not once per poll (was {unhealthy}, i.e. one per failing poll pre-fix)"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn health_reports_once_across_fails_after_threshold() -> Result<()> {
+        // Mirrors the default compose template (`fails_after: 3`): the state
+        // crosses the threshold at poll 3, 6, 9. Pre-fix that emitted 3 reports;
+        // post-fix only the first (the healthy->unhealthy transition) is sent.
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let spec = mk_observer_spec("obs");
+        let hooks = failing_health_hooks(Some(3));
+
+        for _ in 0..9 {
+            mgr.run_observe(ObserveKind::Health, "run1", "r1", &spec, &hooks)
+                .await?;
+        }
+
+        let states = drain_runstates(&mgr).await;
+        let unhealthy = states.iter().filter(|s| s.healthy == Some(false)).count();
+        assert_eq!(
+            unhealthy, 1,
+            "unhealthy state must be reported once at the threshold crossing, \
+             not on every `fails_after`-th failure (was {unhealthy} pre-fix)"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn health_recovery_rearms_unhealthy_reporting() -> Result<()> {
+        // The edge-trigger must work in both directions: unhealthy -> healthy
+        // re-arms the reporter so the next healthy -> unhealthy transition is
+        // reported again. Otherwise we'd go silent forever after the first flap.
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let spec = mk_observer_spec("obs");
+        let failing = failing_health_hooks(Some(1));
+        let ok = healthy_health_hooks(Some(1));
+
+        // unhealthy burst -> 1 unhealthy report
+        for _ in 0..3 {
+            mgr.run_observe(ObserveKind::Health, "run1", "r1", &spec, &failing)
+                .await?;
+        }
+        // recover -> 1 healthy report
+        mgr.run_observe(ObserveKind::Health, "run1", "r1", &spec, &ok)
+            .await?;
+        // unhealthy again -> another unhealthy report
+        for _ in 0..3 {
+            mgr.run_observe(ObserveKind::Health, "run1", "r1", &spec, &failing)
+                .await?;
+        }
+
+        let states = drain_runstates(&mgr).await;
+        let unhealthy = states.iter().filter(|s| s.healthy == Some(false)).count();
+        let healthy = states.iter().filter(|s| s.healthy == Some(true)).count();
+        assert_eq!(unhealthy, 2, "each unhealthy transition should report once");
+        assert_eq!(healthy, 1, "the recovery should report once");
         Ok(())
     }
 }

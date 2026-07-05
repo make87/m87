@@ -16,7 +16,7 @@ use m87_shared::{
 use mongodb::{
     bson::{Bson, DateTime as BsonDateTime, Document, doc, oid::ObjectId, to_bson},
     error::{ErrorKind, WriteFailure},
-    options::{FindOptions, UpdateOptions},
+    options::{FindOptions, UpdateModifications, UpdateOptions},
 };
 use serde::{Deserialize, Serialize};
 
@@ -61,9 +61,33 @@ impl AccessControlled for DeployRevisionDoc {
     }
 }
 
+/// Build an aggregation-pipeline update that removes any existing element of
+/// `field` (a `revision.<units>` array) whose `id` matches, then appends the new
+/// unit. Using a pipeline lets us express "supersede-by-id" atomically — a plain
+/// `$push` blindly appends and leaves the previous version of the unit behind,
+/// which is why re-deploying a unit used to leave the old container/process
+/// running on the device (it was never seen as removed from the revision).
+fn supersede_unit_by_id(field: &str, id: &str, unit: Bson) -> UpdateModifications {
+    let field_ref = format!("${field}");
+    let concat = doc! {
+        "$concatArrays": [
+            {
+                "$filter": {
+                    "input": { "$ifNull": [field_ref, []] },
+                    "cond": { "$ne": ["$$this.id", id] },
+                }
+            },
+            [unit],
+        ]
+    };
+    let mut set = Document::new();
+    set.insert(field, concat);
+    UpdateModifications::Pipeline(vec![doc! { "$set": set }])
+}
+
 pub fn to_update_doc(
     body: &UpdateDeployRevisionBody,
-) -> ServerResult<(Document, Option<Document>)> {
+) -> ServerResult<(UpdateModifications, Option<Document>)> {
     let mut which = 0;
     if body.revision.is_some() {
         which += 1;
@@ -111,7 +135,7 @@ pub fn to_update_doc(
         let rev: DeploymentRevision = DeploymentRevision::from_yaml(yaml)
             .map_err(|e| ServerError::bad_request(&format!("invalid YAML in `revision`: {}", e)))?;
         return Ok((
-            doc! { "$set": { "revision": to_bson(&rev).map_err(|e| ServerError::bad_request(&format!("revision -> bson failed: {}", e)))? } },
+            doc! { "$set": { "revision": to_bson(&rev).map_err(|e| ServerError::bad_request(&format!("revision -> bson failed: {}", e)))? } }.into(),
             None,
         ));
     }
@@ -120,8 +144,10 @@ pub fn to_update_doc(
         let spec: ServiceSpec = ServiceSpec::from_yaml(yaml).map_err(|e| {
             ServerError::bad_request(&format!("invalid YAML in `add_service`: {}", e))
         })?;
+        let bson = to_bson(&spec)
+            .map_err(|e| ServerError::bad_request(&format!("ServiceSpec -> bson failed: {}", e)))?;
         return Ok((
-            doc! { "$push": { "revision.services": to_bson(&spec).map_err(|e| ServerError::bad_request(&format!("ServiceSpec -> bson failed: {}", e)))? } },
+            supersede_unit_by_id("revision.services", &spec.id, bson),
             None,
         ));
     }
@@ -130,8 +156,10 @@ pub fn to_update_doc(
         let spec: ServiceSpec = ServiceSpec::from_yaml(yaml).map_err(|e| {
             ServerError::bad_request(&format!("invalid YAML in `add_observer`: {}", e))
         })?;
+        let bson = to_bson(&spec)
+            .map_err(|e| ServerError::bad_request(&format!("ServiceSpec -> bson failed: {}", e)))?;
         return Ok((
-            doc! { "$push": { "revision.observers": to_bson(&spec).map_err(|e| ServerError::bad_request(&format!("ServiceSpec -> bson failed: {}", e)))? } },
+            supersede_unit_by_id("revision.observers", &spec.id, bson),
             None,
         ));
     }
@@ -139,10 +167,9 @@ pub fn to_update_doc(
     if let Some(yaml) = &body.add_job {
         let job: JobDef = JobDef::from_yaml(yaml)
             .map_err(|e| ServerError::bad_request(&format!("invalid YAML in `add_job`: {}", e)))?;
-        return Ok((
-            doc! { "$push": { "revision.jobs": to_bson(&job).map_err(|e| ServerError::bad_request(&format!("JobDef -> bson failed: {}", e)))? } },
-            None,
-        ));
+        let bson = to_bson(&job)
+            .map_err(|e| ServerError::bad_request(&format!("JobDef -> bson failed: {}", e)))?;
+        return Ok((supersede_unit_by_id("revision.jobs", &job.id, bson), None));
     }
 
     if let Some(id) = &body.remove_unit_id {
@@ -154,7 +181,8 @@ pub fn to_update_doc(
                     "revision.observers": { "id": id },
                     "revision.jobs": { "id": id },
                 }
-            },
+            }
+            .into(),
             None,
         ));
     }
@@ -163,11 +191,11 @@ pub fn to_update_doc(
         // Lifecycle updates are delivered to the device via heartbeat.
         // No revision document change is needed here; return a no-op set.
         // TODO: persist lifecycle_update to a pending queue for heartbeat delivery.
-        return Ok((doc! { "$set": { "dirty": true } }, None));
+        return Ok((doc! { "$set": { "dirty": true } }.into(), None));
     }
 
     if let Some(active) = body.active {
-        return Ok((doc! { "$set": { "active": active } }, None));
+        return Ok((doc! { "$set": { "active": active } }.into(), None));
     }
 
     // Legacy backward-compat fields
@@ -190,8 +218,10 @@ pub fn to_update_doc(
                         e
                     ))
                 })?;
+                let bson =
+                    to_bson(&spec).map_err(|e| ServerError::bad_request(&e.to_string()))?;
                 return Ok((
-                    doc! { "$push": { "revision.observers": to_bson(&spec).map_err(|e| ServerError::bad_request(&e.to_string()))? } },
+                    supersede_unit_by_id("revision.observers", &spec.id, bson),
                     None,
                 ));
             }
@@ -202,10 +232,9 @@ pub fn to_update_doc(
                         e
                     ))
                 })?;
-                return Ok((
-                    doc! { "$push": { "revision.jobs": to_bson(&jd).map_err(|e| ServerError::bad_request(&e.to_string()))? } },
-                    None,
-                ));
+                let bson =
+                    to_bson(&jd).map_err(|e| ServerError::bad_request(&e.to_string()))?;
+                return Ok((supersede_unit_by_id("revision.jobs", &jd.id, bson), None));
             }
             _ => {
                 // Default: service
@@ -215,8 +244,10 @@ pub fn to_update_doc(
                         e
                     ))
                 })?;
+                let bson =
+                    to_bson(&spec).map_err(|e| ServerError::bad_request(&e.to_string()))?;
                 return Ok((
-                    doc! { "$push": { "revision.services": to_bson(&spec).map_err(|e| ServerError::bad_request(&e.to_string()))? } },
+                    supersede_unit_by_id("revision.services", &spec.id, bson),
                     None,
                 ));
             }
@@ -231,7 +262,10 @@ pub fn to_update_doc(
 
     if let Some(id) = &body.remove_run_spec_id {
         // Legacy: remove from jobs only (backward compat)
-        return Ok((doc! { "$pull": { "revision.jobs": { "id": id } } }, None));
+        return Ok((
+            doc! { "$pull": { "revision.jobs": { "id": id } } }.into(),
+            None,
+        ));
     }
 
     Err(ServerError::internal_error("This should be unreachable"))
@@ -741,9 +775,14 @@ impl DeployReportDoc {
         }
 
         // 2) Query Mongo with a cursor; stream docs and update snapshot in place.
-        // Sort by report_time ascending so “latest” comparisons are cheap and predictable.
+        // Sort by `created_at` (receive time) ascending so the in-place fold
+        // applies reports in chronological order and "latest wins". NOTE: the
+        // old sort key `report_time` is not a top-level field on the report doc
+        // (it lives under `kind.data.report_time`), so it sorted on a missing
+        // field — an unindexable, blocking in-memory sort. `created_at` is a
+        // real field backed by the {device_id, revision_id, created_at} index.
         let options = FindOptions::builder()
-            .sort(doc! { "report_time": 1i32 })
+            .sort(doc! { "created_at": 1i32 })
             .batch_size(Some(256))
             .build();
 
@@ -1426,5 +1465,67 @@ impl JobRunDoc {
             .find_one(doc! { "device_id": device_id, "run_id": run_id })
             .await?;
         Ok(doc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Reproduces Bug 1: the default `deploy` (add_service / add_observer /
+    // add_job) blindly appends a new unit via Mongo `$push`. Re-deploying a unit
+    // whose `id` already exists in the revision therefore leaves the OLD entry in
+    // place next to the new one. On the device the old unit is never classified
+    // as "removed" from the desired revision, so its stop steps never run — the
+    // previous container/process keeps running alongside the new version.
+    //
+    // A correct update must supersede the existing unit by id (filter out the
+    // same id, then append). A plain `$push` cannot express that — it is purely
+    // additive — so its presence here is the bug.
+    // Asserts the produced update supersedes-by-id: an aggregation pipeline that
+    // `$filter`s out the existing id before appending, rather than a blind
+    // `$push` that would duplicate the unit on re-deploy.
+    fn assert_supersedes_by_id(update: &UpdateModifications, ctx: &str) {
+        let rendered = format!("{update:?}");
+        assert!(
+            !rendered.contains("$push"),
+            "{ctx} must replace-or-append by id, not blindly `$push` a duplicate \
+             (re-deploying the same id must not leave the old unit in the \
+             revision). got: {rendered}"
+        );
+        assert!(
+            rendered.contains("$filter"),
+            "{ctx} must filter out the existing id before appending. got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn add_service_supersedes_existing_id_instead_of_appending() {
+        let body = UpdateDeployRevisionBody {
+            add_service: Some("id: app\n".to_string()),
+            ..Default::default()
+        };
+        let (update, _extra) = to_update_doc(&body).expect("to_update_doc");
+        assert_supersedes_by_id(&update, "add_service");
+    }
+
+    #[test]
+    fn add_observer_supersedes_existing_id_instead_of_appending() {
+        let body = UpdateDeployRevisionBody {
+            add_observer: Some("id: obs\n".to_string()),
+            ..Default::default()
+        };
+        let (update, _extra) = to_update_doc(&body).expect("to_update_doc");
+        assert_supersedes_by_id(&update, "add_observer");
+    }
+
+    #[test]
+    fn add_job_supersedes_existing_id_instead_of_appending() {
+        let body = UpdateDeployRevisionBody {
+            add_job: Some("id: job\n".to_string()),
+            ..Default::default()
+        };
+        let (update, _extra) = to_update_doc(&body).expect("to_update_doc");
+        assert_supersedes_by_id(&update, "add_job");
     }
 }

@@ -14,6 +14,7 @@ pub mod helpers;
 mod install;
 mod ls;
 mod misc;
+mod mongo_indexes;
 mod monitoring;
 pub mod setup;
 mod forward;
