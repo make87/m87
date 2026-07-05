@@ -66,19 +66,46 @@ where
     }
 }
 
+fn make_filter(default_level: &str) -> EnvFilter {
+    EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(default_level))
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+}
+
+/// Filter for the CLI log broadcast. Same base level as the console filter,
+/// but the `observe` target is always admitted at INFO so live follow logs
+/// reach the CLI regardless of the daemon's global level (`RUST_LOG`). Without
+/// this, running the daemon below INFO silently drops all `[observe]` lines.
+fn make_broadcast_filter(default_level: &str) -> EnvFilter {
+    make_filter(default_level)
+        .add_directive("observe=info".parse().expect("valid observe directive"))
+}
+
+/// Build the layered subscriber used by the daemon. Each layer carries its own
+/// filter (rather than a single global filter), so the broadcast layer can
+/// admit `observe` live-log events even when the console filter is below INFO.
+/// Extracted so it can be exercised in tests with a `with_default` scope
+/// instead of the global `.init()`.
+fn build_subscriber(
+    console_filter: EnvFilter,
+    broadcast_filter: EnvFilter,
+    tx: broadcast::Sender<String>,
+) -> impl Subscriber + Send + Sync + 'static {
+    tracing_subscriber::registry()
+        .with(tracing_fmt::layer().with_filter(console_filter))
+        .with(LogBroadcastLayer::new(tx).with_filter(broadcast_filter))
+}
+
 pub fn init_tracing_with_log_layer(default_level: &str) -> broadcast::Sender<String> {
     let (tx, _rx) = broadcast::channel(32_768);
     LOG_TX.set(tx.clone()).ok();
 
-    let filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(default_level))
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_fmt::layer())
-        .with(LogBroadcastLayer::new(tx.clone()))
-        .init();
+    build_subscriber(
+        make_filter(default_level),
+        make_broadcast_filter(default_level),
+        tx.clone(),
+    )
+    .init();
 
     tx
 }
@@ -155,5 +182,53 @@ mod tests {
         assert_eq!(ts.len(), 8);
         assert_eq!(&ts[2..3], ":");
         assert_eq!(&ts[5..6], ":");
+    }
+
+    // ── Live-log broadcast gating ────────────────────────────────────────────
+    //
+    // Live `observe` follow logs are emitted as
+    // `tracing::info!(target: "observe", "[observe]…")` and carried to the CLI
+    // over the `LogBroadcastLayer`. That layer must NOT be gated by the
+    // daemon's global level: when the daemon runs below INFO (e.g.
+    // `RUST_LOG=warn`, or launched non-verbose) live logs must still flow,
+    // while health/liveness reports use a separate heartbeat path.
+
+    /// Control: the broadcast itself works — a WARN line passes the WARN filter
+    /// and reaches subscribers. Guards against the reproduce test below being a
+    /// false positive (i.e. the broadcast being broken for some other reason).
+    #[test]
+    fn warn_line_reaches_broadcast_under_warn_filter() {
+        let (tx, mut rx) = broadcast::channel::<String>(16);
+        let subscriber =
+            build_subscriber(make_filter("warn"), make_broadcast_filter("warn"), tx.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!("noisy diagnostic");
+        });
+        let got = rx.try_recv();
+        assert!(got.is_ok(), "warn line should broadcast under warn filter");
+        assert!(got.unwrap().contains("noisy diagnostic"));
+    }
+
+    /// Regression: an `observe` live-log line (emitted at INFO, as the follow
+    /// loop does) must reach the CLI broadcast even when the daemon's global
+    /// level is `warn`. Fails without the per-layer `observe=info` broadcast
+    /// filter — that was the live-logs-missing bug.
+    #[test]
+    fn observe_line_reaches_broadcast_under_warn_filter() {
+        let (tx, mut rx) = broadcast::channel::<String>(16);
+        let subscriber =
+            build_subscriber(make_filter("warn"), make_broadcast_filter("warn"), tx.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            // Mirror the production follow emit in log_manager::spawn_follow.
+            tracing::info!(target: "observe", "[observe]hello from container");
+        });
+        let got = rx.try_recv();
+        assert!(
+            got.is_ok(),
+            "observe live-log line must reach the CLI broadcast even when the \
+             daemon's global level is `warn`; got {got:?} — this is the \
+             live-logs-missing bug"
+        );
+        assert!(got.unwrap().contains("hello from container"));
     }
 }

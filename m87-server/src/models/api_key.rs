@@ -103,7 +103,15 @@ impl ApiKeyDoc {
             .map_err(|_| ServerError::internal_error("DB lookup failed"))?
             .ok_or_else(|| ServerError::unauthorized("Invalid key ID"))?;
 
-        if !verify_api_key(&secret, &key_doc.key_hash) {
+        // Argon2 verification is deliberately CPU-heavy (tens of ms). Run it on
+        // the blocking pool so a burst of authenticating devices can't pin the
+        // async worker threads and wedge the whole server.
+        let secret_owned = secret.to_string();
+        let hash_owned = key_doc.key_hash.clone();
+        let valid = tokio::task::spawn_blocking(move || verify_api_key(&secret_owned, &hash_owned))
+            .await
+            .map_err(|_| ServerError::internal_error("API key verification task failed"))?;
+        if !valid {
             return Err(ServerError::unauthorized("Invalid API key"));
         }
 
@@ -162,4 +170,21 @@ fn generate_api_key() -> Result<(String, String, String), PasswordHashError> {
 fn split_api_key(key: &str) -> Option<(String, String)> {
     let mut parts = key.splitn(2, '.');
     Some((parts.next()?.to_string(), parts.next()?.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guards the Argon2 hash/verify contract, so moving `verify_api_key` onto
+    /// the blocking pool can't silently break API-key auth.
+    #[test]
+    fn api_key_hash_roundtrips() {
+        let hash = hash_api_key("s3cret-key").expect("hash should succeed");
+        assert!(verify_api_key("s3cret-key", &hash), "correct key must verify");
+        assert!(
+            !verify_api_key("wrong-key", &hash),
+            "wrong key must not verify"
+        );
+    }
 }

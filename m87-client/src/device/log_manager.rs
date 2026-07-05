@@ -266,7 +266,11 @@ async fn spawn_follow(
                 }
                 res = lines.next_line() => {
                     match res {
-                        Ok(Some(line)) => tracing::info!("[observe]{}", format_log(&unit, &line, true)),
+                        Ok(Some(line)) => tracing::info!(
+                            target: "observe",
+                            "[observe]{}",
+                            format_log(&unit, &line, true)
+                        ),
                         Ok(None) => break, // EOF
                         Err(_) => break,   // I/O error; best-effort
                     }

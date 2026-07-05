@@ -9,6 +9,20 @@ use crate::{
     response::{ServerError, ServerResult},
 };
 
+/// Shared reqwest client with a request timeout. `reqwest` has no default
+/// timeout, so a hung IdP endpoint (JWKS / userinfo) would otherwise hang the
+/// auth task forever — these run on the QUIC/WebTransport paths which have no
+/// HTTP timeout layer. Reusing one client also keeps the connection/DNS pool.
+fn http_client() -> &'static Client {
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build reqwest client")
+    })
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DecodedClaims {
     pub sub: String,
@@ -48,7 +62,7 @@ pub async fn validate_token(token: &str, config: &Arc<AppConfig>) -> ServerResul
         .kid
         .ok_or_else(|| ServerError::invalid_token("Token missing 'kid' field"))?;
 
-    let jwks: Jwks = Client::new()
+    let jwks: Jwks = http_client()
         .get(&jwks_url)
         .send()
         .await
@@ -83,7 +97,7 @@ pub async fn get_email_and_name_from_token(
     let issuer = config.oauth.issuer.trim_end_matches('/').to_string();
     let userinfo_url = format!("{}/userinfo", issuer);
 
-    let resp = Client::new()
+    let resp = http_client()
         .get(&userinfo_url)
         .bearer_auth(token)
         .send()
