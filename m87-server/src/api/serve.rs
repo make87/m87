@@ -49,10 +49,33 @@ pub async fn serve(
 
     let (reload_tx, reload_rx) = watch::channel(());
 
+    // Ed25519 signing key for direct-connection (iroh) authorization tickets.
+    // A stable fleet-wide key (M87_IROH_TICKET_KEY, base64 32-byte seed) lets
+    // any server instance sign tickets a device will trust; otherwise we mint
+    // an ephemeral key (fine for single-server dev / e2e).
+    let iroh_ticket_signer = Arc::new(
+        match std::env::var("M87_IROH_TICKET_KEY") {
+            Ok(seed) if !seed.trim().is_empty() => {
+                m87_shared::iroh_ticket::IrohTicketSigner::from_seed_b64(&seed)
+                    .expect("M87_IROH_TICKET_KEY must be a base64 32-byte ed25519 seed")
+            }
+            _ => {
+                let signer = m87_shared::iroh_ticket::IrohTicketSigner::generate();
+                tracing::warn!(
+                    "M87_IROH_TICKET_KEY not set — using an ephemeral iroh ticket key \
+                     (pubkey {}). Set a stable fleet-wide key in production.",
+                    signer.public_b64()
+                );
+                signer
+            }
+        },
+    );
+
     let state = AppState {
         db: db.clone(),
         config: cfg.clone(),
         relay: relay.clone(),
+        iroh_ticket_signer,
     };
 
     // CORS for REST

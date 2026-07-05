@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use iroh::endpoint::Connection as IrohConnection;
 use iroh::{Endpoint as IrohEndpoint, EndpointAddr};
+use m87_shared::iroh_ticket::SignedIrohTicket;
 use serde::Deserialize;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -18,31 +19,53 @@ use crate::streams::stream_type::StreamType;
 /// ALPN used for direct iroh P2P connections between CLI and device.
 pub const IROH_ALPN: &[u8] = b"m87-iroh-p2p/1";
 
-/// Timeout when attempting an iroh P2P connection.
-const IROH_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long to wait for a direct iroh connection before falling back to the
+/// server relay.
+///
+/// This only bites when iroh *cannot* connect (no direct path AND the iroh
+/// relay is unreachable) — a working connection, even over a slow/high-latency
+/// IoT uplink, establishes in a few seconds and never hits this. So the value
+/// is a trade-off: low enough that a genuinely unreachable peer falls back to
+/// the relay quickly, high enough that a slow-but-viable link (lossy cellular,
+/// satellite RTTs) still completes the QUIC + holepunch handshake rather than
+/// being cut off and losing the direct path for the whole session. 10s keeps
+/// the fallback snappy while leaving comfortable headroom for slow IoT links.
+const IROH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Response body from `GET /device/{id}/iroh-addr`.
 #[derive(Deserialize)]
 struct IrohAddrResponse {
     iroh_node_addr: String,
+    ticket: SignedIrohTicket,
 }
 
-/// Fetch the iroh [`EndpointAddr`] for a device from the m87 server.
+/// Fetch the iroh [`EndpointAddr`] and a server-signed connection ticket for a
+/// device.
 ///
 /// `server_url` is the HTTPS base URL, `token` is the user bearer token,
-/// `device_id` is the MongoDB ObjectId string of the device.
+/// `device_id` is the MongoDB ObjectId string of the device. The ticket is
+/// presented to the device to authorize the direct connection.
 pub async fn fetch_device_iroh_addr(
     server_url: &str,
     token: &str,
     device_id: &str,
-) -> Result<EndpointAddr> {
+    trust_invalid_server_cert: bool,
+) -> Result<(EndpointAddr, SignedIrohTicket)> {
     let url = format!(
         "{}/device/{}/iroh-addr",
         server_url.trim_end_matches('/'),
         device_id
     );
 
-    let resp = reqwest::Client::new()
+    // Honour the same cert-trust setting the rest of the CLI uses; otherwise
+    // self-signed / staging servers reject this call and iroh silently never
+    // engages (every connection falls back to the relay).
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(trust_invalid_server_cert)
+        .build()
+        .context("building iroh-addr http client")?;
+
+    let resp = client
         .get(&url)
         .bearer_auth(token)
         .timeout(Duration::from_secs(5))
@@ -59,7 +82,7 @@ pub async fn fetch_device_iroh_addr(
     let addr: EndpointAddr =
         serde_json::from_str(&body.iroh_node_addr).context("deserializing iroh EndpointAddr")?;
 
-    Ok(addr)
+    Ok((addr, body.ticket))
 }
 
 /// Create an ephemeral iroh endpoint for the CLI (no ALPNs needed — we are
@@ -106,45 +129,90 @@ pub async fn open_iroh_stream(conn: &IrohConnection, stream_type: StreamType) ->
     Ok(QuicIo::from_iroh(recv, send))
 }
 
-/// High-level helper: fetch iroh addr from server, try direct connection,
-/// open stream. Returns `None` if anything fails (caller falls back to relay).
-pub async fn try_open_iroh_stream(
+/// Environment variable that disables the iroh direct-connection layer,
+/// forcing all CLI traffic over the server relay. Doubles as an operational
+/// kill switch and as the lever the e2e tests use to exercise relay fallback.
+pub const DISABLE_IROH_ENV: &str = "M87_DISABLE_IROH";
+
+/// Whether the iroh direct-connection layer has been disabled via
+/// [`DISABLE_IROH_ENV`] (`1` / `true` / `yes`, case-insensitive).
+pub fn iroh_disabled() -> bool {
+    std::env::var(DISABLE_IROH_ENV)
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+/// High-level helper: fetch the device's iroh addr from the server and try to
+/// establish a direct connection.
+///
+/// Returns the endpoint **and** the connection on success — the endpoint owns
+/// the local socket and its driver, so it MUST be kept alive for the whole
+/// lifetime of the connection (dropping it tears the connection down). Returns
+/// `None` — so the caller transparently falls back to the server relay — when
+/// iroh is disabled or any step (addr lookup, bind, connect) fails.
+pub async fn try_iroh_connection(
     server_url: &str,
     token: &str,
     device_id: &str,
-    stream_type: StreamType,
-) -> Option<(IrohConnection, QuicIo)> {
-    let addr = match fetch_device_iroh_addr(server_url, token, device_id).await {
-        Ok(a) => a,
-        Err(e) => {
-            debug!("iroh: could not get device addr: {e}");
-            return None;
-        }
-    };
+    trust_invalid_server_cert: bool,
+) -> Option<(IrohEndpoint, IrohConnection)> {
+    if iroh_disabled() {
+        debug!("iroh: disabled via {DISABLE_IROH_ENV}, using server relay");
+        return None;
+    }
+
+    let (addr, ticket) =
+        match fetch_device_iroh_addr(server_url, token, device_id, trust_invalid_server_cert).await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                debug!("iroh: could not get device addr (will use relay): {e}");
+                return None;
+            }
+        };
 
     let ep = match create_cli_iroh_endpoint().await {
         Ok(e) => e,
         Err(e) => {
-            warn!("iroh: could not create endpoint: {e}");
+            warn!("iroh: could not create endpoint (will use relay): {e}");
             return None;
         }
     };
 
     let conn = match try_iroh_connect(&ep, addr).await {
-        Ok(c) => c,
+        Ok(conn) => conn,
         Err(e) => {
             debug!("iroh: direct connect failed (will use relay): {e}");
             return None;
         }
     };
 
-    match open_iroh_stream(&conn, stream_type).await {
-        Ok(io) => Some((conn, io)),
-        Err(e) => {
-            warn!("iroh: stream open failed: {e}");
-            None
-        }
+    // Authorize the connection: the device's accept loop reads this ticket from
+    // a uni-stream before it will serve any data streams.
+    if let Err(e) = send_iroh_ticket(&conn, &ticket).await {
+        debug!("iroh: failed to send ticket (will use relay): {e}");
+        return None;
     }
+
+    Some((ep, conn))
+}
+
+/// Send the server-signed ticket over a uni-stream, matching the framing the
+/// device's accept loop expects (`u16` big-endian length + JSON body).
+async fn send_iroh_ticket(conn: &IrohConnection, ticket: &SignedIrohTicket) -> Result<()> {
+    let json = serde_json::to_vec(ticket).context("serializing iroh ticket")?;
+    if json.len() > u16::MAX as usize {
+        anyhow::bail!("iroh ticket too large ({} bytes)", json.len());
+    }
+
+    let mut send = conn.open_uni().await.context("opening iroh ticket stream")?;
+    send.write_all(&(json.len() as u16).to_be_bytes()).await?;
+    send.write_all(&json).await?;
+    send.finish().context("finishing iroh ticket stream")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -308,6 +376,62 @@ mod tests {
         // Wait for the device to finish parsing before closing the endpoint.
         // Closing the endpoint first would terminate the connection and cause
         // accept_bi() on the device side to fail with ApplicationClosed.
+        device_task.await.expect("device task panicked");
+        cli_ep.close().await;
+    }
+
+    // ── datagram transport (used by UDP forwarding) ────────────────────
+
+    /// Verify iroh negotiates datagram support and a datagram round-trips
+    /// between two endpoints — the transport UDP forwarding relies on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_iroh_datagram_roundtrip() {
+        use iroh::Endpoint;
+        use iroh::endpoint::presets;
+
+        let device_ep = Endpoint::builder(presets::N0)
+            .alpns(vec![IROH_ALPN.to_vec()])
+            .bind()
+            .await
+            .expect("device ep");
+        let device_addr = device_ep.addr();
+        let cli_ep = create_cli_iroh_endpoint().await.expect("cli ep");
+
+        let device_task = tokio::spawn(async move {
+            let incoming =
+                tokio::time::timeout(std::time::Duration::from_secs(20), device_ep.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let conn = incoming.await.unwrap();
+            // Datagrams are unreliable; the sender retries, we read the first.
+            let d = tokio::time::timeout(std::time::Duration::from_secs(10), conn.read_datagram())
+                .await
+                .expect("datagram did not arrive")
+                .expect("read_datagram failed");
+            assert_eq!(&d[..], b"ping", "datagram payload must match");
+            device_ep.close().await;
+        });
+
+        let conn = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            try_iroh_connect(&cli_ep, device_addr),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(
+            conn.max_datagram_size().is_some(),
+            "iroh must negotiate datagram support for UDP forwarding"
+        );
+
+        // Unreliable transport: send a few times until the device reads one.
+        for _ in 0..20 {
+            let _ = conn.send_datagram(bytes::Bytes::from_static(b"ping"));
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
         device_task.await.expect("device task panicked");
         cli_ep.close().await;
     }

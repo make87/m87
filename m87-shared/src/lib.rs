@@ -3,6 +3,7 @@ pub mod config;
 pub mod deploy_spec;
 pub mod device;
 pub mod heartbeat;
+pub mod iroh_ticket;
 pub mod metrics;
 pub mod org;
 pub mod pagination;

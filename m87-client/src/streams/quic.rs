@@ -297,3 +297,158 @@ pub async fn open_quic_stream(conn: &quinn::Connection, stream_type: StreamType)
 
     Ok(QuicIo::from_quinn(recv, send))
 }
+
+// ── Transport-agnostic device connection (iroh-preferred, relay fallback) ─────
+
+/// A live connection to a device — either a direct iroh P2P connection or the
+/// quinn server-relay connection. Streams are opened the same way on both; the
+/// device routes iroh and relay streams through the same handler.
+///
+/// The owning value MUST be kept alive for as long as any stream opened from it
+/// is in use: each variant holds its `Endpoint`, whose driver task backs every
+/// stream. Dropping the connection tears those streams down.
+pub enum DeviceConnection {
+    /// Server-relay (quinn) connection.
+    Relay {
+        _endpoint: Endpoint,
+        conn: quinn::Connection,
+    },
+    /// Direct iroh P2P connection.
+    Iroh {
+        _endpoint: iroh::Endpoint,
+        conn: iroh::endpoint::Connection,
+    },
+}
+
+impl DeviceConnection {
+    /// Whether this is a direct iroh P2P connection (vs. the server relay).
+    pub fn is_iroh(&self) -> bool {
+        matches!(self, DeviceConnection::Iroh { .. })
+    }
+
+    /// Short transport label for logging / diagnostics.
+    pub fn transport(&self) -> &'static str {
+        match self {
+            DeviceConnection::Relay { .. } => "relay",
+            DeviceConnection::Iroh { .. } => "iroh",
+        }
+    }
+
+    /// Open a new bi-directional stream and send the stream-type header.
+    pub async fn open_stream(&self, stream_type: StreamType) -> Result<QuicIo> {
+        match self {
+            DeviceConnection::Relay { conn, .. } => open_quic_stream(conn, stream_type).await,
+            DeviceConnection::Iroh { conn, .. } => {
+                crate::streams::iroh_p2p::open_iroh_stream(conn, stream_type).await
+            }
+        }
+    }
+
+    /// Resolve when the connection closes, returning a human-readable reason.
+    /// Used by accept loops (e.g. port forwarding) to detect teardown.
+    pub async fn closed(&self) -> String {
+        match self {
+            DeviceConnection::Relay { conn, .. } => format!("{:?}", conn.closed().await),
+            DeviceConnection::Iroh { conn, .. } => format!("{:?}", conn.closed().await),
+        }
+    }
+
+    /// Send an unreliable datagram (used by UDP forwarding).
+    pub fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
+        match self {
+            DeviceConnection::Relay { conn, .. } => conn
+                .send_datagram(data)
+                .map_err(|e| anyhow::anyhow!("relay send_datagram: {e}")),
+            DeviceConnection::Iroh { conn, .. } => conn
+                .send_datagram(data)
+                .map_err(|e| anyhow::anyhow!("iroh send_datagram: {e}")),
+        }
+    }
+
+    /// Receive the next unreliable datagram.
+    pub async fn read_datagram(&self) -> Result<bytes::Bytes> {
+        match self {
+            DeviceConnection::Relay { conn, .. } => conn
+                .read_datagram()
+                .await
+                .map_err(|e| anyhow::anyhow!("relay read_datagram: {e}")),
+            DeviceConnection::Iroh { conn, .. } => conn
+                .read_datagram()
+                .await
+                .map_err(|e| anyhow::anyhow!("iroh read_datagram: {e}")),
+        }
+    }
+
+    /// Close the connection with an application reason.
+    pub fn close(&self, reason: &[u8]) {
+        match self {
+            DeviceConnection::Relay { conn, .. } => conn.close(0u32.into(), reason),
+            DeviceConnection::Iroh { conn, .. } => conn.close(0u32.into(), reason),
+        }
+    }
+}
+
+/// Establish a connection to a device, preferring a direct iroh P2P connection
+/// and transparently falling back to the server relay.
+///
+/// `server_url` is the device's manager-server base URL and `device_object_id`
+/// its MongoDB id — both needed to look up the device's advertised iroh addr.
+/// Any iroh failure (disabled, no advertised addr, unreachable) falls back to
+/// the relay, which is always available.
+pub async fn connect_device(
+    host: &str,
+    server_url: &str,
+    device_short_id: &str,
+    device_object_id: &str,
+    token: &str,
+    trust_invalid: bool,
+) -> Result<DeviceConnection> {
+    if let Some((endpoint, conn)) = crate::streams::iroh_p2p::try_iroh_connection(
+        server_url,
+        token,
+        device_object_id,
+        trust_invalid,
+    )
+    .await
+    {
+        debug!("connected to {device_short_id} via iroh (direct P2P)");
+        return Ok(DeviceConnection::Iroh {
+            _endpoint: endpoint,
+            conn,
+        });
+    }
+
+    let (endpoint, conn) = connect_quic_only(host, token, device_short_id, trust_invalid).await?;
+    debug!("connected to {device_short_id} via server relay");
+    Ok(DeviceConnection::Relay {
+        _endpoint: endpoint,
+        conn,
+    })
+}
+
+/// Open a single stream to a device over an iroh-preferred, relay-fallback
+/// connection. Mirrors [`open_quic_io`] but is transport-agnostic.
+///
+/// Returns the connection alongside the stream — keep the connection alive for
+/// the lifetime of the returned [`QuicIo`].
+pub async fn open_device_io(
+    host: &str,
+    server_url: &str,
+    token: &str,
+    device_short_id: &str,
+    device_object_id: &str,
+    stream_type: StreamType,
+    trust_invalid: bool,
+) -> Result<(DeviceConnection, QuicIo)> {
+    let conn = connect_device(
+        host,
+        server_url,
+        device_short_id,
+        device_object_id,
+        token,
+        trust_invalid,
+    )
+    .await?;
+    let io = conn.open_stream(stream_type).await?;
+    Ok((conn, io))
+}

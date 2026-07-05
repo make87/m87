@@ -112,9 +112,16 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
         first_heartbeat: true,
     }));
 
+    // Server's iroh ticket-signing public key (base64), learned from heartbeat
+    // responses. The iroh accept loop verifies CLI connection tickets against
+    // it. None until the first heartbeat response carrying it arrives.
+    let server_ticket_pubkey: Arc<tokio::sync::RwLock<Option<String>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
+
     let manager_clone = unit_manager.clone();
     let _receiver = tokio::spawn({
         let state = state.clone();
+        let server_ticket_pubkey = server_ticket_pubkey.clone();
         use crate::device::deployment_manager::ack_event;
         async move {
             loop {
@@ -124,6 +131,15 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                     msg = read_msg::<HeartbeatResponse>(&mut recv) => {
                         let resp = msg?;
                         tracing::debug!("Received heartbeat response");
+
+                        // Cache the server's ticket-signing public key for the
+                        // iroh accept loop to verify direct-connection tickets.
+                        if let Some(pk) = resp.iroh_ticket_pubkey.as_deref() {
+                            let mut guard = server_ticket_pubkey.write().await;
+                            if guard.as_deref() != Some(pk) {
+                                *guard = Some(pk.to_string());
+                            }
+                        }
 
                         // Don't hold `state` across `set_desired_units` /
                         // `apply_lifecycle_updates` / `ack_event` — those can
@@ -352,9 +368,10 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
     if let Some(iroh_ep) = iroh_ep {
         let unit_manager_iroh = unit_manager.clone();
         let udp_channels_iroh = udp_channels.clone();
-        let datagram_tx_iroh = datagram_tx.clone();
         let mut iroh_shutdown = shutdown_rx.clone();
         let iroh_ep_clone = iroh_ep.clone();
+        let iroh_short_id = short_id.to_string();
+        let iroh_pubkey = server_ticket_pubkey.clone();
 
         tokio::spawn(async move {
             loop {
@@ -370,7 +387,8 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                         };
                         let unit_manager = unit_manager_iroh.clone();
                         let udp_channels = udp_channels_iroh.clone();
-                        let datagram_tx = datagram_tx_iroh.clone();
+                        let short_id = iroh_short_id.clone();
+                        let pubkey = iroh_pubkey.clone();
                         tokio::spawn(async move {
                             let conn = match incoming.await {
                                 Ok(c) => c,
@@ -379,7 +397,10 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                                     return;
                                 }
                             };
-                            handle_iroh_connection(conn, unit_manager, udp_channels, datagram_tx).await;
+                            handle_iroh_connection(
+                                conn, unit_manager, udp_channels, short_id, pubkey,
+                            )
+                            .await;
                         });
                     }
                 }
@@ -472,64 +493,140 @@ async fn handle_iroh_connection(
     conn: iroh::endpoint::Connection,
     unit_manager: Arc<DeploymentManager>,
     udp_channels: crate::streams::udp_manager::UdpChannelManager,
-    datagram_tx: tokio::sync::mpsc::Sender<(u32, bytes::Bytes)>,
+    device_short_id: String,
+    server_ticket_pubkey: Arc<tokio::sync::RwLock<Option<String>>>,
 ) {
+    use bytes::{BufMut, Bytes, BytesMut};
+
     use crate::streams::{self, quic::QuicIo};
 
-    // Authenticate: read token from first uni-directional stream
-    let token =
-        {
-            let mut recv =
-                match tokio::time::timeout(std::time::Duration::from_secs(5), conn.accept_uni())
-                    .await
-                {
-                    Ok(Ok(r)) => r,
-                    _ => {
-                        warn!("iroh: auth stream missing or timed out");
-                        return;
-                    }
-                };
-
-            let mut len_buf = [0u8; 2];
-            if recv.read_exact(&mut len_buf).await.is_err() {
-                warn!("iroh: failed to read token length");
-                return;
-            }
-            let len = u16::from_be_bytes(len_buf) as usize;
-            if len == 0 || len > 4096 {
-                warn!("iroh: invalid token length {len}");
-                return;
-            }
-            let mut buf = vec![0u8; len];
-            if recv.read_exact(&mut buf).await.is_err() {
-                warn!("iroh: failed to read token");
-                return;
-            }
-            match String::from_utf8(buf) {
-                Ok(t) => t,
-                Err(_) => {
-                    warn!("iroh: token not valid utf-8");
+    // Authenticate: the CLI opens a uni-stream and sends a server-signed
+    // connection ticket. We verify the *server's* signature — we already trust
+    // the server — rather than re-checking the CLI's own credentials. This is
+    // what lets any caller the server accepts (OAuth users and API keys) use a
+    // direct connection.
+    let signed_ticket: m87_shared::iroh_ticket::SignedIrohTicket = {
+        let mut recv =
+            match tokio::time::timeout(std::time::Duration::from_secs(5), conn.accept_uni()).await {
+                Ok(Ok(r)) => r,
+                _ => {
+                    warn!("iroh: auth stream missing or timed out");
                     return;
                 }
-            }
-        };
+            };
 
-    // Validate token (Auth0 JWKS check)
-    if let Err(e) = crate::streams::auth::validate_token(&token).await {
-        warn!("iroh: token validation failed: {e}");
+        let mut len_buf = [0u8; 2];
+        if recv.read_exact(&mut len_buf).await.is_err() {
+            warn!("iroh: failed to read ticket length");
+            return;
+        }
+        let len = u16::from_be_bytes(len_buf) as usize;
+        if len == 0 || len > 8192 {
+            warn!("iroh: invalid ticket length {len}");
+            return;
+        }
+        let mut buf = vec![0u8; len];
+        if recv.read_exact(&mut buf).await.is_err() {
+            warn!("iroh: failed to read ticket");
+            return;
+        }
+        match serde_json::from_slice(&buf) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("iroh: ticket not valid JSON: {e}");
+                return;
+            }
+        }
+    };
+
+    // Verify the ticket against the server's advertised signing key.
+    let Some(pubkey_b64) = server_ticket_pubkey.read().await.clone() else {
+        warn!("iroh: no server ticket key known yet — rejecting connection");
         return;
+    };
+    let verifying_key = match m87_shared::iroh_ticket::verifying_key_from_b64(&pubkey_b64) {
+        Ok(k) => k,
+        Err(e) => {
+            warn!("iroh: bad server ticket key: {e}");
+            return;
+        }
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    match signed_ticket.verify(&verifying_key, &device_short_id, now_ms) {
+        Ok(ticket) => {
+            debug!("iroh: connection authorized for subject '{}'", ticket.subject)
+        }
+        Err(e) => {
+            warn!("iroh: ticket rejected: {e}");
+            return;
+        }
     }
 
-    debug!("iroh: connection authenticated");
+    // Per-connection UDP datagram plumbing. The relay multiplexes every
+    // device's datagrams over one tunnel, but each iroh connection carries its
+    // own — so egress must go back over *this* connection, not the relay.
+    let (iroh_dgram_tx, mut iroh_dgram_rx) =
+        tokio::sync::mpsc::channel::<(u32, bytes::Bytes)>(2048);
 
-    // Accept bi-directional streams and route them
+    // Egress: device → CLI. Frame `[channel_id][payload]` and send as a datagram.
+    {
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            while let Some((id, payload)) = iroh_dgram_rx.recv().await {
+                let mut buf = BytesMut::with_capacity(4 + payload.len());
+                buf.put_u32(id);
+                buf.extend_from_slice(&payload);
+                if conn.send_datagram(buf.freeze()).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Ingress: CLI → device. Route each datagram to its channel by id.
+    {
+        let conn = conn.clone();
+        let udp_channels = udp_channels.clone();
+        tokio::spawn(async move {
+            loop {
+                match conn.read_datagram().await {
+                    Ok(d) => {
+                        if d.len() < 4 {
+                            continue;
+                        }
+                        let id = u32::from_be_bytes([d[0], d[1], d[2], d[3]]);
+                        let payload = Bytes::copy_from_slice(&d[4..]);
+                        match udp_channels.get(id).await {
+                            Some(ch) => {
+                                debug!("iroh ingress: datagram id={id} len={} → channel", payload.len());
+                                let _ = ch.sender.try_send(payload);
+                            }
+                            None => {
+                                debug!("iroh ingress: datagram id={id} has no channel — dropping");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("iroh ingress: read_datagram ended: {e}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Accept bi-directional streams and route them. UDP forward streams get
+    // this connection's datagram sender so their responses go back over iroh.
     loop {
         match conn.accept_bi().await {
             Ok((send, recv)) => {
                 let io = QuicIo::from_iroh(recv, send);
                 let unit_manager = unit_manager.clone();
                 let udp_channels = udp_channels.clone();
-                let datagram_tx = datagram_tx.clone();
+                let datagram_tx = iroh_dgram_tx.clone();
                 tokio::spawn(async move {
                     if let Err(e) = streams::router::handle_incoming_stream(
                         io,

@@ -368,7 +368,11 @@ async fn run_heartbeat_loop(
                     break;
                 };
 
-                let body = device.handle_heartbeat(claims.clone(), &state.db, req, &state.config).await?;
+                let mut body = device.handle_heartbeat(claims.clone(), &state.db, req, &state.config).await?;
+
+                // Advertise the iroh ticket-signing public key so the device can
+                // verify tickets CLIs present on direct connections.
+                body.iroh_ticket_pubkey = Some(state.iroh_ticket_signer.public_b64());
 
                 info!("sending heartbeat response");
                 match write_msg(&mut send, &body).await {

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::devices;
-use crate::streams::quic::connect_quic_only;
-use crate::streams::quic::open_quic_stream;
+use crate::streams::quic::DeviceConnection;
+use crate::streams::quic::connect_device;
 use crate::streams::stream_type::{ForwardTarget, SocketTarget, TcpTarget, UdpTarget};
 use crate::util::shutdown::SHUTDOWN;
 use crate::util::udp::decode_socket_addr;
@@ -50,8 +50,10 @@ pub async fn start_forward(
         tokio::spawn(async move {
             if let Err(e) = forward_device_port(
                 &resolved.host,
+                &resolved.url,
                 &token,
                 &resolved.short_id,
+                &resolved.id,
                 t,
                 trust,
                 cancel.clone(),
@@ -69,8 +71,10 @@ pub async fn start_forward(
 
 pub async fn forward_device_port(
     host_name: &str,
+    server_url: &str,
     token: &str,
     device_short_id: &str,
+    device_object_id: &str,
     forward_target: ForwardTarget,
     trust_invalid_server_cert: bool,
     cancel: CancellationToken,
@@ -79,8 +83,10 @@ pub async fn forward_device_port(
         ForwardTarget::Tcp(target) => {
             forward_device_port_tcp(
                 host_name,
+                server_url,
                 token,
                 device_short_id,
+                device_object_id,
                 target,
                 trust_invalid_server_cert,
                 cancel,
@@ -90,8 +96,10 @@ pub async fn forward_device_port(
         ForwardTarget::Udp(target) => {
             forward_device_port_udp(
                 host_name,
+                server_url,
                 token,
                 device_short_id,
+                device_object_id,
                 target,
                 trust_invalid_server_cert,
                 cancel,
@@ -101,8 +109,10 @@ pub async fn forward_device_port(
         ForwardTarget::Socket(target) => {
             forward_device_socket(
                 host_name,
+                server_url,
                 token,
                 device_short_id,
+                device_object_id,
                 target,
                 trust_invalid_server_cert,
                 cancel,
@@ -118,8 +128,10 @@ pub async fn forward_device_port(
 
 async fn forward_device_port_tcp(
     host_name: &str,
+    server_url: &str,
     token: &str,
     device_short_id: &str,
+    device_object_id: &str,
     forward_spec: &TcpTarget,
     trust_invalid_server_cert: bool,
     cancel: CancellationToken,
@@ -131,14 +143,25 @@ async fn forward_device_port_tcp(
     let listener = TcpListener::bind(("127.0.0.1", forward_spec.local_port)).await?;
     let remote_host = forward_spec.remote_host.clone();
 
-    debug!("Connecting to QUIC server...");
-    let (_endpoint, conn) =
-        connect_quic_only(host_name, token, device_short_id, trust_invalid_server_cert).await?;
-    debug!("QUIC connection established, entering accept loop");
+    debug!("Connecting to device (iroh-preferred)...");
+    let conn = connect_device(
+        host_name,
+        server_url,
+        device_short_id,
+        device_object_id,
+        token,
+        trust_invalid_server_cert,
+    )
+    .await?;
+    debug!("Connection established via {}, entering accept loop", conn.transport());
 
     println!(
-        "TCP forward: 127.0.0.1:{} → {}/{}:{}",
-        &forward_spec.local_port, device_short_id, remote_host, &forward_spec.remote_port
+        "TCP forward: 127.0.0.1:{} → {}/{}:{} ({})",
+        &forward_spec.local_port,
+        device_short_id,
+        remote_host,
+        &forward_spec.remote_port,
+        conn.transport()
     );
     loop {
         tokio::select! {
@@ -146,10 +169,7 @@ async fn forward_device_port_tcp(
                 let (mut local_stream, addr) = accept_result?;
                 info!("New local TCP connection from {addr}");
                 let stream_type = forward_spec.to_stream_type(token);
-                let mut quic_io = open_quic_stream(
-                    &conn,
-                    stream_type,
-                ).await?;
+                let mut quic_io = conn.open_stream(stream_type).await?;
 
                 tokio::spawn(async move {
                     let res = io::copy_bidirectional(&mut local_stream, &mut quic_io).await;
@@ -162,10 +182,7 @@ async fn forward_device_port_tcp(
                 });
             }
             reason = conn.closed() => {
-                warn!("Connection closed: {:?}", reason);
-                if let Some(close_reason) = conn.close_reason() {
-                    warn!("Close reason: {:?}", close_reason);
-                }
+                warn!("Connection closed: {reason}");
                 break;
             }
 
@@ -181,18 +198,29 @@ async fn forward_device_port_tcp(
 
 async fn forward_device_port_udp(
     host_name: &str,
+    server_url: &str,
     token: &str,
     device_short_id: &str,
+    device_object_id: &str,
     forward_spec: &UdpTarget,
     trust_invalid_server_cert: bool,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let (_endpoint, conn) =
-        connect_quic_only(host_name, token, device_short_id, trust_invalid_server_cert).await?;
+    let conn = Arc::new(
+        connect_device(
+            host_name,
+            server_url,
+            device_short_id,
+            device_object_id,
+            token,
+            trust_invalid_server_cert,
+        )
+        .await?,
+    );
 
-    // Send StreamType::Forward over a QUIC stream
+    // Open the control stream to obtain the channel id from the runtime.
     let stream_type = forward_spec.to_stream_type(token);
-    let mut quic_io = open_quic_stream(&conn, stream_type).await?;
+    let mut quic_io = conn.open_stream(stream_type).await?;
 
     // === Read channel_id assigned by the runtime ===
     let mut id_buf = [0u8; 4];
@@ -205,21 +233,22 @@ async fn forward_device_port_udp(
     quic_io.send.finish()?;
 
     println!(
-        "UDP forward: 127.0.0.1:{} → {} {}:{}",
+        "UDP forward: 127.0.0.1:{} → {} {}:{} ({})",
         &forward_spec.local_port,
         device_short_id,
         &forward_spec.remote_host,
-        &forward_spec.remote_port
+        &forward_spec.remote_port,
+        conn.transport()
     );
 
-    // Now switch to datagram forwarding
-    udp_local_datagram_forward(forward_spec.local_port, channel_id, conn.clone(), cancel).await
+    // Now switch to datagram forwarding over the chosen transport.
+    udp_local_datagram_forward(forward_spec.local_port, channel_id, conn, cancel).await
 }
 
 pub async fn udp_local_datagram_forward(
     local_port: u16,
     channel_id: u32,
-    conn: quinn::Connection,
+    conn: Arc<DeviceConnection>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let sock = Arc::new(UdpSocket::bind(("0.0.0.0", local_port)).await?);
@@ -302,7 +331,7 @@ pub async fn udp_local_datagram_forward(
     let conn_cl2 = conn.clone();
     tokio::select! {
         _ = conn_cl2.closed() => {
-            warn!("CLI QUIC connection closed — stopping UDP forward");
+            warn!("CLI connection closed — stopping UDP forward");
         }
 
         _ = udp_to_quic => {}
@@ -310,7 +339,7 @@ pub async fn udp_local_datagram_forward(
 
         _ = cancel.cancelled() => {
             info!("CLI shutdown requested — closing UDP forward");
-            let _ = conn.close(0u32.into(), b"shutdown");
+            conn.close(b"shutdown");
         }
     }
 
@@ -319,8 +348,10 @@ pub async fn udp_local_datagram_forward(
 
 async fn forward_device_socket(
     host_name: &str,
+    server_url: &str,
     token: &str,
     device_short_id: &str,
+    device_object_id: &str,
     target: &SocketTarget,
     trust_invalid_server_cert: bool,
     cancel: CancellationToken,
@@ -333,13 +364,23 @@ async fn forward_device_socket(
     }
 
     let listener = UnixListener::bind(local_path)?;
-    println!(
-        "Socket forward: local {} → {} {}",
-        local_path, device_short_id, target.remote_path
-    );
 
-    let (_endpoint, conn) =
-        connect_quic_only(host_name, token, device_short_id, trust_invalid_server_cert).await?;
+    let conn = connect_device(
+        host_name,
+        server_url,
+        device_short_id,
+        device_object_id,
+        token,
+        trust_invalid_server_cert,
+    )
+    .await?;
+    println!(
+        "Socket forward: local {} → {} {} ({})",
+        local_path,
+        device_short_id,
+        target.remote_path,
+        conn.transport()
+    );
 
     loop {
         tokio::select! {
@@ -347,7 +388,7 @@ async fn forward_device_socket(
                 info!("New UNIX socket connection: {}", local_path);
 
                 let stream_type = target.to_stream_type(token);
-                let mut quic_io = open_quic_stream(&conn, stream_type).await?;
+                let mut quic_io = conn.open_stream(stream_type).await?;
 
                 tokio::spawn(async move {
                     let res = io::copy_bidirectional(&mut local_stream, &mut quic_io).await;
@@ -361,7 +402,7 @@ async fn forward_device_socket(
             }
 
             reason = conn.closed() => {
-                warn!("Connection closed: {:?}", reason);
+                warn!("Connection closed: {reason}");
                 break;
             }
 

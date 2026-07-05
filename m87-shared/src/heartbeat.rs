@@ -49,6 +49,11 @@ pub struct HeartbeatResponse {
     /// Whether the server-side relay understands iroh signalling.
     #[serde(default)]
     pub iroh_supported: bool,
+    /// base64 Ed25519 public key the server signs iroh connection tickets with.
+    /// The device caches this and uses it to verify tickets that CLIs present
+    /// on direct iroh connections. `None` from servers that predate the feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iroh_ticket_pubkey: Option<String>,
 }
 
 #[cfg(test)]

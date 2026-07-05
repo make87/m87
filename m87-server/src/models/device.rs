@@ -353,6 +353,7 @@ impl DeviceDoc {
                 lifecycle_updates: pending_updates.clone(),
                 pending_job_runs: pending_job_runs.clone(),
                 iroh_supported: false,
+                iroh_ticket_pubkey: None,
             });
         }
 
@@ -393,6 +394,7 @@ impl DeviceDoc {
             lifecycle_updates: pending_updates,
             pending_job_runs,
             iroh_supported: false,
+            iroh_ticket_pubkey: None,
         };
         Ok(resp)
     }

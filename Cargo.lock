@@ -3530,6 +3530,9 @@ dependencies = [
 name = "m87-shared"
 version = "0.0.0-dev0"
 dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek 2.2.0",
+ "getrandom 0.2.16",
  "hex",
  "serde",
  "serde_json",

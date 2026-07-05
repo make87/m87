@@ -1,4 +1,4 @@
-use crate::streams::quic::open_quic_io;
+use crate::streams::quic::open_device_io;
 use crate::streams::stream_type::StreamType;
 use crate::util::shutdown::SHUTDOWN;
 use crate::{auth::AuthManager, config::Config, devices};
@@ -22,10 +22,12 @@ pub async fn run_shell(device: &str) -> Result<()> {
         term,
     };
     tracing::info!("Connecting to device.");
-    let (_, io) = open_quic_io(
+    let (_conn, io) = open_device_io(
         &resolved.host,
+        &resolved.url,
         &token,
         &resolved.short_id,
+        &resolved.id,
         stream_type,
         config.trust_invalid_server_cert,
     )

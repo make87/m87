@@ -16,6 +16,9 @@ use russh::client::{Config as ClientConfig, Handler};
 use russh_sftp::client::SftpSession;
 
 use crate::devices;
+// SFTP keeps the stream inside a long-lived russh session that outlives this
+// module's functions, so it stays on the always-available relay path rather
+// than the iroh connection (whose endpoint must be held alive by the caller).
 use crate::streams::quic::open_quic_io;
 use crate::streams::stream_type::StreamType;
 use crate::util::shutdown::SHUTDOWN;
