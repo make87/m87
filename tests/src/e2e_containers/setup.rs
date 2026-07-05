@@ -126,8 +126,32 @@ async fn build_e2e_image(
     std::fs::copy(workspace_root.join(dockerfile_rel), ctx_path.join("Dockerfile"))
         .map_err(|e| format!("Failed to stage {} into build context: {}", dockerfile_rel, e))?;
 
+    // `docker buildx build --load` so we can attach a layer cache. The base
+    // image + apt layer are stable across runs; only the final `COPY <binary>`
+    // layer changes, so caching skips the ~40s apt install every run. GitHub's
+    // Actions cache backend (`type=gha`) is only available inside a GHA runner
+    // with a `docker-container` buildx builder (set up by setup-buildx-action),
+    // so we add the cache flags only there; locally it's a plain buildx build.
+    let mut args: Vec<String> = vec![
+        "buildx".into(),
+        "build".into(),
+        "--load".into(),
+        "-t".into(),
+        image.into(),
+    ];
+    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+        let scope = image.replace(':', "-");
+        args.push(format!("--cache-from=type=gha,scope={scope}"));
+        // ignore-error keeps a cache-export hiccup (e.g. missing token) from
+        // failing the whole image build.
+        args.push(format!(
+            "--cache-to=type=gha,scope={scope},mode=max,ignore-error=true"
+        ));
+    }
+    args.push(".".into());
+
     let status = Command::new("docker")
-        .args(["build", "-t", image, "."])
+        .args(&args)
         .current_dir(ctx_path)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
