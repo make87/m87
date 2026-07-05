@@ -5,11 +5,12 @@ edition = "2021"
 
 [features]
 default = []
-e2e = []
+e2e = ["dep:mongodb"]
 
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "sync"] }
 testcontainers = "0.26.0"
+mongodb = { version = "3", optional = true }
 reqwest = { version = "0.12.25", default-features = false, features = ["rustls-tls"] }
 uuid = { version = "1", features = ["v4"] }
 regex = "1"

@@ -775,9 +775,14 @@ impl DeployReportDoc {
         }
 
         // 2) Query Mongo with a cursor; stream docs and update snapshot in place.
-        // Sort by report_time ascending so “latest” comparisons are cheap and predictable.
+        // Sort by `created_at` (receive time) ascending so the in-place fold
+        // applies reports in chronological order and "latest wins". NOTE: the
+        // old sort key `report_time` is not a top-level field on the report doc
+        // (it lives under `kind.data.report_time`), so it sorted on a missing
+        // field — an unindexable, blocking in-memory sort. `created_at` is a
+        // real field backed by the {device_id, revision_id, created_at} index.
         let options = FindOptions::builder()
-            .sort(doc! { "report_time": 1i32 })
+            .sort(doc! { "created_at": 1i32 })
             .batch_size(Some(256))
             .build();
 

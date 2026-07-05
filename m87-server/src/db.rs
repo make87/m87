@@ -25,6 +25,10 @@ impl Mongo {
     pub async fn connect(url: &str, db_name: &str) -> ServerResult<Self> {
         let mut opts = ClientOptions::parse(url).await?;
         opts.app_name = Some("nexus".into());
+        // The default max pool size (10) is easily saturated by the heartbeat
+        // ingestion path (several sequential DB ops per report). Raise it so a
+        // burst of reports can't starve every other request of a connection.
+        opts.max_pool_size = Some(50);
         let client = Client::with_options(opts)?;
         Ok(Self {
             client,
@@ -238,6 +242,14 @@ impl Mongo {
             )
             .await?;
 
+        // NON-partial index on {device_id, revision_id, created_at, _id}. Serves
+        // both the RunState-filtered failures aggregation AND the full-history
+        // snapshot / RunState-list reads, which filter {device_id, revision_id}
+        // WITHOUT a `kind.type` predicate and sort on `created_at`. This used to
+        // be partial on `kind.type: "RunState"`, which the unfiltered queries
+        // could not use — so they did a collection scan + blocking in-memory
+        // sort. (Must be a single index: two indexes with identical keys but
+        // different options are rejected by MongoDB.)
         self.deploy_reports()
             .create_index(
                 IndexModel::builder()
@@ -247,13 +259,27 @@ impl Mongo {
                         "created_at": -1,
                         "_id": -1
                     })
-                    .options(
-                        IndexOptions::builder()
-                            .partial_filter_expression(doc! { "kind.type": "RunState" })
-                            .build(),
-                    )
                     .build(),
             )
+            .await?;
+
+        // `get_by_revision_id` filters on `revision.id` alone.
+        self.deploy_revisions()
+            .create_index(IndexModel::builder().keys(doc! { "revision.id": 1 }).build())
+            .await?;
+
+        // `AuditLogDoc::list_for_device` filters `device_id` and sorts `timestamp` desc.
+        self.audit_logs()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "device_id": 1, "timestamp": -1 })
+                    .build(),
+            )
+            .await?;
+
+        // User lookups by email (`{email}` and `{email: {$in}}`).
+        self.users()
+            .create_index(IndexModel::builder().keys(doc! { "email": 1 }).build())
             .await?;
 
         self.current_run_states()
