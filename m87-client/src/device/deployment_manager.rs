@@ -189,7 +189,7 @@ impl ObserveKind {
 
     fn decide_on_error(
         &self,
-        _st: &LocalRunState,
+        st: &LocalRunState,
         hooks: &ObserveHooks,
         consecutive: u32,
     ) -> ObserveDecision {
@@ -200,9 +200,25 @@ impl ObserveKind {
         } else {
             consecutive / fails_after
         };
+        // Edge-trigger the report: only emit on a healthy -> unhealthy
+        // transition, not on every `fails_after`-th consecutive failure. Once
+        // we've reported the unit unhealthy we stay silent until it recovers
+        // (the success path is likewise edge-triggered). Without this, a
+        // persistently-failing observe — e.g. an error line stuck inside a
+        // `logs --tail | grep` health check — re-enqueues a fresh RunState
+        // every `fails_after * every` seconds for as long as the line stays in
+        // the window. Because each RunState carries a unique `report_time` +
+        // `log_tail`, the `enqueue_event` content-hash dedup can't collapse
+        // them, so the pending-event queue grows unbounded and the 40/s drain
+        // pins a core. `is_failure`/`consecutive` are left untouched so the
+        // restart policy still fires on its own cadence.
+        let previously_healthy = match self {
+            ObserveKind::Liveness => !st.reported_alive_once || st.last_alive,
+            ObserveKind::Health => !st.reported_health_once || st.last_health,
+        };
         ObserveDecision {
             is_failure,
-            needs_send: is_failure,
+            needs_send: is_failure && previously_healthy,
             consecutive: consecutive_out,
         }
     }
@@ -2375,6 +2391,130 @@ mod tests {
         .await?;
         mgr.reconcile_dirty().await?;
         assert!(!marker.exists(), "stop should have run");
+        Ok(())
+    }
+
+    // ── Observe reporting: edge-trigger / anti-spam ──────────────────────────
+    //
+    // Regression guard for the heartbeat-spam + CPU-spike bug: a persistently
+    // unhealthy observe (e.g. an error line stuck in a `logs | grep` health
+    // check) must report the unhealthy state ONCE per healthy->unhealthy
+    // transition — not on every failing poll. Before the fix the failure
+    // branch of `decide_on_error` was level-triggered (`needs_send = is_failure`),
+    // so it re-enqueued a fresh RunState every `fails_after`-th failure forever;
+    // each carried a unique `report_time`/`log_tail` so the content-hash dedup
+    // in `enqueue_event` never collapsed them and the pending queue grew
+    // without bound.
+
+    fn failing_health_hooks(fails_after: Option<u32>) -> ObserveHooks {
+        ObserveHooks {
+            every: Duration::from_secs(10),
+            observe: sh("exit 1"),
+            observe_timeout: None,
+            record: None,
+            record_timeout: None,
+            report: None,
+            report_timeout: None,
+            fails_after,
+        }
+    }
+
+    fn healthy_health_hooks(fails_after: Option<u32>) -> ObserveHooks {
+        ObserveHooks {
+            observe: sh("true"),
+            ..failing_health_hooks(fails_after)
+        }
+    }
+
+    /// Drain every pending event and return the RunState reports in order.
+    async fn drain_runstates(mgr: &DeploymentManager) -> Vec<RunState> {
+        let mut out = Vec::new();
+        while let Some(ev) = claim_next_event(Some(mgr.root_dir.clone())).await.unwrap() {
+            if let DeployReportKind::RunState(rs) = ev.report {
+                out.push(rs);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn health_persistently_unhealthy_reports_once_not_per_poll() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let spec = mk_observer_spec("obs");
+        let hooks = failing_health_hooks(Some(1));
+
+        // Simulate 5 consecutive failing health polls of the same service.
+        for _ in 0..5 {
+            mgr.run_observe(ObserveKind::Health, "run1", "r1", &spec, &hooks)
+                .await?;
+        }
+
+        let states = drain_runstates(&mgr).await;
+        let unhealthy = states.iter().filter(|s| s.healthy == Some(false)).count();
+        assert_eq!(
+            unhealthy, 1,
+            "a persistently unhealthy service must report exactly once, \
+             not once per poll (was {unhealthy}, i.e. one per failing poll pre-fix)"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn health_reports_once_across_fails_after_threshold() -> Result<()> {
+        // Mirrors the default compose template (`fails_after: 3`): the state
+        // crosses the threshold at poll 3, 6, 9. Pre-fix that emitted 3 reports;
+        // post-fix only the first (the healthy->unhealthy transition) is sent.
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let spec = mk_observer_spec("obs");
+        let hooks = failing_health_hooks(Some(3));
+
+        for _ in 0..9 {
+            mgr.run_observe(ObserveKind::Health, "run1", "r1", &spec, &hooks)
+                .await?;
+        }
+
+        let states = drain_runstates(&mgr).await;
+        let unhealthy = states.iter().filter(|s| s.healthy == Some(false)).count();
+        assert_eq!(
+            unhealthy, 1,
+            "unhealthy state must be reported once at the threshold crossing, \
+             not on every `fails_after`-th failure (was {unhealthy} pre-fix)"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn health_recovery_rearms_unhealthy_reporting() -> Result<()> {
+        // The edge-trigger must work in both directions: unhealthy -> healthy
+        // re-arms the reporter so the next healthy -> unhealthy transition is
+        // reported again. Otherwise we'd go silent forever after the first flap.
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let spec = mk_observer_spec("obs");
+        let failing = failing_health_hooks(Some(1));
+        let ok = healthy_health_hooks(Some(1));
+
+        // unhealthy burst -> 1 unhealthy report
+        for _ in 0..3 {
+            mgr.run_observe(ObserveKind::Health, "run1", "r1", &spec, &failing)
+                .await?;
+        }
+        // recover -> 1 healthy report
+        mgr.run_observe(ObserveKind::Health, "run1", "r1", &spec, &ok)
+            .await?;
+        // unhealthy again -> another unhealthy report
+        for _ in 0..3 {
+            mgr.run_observe(ObserveKind::Health, "run1", "r1", &spec, &failing)
+                .await?;
+        }
+
+        let states = drain_runstates(&mgr).await;
+        let unhealthy = states.iter().filter(|s| s.healthy == Some(false)).count();
+        let healthy = states.iter().filter(|s| s.healthy == Some(true)).count();
+        assert_eq!(unhealthy, 2, "each unhealthy transition should report once");
+        assert_eq!(healthy, 1, "the recovery should report once");
         Ok(())
     }
 }
