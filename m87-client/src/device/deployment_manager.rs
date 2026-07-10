@@ -612,11 +612,74 @@ impl DeploymentManager {
     // start – the main supervisor loop
     // -----------------------------------------------------------------------
 
+    /// One-time cleanup of pre-0.8 (0.7.x) deployment workspaces.
+    ///
+    /// 0.7.x ran compose services under `<root>/jobs/<id>` (persistent) and
+    /// `<root>/tmp/jobs/<hash>` (ephemeral), so a unit's docker-compose project
+    /// name was that directory's basename. 0.8.x instead uses
+    /// `<root>/workspaces/<id>`, so after an upgrade the containers 0.7.x started
+    /// are orphaned under project names the new client never references: they
+    /// keep running (and docker's restart policy resurrects them on reboot),
+    /// fighting the 0.8.x containers for resources.
+    ///
+    /// These two directories are NEVER created by 0.8.x, so reaping them is
+    /// safe: for each leftover workspace we run `docker compose down` from inside
+    /// it (using the compose file 0.7.x materialized there, hence the same
+    /// project name it created the containers with), then remove the directory.
+    /// Best-effort throughout — a device with no leftovers is a no-op, and after
+    /// the first successful pass the directories are gone so it stays a no-op.
+    pub(crate) async fn reap_legacy_workspaces(&self) {
+        for sub in ["jobs", "tmp/jobs"] {
+            let base = self.root_dir.join(sub);
+            let mut rd = match tokio::fs::read_dir(&base).await {
+                Ok(rd) => rd,
+                Err(_) => continue, // directory absent → nothing to reap
+            };
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let path = entry.path();
+                let is_dir = entry
+                    .file_type()
+                    .await
+                    .map(|t| t.is_dir())
+                    .unwrap_or(false);
+                if !is_dir {
+                    continue;
+                }
+                tracing::warn!(
+                    "reaping pre-0.8 deployment workspace {} (orphaned by the 0.7.x→0.8.x upgrade)",
+                    path.display()
+                );
+                // Tear the old compose project down. Running `down` from the
+                // leftover workspace picks up its materialized compose file and
+                // the same (basename-derived) project name 0.7.x used, so this
+                // targets exactly those containers. Best-effort: no compose file,
+                // no docker, or an already-gone project all no-op.
+                let cmd = format!(
+                    "cd '{}' && docker compose down --remove-orphans",
+                    path.display()
+                );
+                let _ = tokio::process::Command::new("/bin/sh")
+                    .arg("-lc")
+                    .arg(&cmd)
+                    .output()
+                    .await;
+                let _ = tokio::fs::remove_dir_all(&path).await;
+            }
+            // Remove the now-empty legacy parent dir so the reap is a clean no-op next boot.
+            let _ = tokio::fs::remove_dir(&base).await;
+        }
+    }
+
     pub fn start(self: Arc<Self>) {
         tokio::spawn(async move {
             let mut next_health: HashMap<String, Instant> = HashMap::new();
             let mut next_liveness: HashMap<String, Instant> = HashMap::new();
             let tick = Duration::from_millis(250);
+
+            // Reap 0.7.x-era orphaned compose projects before reconciling, so an
+            // upgraded device doesn't run duplicate containers fighting for
+            // resources. Safe/no-op on a device that was always on 0.8.x.
+            self.reap_legacy_workspaces().await;
 
             let _ = self.set_dirty_services().await;
 
@@ -1859,6 +1922,43 @@ mod tests {
     // (reconcile_dirty), so a FAILING stop step is silently discarded: reconcile
     // returns Ok and clears the dirty flag, leaving a half-torn-down unit with no
     // error surfaced and no retry. A failing stop must not be swallowed.
+    // Reaps 0.7.x-era leftover workspaces (which orphaned containers on upgrade)
+    // while leaving 0.8.x's own `workspaces/` untouched.
+    #[tokio::test]
+    async fn reaps_legacy_workspaces_but_not_new_ones() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let root = mgr.root_dir.clone();
+
+        // 0.7.x leftovers: persistent `jobs/<id>` and ephemeral `tmp/jobs/<hash>`.
+        std::fs::create_dir_all(root.join("jobs/old-svc"))?;
+        std::fs::write(
+            root.join("jobs/old-svc/docker-compose.yml"),
+            "services: {}\n",
+        )?;
+        std::fs::create_dir_all(root.join("tmp/jobs/deadbeefcafef00d"))?;
+
+        // 0.8.x's own workspace — must survive the reap.
+        std::fs::create_dir_all(root.join("workspaces/live-svc"))?;
+        std::fs::write(root.join("workspaces/live-svc/marker"), "keep")?;
+
+        mgr.reap_legacy_workspaces().await;
+
+        assert!(
+            !root.join("jobs").exists(),
+            "legacy jobs/ dir must be reaped"
+        );
+        assert!(
+            !root.join("tmp/jobs").exists(),
+            "legacy tmp/jobs/ dir must be reaped"
+        );
+        assert!(
+            root.join("workspaces/live-svc/marker").exists(),
+            "0.8.x workspace must be left untouched"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn failed_stop_step_is_not_silently_swallowed() -> Result<()> {
         let td = TempDir::new()?;
