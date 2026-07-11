@@ -106,9 +106,10 @@ jobs:
 
       # Tests isolate by a per-run_id prefix on every container name and address
       # each other by those names / by iroh node-id, so they run concurrently.
-      # 4 threads => up to 4 container stacks at once on the 4-vCPU/16GB runner.
+      # 2 stacks at a time on the 4-vCPU/16GB runner: 4 was flaky (server-readiness
+      # races + iroh P2P drops under CPU contention), 2 keeps headroom.
       - name: Run E2E tests
-        run: cargo test --manifest-path tests/Cargo.toml --features e2e -- --test-threads=4
+        run: cargo test --manifest-path tests/Cargo.toml --features e2e -- --test-threads=2
 
       # Cleanup is scoped by the `e2e-*` name prefix that tests apply when
       # creating containers (see tests/src/e2e_containers/containers.rs).

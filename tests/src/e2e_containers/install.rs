@@ -283,8 +283,16 @@ impl InstallTestInfra {
         )
         .await?;
 
-        // Wait for server to start
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // Poll until the server actually serves (a fixed sleep raced under CPU
+        // contention when running multiple stacks in parallel).
+        exec_shell(
+            &self.container,
+            "for i in $(seq 1 50); do \
+               curl -fsS -o /dev/null http://localhost:8000/install.sh && exit 0; \
+               sleep 0.2; \
+             done; echo 'http server did not become ready' >&2; exit 1",
+        )
+        .await?;
 
         Ok(())
     }

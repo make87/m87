@@ -18,7 +18,7 @@ pub async fn run_logs(device: &str) -> Result<()> {
     let stream_type = StreamType::Logs {
         token: token.to_string(),
     };
-    let (_conn, mut io) = open_device_io(
+    let (conn, mut io) = open_device_io(
         &resolved.host,
         &resolved.url,
         &token,
@@ -77,6 +77,11 @@ pub async fn run_logs(device: &str) -> Result<()> {
         _ = stdin_rx.recv() => {},
         _ = SHUTDOWN.cancelled() => {},
     }
+
+    // Stop reading, then tear the connection down gracefully so iroh doesn't log
+    // an "Aborting ungracefully" endpoint-drop error on exit.
+    read_task.abort();
+    conn.close_gracefully(b"logs closed").await;
 
     println!("\nLogs stream closed.");
     Ok(())

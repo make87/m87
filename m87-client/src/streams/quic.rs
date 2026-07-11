@@ -386,6 +386,24 @@ impl DeviceConnection {
             DeviceConnection::Iroh { conn, .. } => conn.close(0u32.into(), reason),
         }
     }
+
+    /// Gracefully close the connection and, for iroh, its endpoint too.
+    ///
+    /// Without the explicit `endpoint.close().await`, dropping an iroh
+    /// connection makes iroh log `Endpoint dropped without calling
+    /// Endpoint::close. Aborting ungracefully` and emit a spurious
+    /// connection-closed error on teardown — noisy for users, and it can leak
+    /// into captured command output. Call this when a command is done with the
+    /// connection (streams already finished).
+    pub async fn close_gracefully(self, reason: &[u8]) {
+        match self {
+            DeviceConnection::Relay { conn, .. } => conn.close(0u32.into(), reason),
+            DeviceConnection::Iroh { conn, _endpoint } => {
+                conn.close(0u32.into(), reason);
+                _endpoint.close().await;
+            }
+        }
+    }
 }
 
 /// Establish a connection to a device, preferring a direct iroh P2P connection
