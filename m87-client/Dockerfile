@@ -43,12 +43,14 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
       export TARGET="x86_64-unknown-linux-musl"; \
     fi && \
     if [ "$BUILD_PROFILE" = "release" ]; then \
-      cargo build --release --target $TARGET --package m87-client --features runtime,cli; \
+      cargo build --profile release-small --target $TARGET --package m87-client --features runtime,cli; \
+      OUT_DIR="release-small"; \
     else \
       cargo build --target $TARGET --package m87-client --features runtime,cli; \
+      OUT_DIR="debug"; \
     fi && \
     mkdir -p /workspace/out && \
-    cp /workspace/target/$TARGET/${BUILD_PROFILE}/m87 /workspace/out/m87
+    cp /workspace/target/$TARGET/$OUT_DIR/m87 /workspace/out/m87
 
 # ===========================
 # Runtime Stage (for e2e tests and container deployments)

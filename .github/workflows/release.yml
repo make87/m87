@@ -343,6 +343,19 @@ jobs:
           mkdir -p release-assets
           # This will copy binaries, install script (later), AND both THIRDPARTY_LICENSES.html files
           find artifacts -type f -exec cp {} release-assets/ \;
+
+          # Additionally publish a gzip-compressed copy of each CLIENT binary
+          # (~2.5x smaller — matters for LTE edge devices). This is ADDITIVE: the
+          # raw `m87-<target>` asset stays so older self-updaters (and 0.7.x)
+          # keep working, while the 0.8.2+ client prefers the `.gz`. Server
+          # binaries are not self-updated over the wire, so they are skipped.
+          for f in release-assets/m87-*; do
+            case "$f" in
+              *m87-server-*|*.gz|*.html|*SHA256SUMS*) continue ;;
+            esac
+            gzip -9 -k "$f"   # -k keeps the raw file alongside the .gz
+            echo "compressed $f -> $f.gz"
+          done
           ls -lh release-assets/
 
       - name: Add install script to release
