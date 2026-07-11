@@ -2742,6 +2742,7 @@ dependencies = [
  "dashmap",
  "dirs",
  "filetime",
+ "flate2",
  "futures",
  "homedir",
  "libc",

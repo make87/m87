@@ -63,14 +63,19 @@ quinn = "0.11"
 quinn-proto = "0.11"
 
 [profile.release]
-# Optimize for SIZE — the client ships to LTE-connected edge devices where the
-# self-update download time dominates, and the workload is I/O-bound (async
-# supervisor / relay), so trading a little codegen speed for a smaller binary is
-# the right call for both the device and the server.
-opt-level = "z"            # Optimize for size (was 3); biggest lever for the LTE download
+# Server + default: optimize for performance.
+opt-level = 3              # Maximum optimization
 lto = "fat"                # Full link-time optimization for better dead code elimination
 codegen-units = 1          # Better optimization at the cost of compile time
 strip = true               # Strip debug symbols from binary
-# NOTE: kept panic = "unwind" (default) on purpose — panic = "abort" would shave
-# a bit more but makes a panic in any spawned task abort the whole process, which
-# is unsafe for the server's per-request task isolation.
+
+# Client-only size profile. The device binary ships to LTE-connected edge
+# devices where the self-update download time dominates, so we trade a little
+# codegen speed for a much smaller binary (opt-level "z"). Built via
+# `--profile release-small` (see m87-client/Dockerfile). The server keeps the
+# perf-tuned [profile.release] above. Kept panic = "unwind" (default) on purpose
+# — panic = "abort" would shave a bit more but makes a panic in any spawned task
+# abort the whole process.
+[profile.release-small]
+inherits = "release"
+opt-level = "z"            # ~20 MB -> ~12.8 MB vs opt-level 3

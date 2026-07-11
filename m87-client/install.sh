@@ -255,30 +255,44 @@ main() {
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' EXIT
 
-    # Step 3: Download binary
+    # Step 3+4: Download binary (preferring the smaller gzip asset) + verify.
     binary_name="${BINARY_NAME}-${TARGET}"
-    download_url="${DOWNLOAD_BASE_URL}/v${VERSION}/${binary_name}"
     binary_path="$tmp_dir/$binary_name"
+    gz_name="${binary_name}.gz"
 
-    info "Downloading $binary_name..."
-    download "$download_url" "$binary_path"
-    success "Downloaded binary"
-
-    # Step 4: Download and verify checksum
-    info "Verifying checksum..."
+    # Fetch the checksum list up front so we can verify whichever asset we pull.
     checksums_url="${DOWNLOAD_BASE_URL}/v${VERSION}/SHA256SUMS"
     checksums_file="$tmp_dir/SHA256SUMS"
+    download "$checksums_url" "$checksums_file" 2>/dev/null || true
 
-    if download "$checksums_url" "$checksums_file" 2>/dev/null; then
-        expected_checksum=$(grep "$binary_name" "$checksums_file" | awk '{print $1}')
-
-        if [ -n "$expected_checksum" ]; then
-            verify_checksum "$binary_path" "$expected_checksum"
-        else
-            warning "Checksum not found in SHA256SUMS, skipping verification"
+    # Exact-match a filename in SHA256SUMS (both `m87-<t>` and `m87-<t>.gz` are
+    # listed, so a substring match would be ambiguous) and verify.
+    verify_named() {
+        _file="$1"; _name="$2"
+        if [ ! -s "$checksums_file" ]; then
+            warning "Could not download SHA256SUMS, skipping verification"
+            return
         fi
+        _sum=$(awk -v n="$_name" '$2 == n {print $1}' "$checksums_file" | head -n1)
+        if [ -n "$_sum" ]; then
+            verify_checksum "$_file" "$_sum"
+        else
+            warning "Checksum for $_name not found in SHA256SUMS, skipping verification"
+        fi
+    }
+
+    if command -v gunzip >/dev/null 2>&1 && \
+       download "${DOWNLOAD_BASE_URL}/v${VERSION}/${gz_name}" "$tmp_dir/$gz_name" 2>/dev/null; then
+        info "Downloaded $gz_name (compressed)"
+        verify_named "$tmp_dir/$gz_name" "$gz_name"   # verify the .gz, then decompress
+        gunzip -c "$tmp_dir/$gz_name" > "$binary_path"
+        success "Downloaded and decompressed binary"
     else
-        warning "Could not download SHA256SUMS, skipping verification"
+        # Fall back to the raw binary (older releases, or no gunzip available).
+        info "Downloading $binary_name..."
+        download "${DOWNLOAD_BASE_URL}/v${VERSION}/${binary_name}" "$binary_path"
+        verify_named "$binary_path" "$binary_name"
+        success "Downloaded binary"
     fi
 
     # Step 5: Remove macOS quarantine attribute (if on macOS)
