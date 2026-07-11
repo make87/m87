@@ -65,41 +65,63 @@ pub async fn update(interactive: bool) -> Result<bool> {
         return Ok(false);
     }
 
-    // Find our asset in the release
-    let asset = release
+    // Prefer the gzip-compressed asset (`<name>.gz`, ~2.5x smaller — matters on
+    // LTE), falling back to the raw binary for releases that only publish it.
+    // This is intentionally additive: releases keep publishing the raw asset so
+    // older clients still work, and this client works against either.
+    let gz_name = format!("{asset_name}.gz");
+    let (asset, is_gz) = release
         .assets
         .iter()
-        .find(|a| a.name == asset_name)
-        .ok_or_else(|| anyhow!("Asset '{}' not found in release", asset_name))?;
+        .find(|a| a.name == gz_name)
+        .map(|a| (a, true))
+        .or_else(|| release.assets.iter().find(|a| a.name == asset_name).map(|a| (a, false)))
+        .ok_or_else(|| {
+            anyhow!("Neither '{}' nor '{}' found in release", gz_name, asset_name)
+        })?;
 
     if interactive {
         println!("New release found: v{} → v{}", current_version, new_version);
-        println!("Downloading {}...", asset_name);
+        println!("Downloading {}...", asset.name);
     }
 
     // Create temp directory for download
     let tmp_dir = self_update::TempDir::new()?;
-    let tmp_path = tmp_dir.path().join(asset_name);
+    let download_path = tmp_dir.path().join(&asset.name);
 
-    // Download the raw binary directly (no archive extraction needed)
-    let tmp_file = File::create(&tmp_path)?;
+    let tmp_file = File::create(&download_path)?;
     self_update::Download::from_url(&asset.browser_download_url)
         .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
         .show_progress(interactive)
         .download_to(tmp_file)?;
 
+    // If compressed, let self_update gunzip it (ArchiveKind::Plain + Gz — a bare
+    // single-file .gz, not a tar). It writes the decompressed file into the dir
+    // with the `.gz` extension stripped, i.e. `<asset_name>`.
+    let bin_path = if is_gz {
+        if interactive {
+            println!("Decompressing...");
+        }
+        self_update::Extract::from_source(&download_path)
+            .archive(self_update::ArchiveKind::Plain(Some(self_update::Compression::Gz)))
+            .extract_into(tmp_dir.path())?;
+        tmp_dir.path().join(asset_name)
+    } else {
+        download_path
+    };
+
     // Make executable on Unix
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755))?;
     }
 
     // Replace the current binary
     if interactive {
         println!("Replacing binary...");
     }
-    self_update::self_replace::self_replace(&tmp_path)?;
+    self_update::self_replace::self_replace(&bin_path)?;
 
     if interactive {
         println!("Updated from v{} → v{}", current_version, new_version);
@@ -173,6 +195,31 @@ mod tests {
         let release: GitHubRelease = serde_json::from_str(json).unwrap();
         assert_eq!(release.tag_name, "v0.0.1");
         assert!(release.assets.is_empty());
+    }
+
+    // Verifies our use of self_update's gzip extraction: a bare `<name>.gz`
+    // extracts to `<name>` (extension stripped) with the original bytes. Guards
+    // the ArchiveKind/output-path assumptions the updater relies on.
+    #[test]
+    fn test_self_update_extracts_plain_gz() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+
+        let dir = self_update::TempDir::new().unwrap();
+        let gz = dir.path().join("m87-x86_64-unknown-linux-musl.gz");
+        let payload = b"\x7fELF not-really-a-binary-but-enough-bytes-to-round-trip";
+
+        let mut enc = GzEncoder::new(File::create(&gz).unwrap(), Compression::best());
+        enc.write_all(payload).unwrap();
+        enc.finish().unwrap();
+
+        self_update::Extract::from_source(&gz)
+            .archive(self_update::ArchiveKind::Plain(Some(self_update::Compression::Gz)))
+            .extract_into(dir.path())
+            .unwrap();
+
+        let out = dir.path().join("m87-x86_64-unknown-linux-musl");
+        assert_eq!(std::fs::read(&out).unwrap(), payload);
     }
 
     #[test]

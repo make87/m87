@@ -95,3 +95,8 @@ chrono = "0.4"
 
 # MCP (Model Context Protocol) server
 rmcp = { version = "0.16.0", features = ["server", "macros", "transport-io"] }
+
+[dev-dependencies]
+# Test-only: build a .gz fixture to verify the self-update gzip-extract path.
+# (flate2 is already in the tree via self_update's compression-flate2 feature.)
+flate2 = "1"

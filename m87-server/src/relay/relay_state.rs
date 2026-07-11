@@ -159,11 +159,6 @@ mod tests {
         drop(tunnels_guard);
         let _ = reader.await;
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     // ── set_iroh_addr / get_iroh_addr ──────────────────────────────────────
 
