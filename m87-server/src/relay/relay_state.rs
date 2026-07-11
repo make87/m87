@@ -9,6 +9,7 @@ use tracing::{info, warn};
 pub struct RelayState {
     tunnels: Arc<RwLock<HashMap<String, Connection>>>,
     lost: Arc<RwLock<HashMap<String, ()>>>, // just a set, we don't need Instant
+    iroh_addrs: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl RelayState {
@@ -16,6 +17,7 @@ impl RelayState {
         Self {
             tunnels: Arc::new(RwLock::new(HashMap::new())),
             lost: Arc::new(RwLock::new(HashMap::new())),
+            iroh_addrs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -55,6 +57,10 @@ impl RelayState {
                 // Mark device lost
                 let mut lost = self.lost.write().await;
                 lost.insert(device_short_id.to_string(), ());
+
+                // Clear iroh addr — device is no longer reachable
+                let mut iroh_addrs = self.iroh_addrs.write().await;
+                iroh_addrs.remove(device_short_id);
             } else {
                 warn!(
                     "Skipping removal for device {} because connection ID does not match (stale close event)",
@@ -77,6 +83,18 @@ impl RelayState {
 
         let lost = self.lost.read().await;
         !lost.contains_key(device_short_id)
+    }
+
+    /// Upsert the iroh EndpointAddr (opaque JSON string) for a device.
+    pub async fn set_iroh_addr(&self, device_short_id: &str, addr: String) {
+        let mut iroh_addrs = self.iroh_addrs.write().await;
+        iroh_addrs.insert(device_short_id.to_string(), addr);
+    }
+
+    /// Return the stored iroh EndpointAddr for a device, if any.
+    pub async fn get_iroh_addr(&self, device_short_id: &str) -> Option<String> {
+        let iroh_addrs = self.iroh_addrs.read().await;
+        iroh_addrs.get(device_short_id).cloned()
     }
 
     /// Return active (non-lost) tunnel.
@@ -140,5 +158,79 @@ mod tests {
 
         drop(tunnels_guard);
         let _ = reader.await;
+    }
+
+    // ── set_iroh_addr / get_iroh_addr ──────────────────────────────────────
+
+    /// get_iroh_addr returns None for an unknown device.
+    #[tokio::test]
+    async fn test_get_iroh_addr_unknown_device_returns_none() {
+        let state = RelayState::new();
+        assert_eq!(state.get_iroh_addr("ghost-device").await, None);
+    }
+
+    /// set_iroh_addr then get_iroh_addr returns the stored value.
+    #[tokio::test]
+    async fn test_set_then_get_iroh_addr() {
+        let state = RelayState::new();
+        state
+            .set_iroh_addr("dev1", "{\"direct\":[\"127.0.0.1:4000\"]}".to_string())
+            .await;
+        assert_eq!(
+            state.get_iroh_addr("dev1").await,
+            Some("{\"direct\":[\"127.0.0.1:4000\"]}".to_string())
+        );
+    }
+
+    /// set_iroh_addr is an upsert — calling it twice keeps the latest value.
+    #[tokio::test]
+    async fn test_set_iroh_addr_upserts() {
+        let state = RelayState::new();
+        state.set_iroh_addr("dev1", "addr-v1".to_string()).await;
+        state.set_iroh_addr("dev1", "addr-v2".to_string()).await;
+        assert_eq!(
+            state.get_iroh_addr("dev1").await,
+            Some("addr-v2".to_string())
+        );
+    }
+
+    /// Two different devices store independent values.
+    #[tokio::test]
+    async fn test_iroh_addrs_are_device_isolated() {
+        let state = RelayState::new();
+        state.set_iroh_addr("dev-a", "addr-a".to_string()).await;
+        state.set_iroh_addr("dev-b", "addr-b".to_string()).await;
+
+        assert_eq!(
+            state.get_iroh_addr("dev-a").await,
+            Some("addr-a".to_string())
+        );
+        assert_eq!(
+            state.get_iroh_addr("dev-b").await,
+            Some("addr-b".to_string())
+        );
+
+        // Clearing one device must not affect the other.
+        {
+            let mut addrs = state.iroh_addrs.write().await;
+            addrs.remove("dev-a");
+        }
+        assert_eq!(state.get_iroh_addr("dev-a").await, None);
+        assert_eq!(
+            state.get_iroh_addr("dev-b").await,
+            Some("addr-b".to_string()),
+            "dev-b should be unaffected"
+        );
+    }
+
+    /// RelayState is Clone; clones share the same underlying maps.
+    #[tokio::test]
+    async fn test_relay_state_clone_shares_iroh_addrs() {
+        let state = RelayState::new();
+        let clone = state.clone();
+
+        state.set_iroh_addr("dev1", "addr1".to_string()).await;
+        // The clone should see the same data immediately.
+        assert_eq!(clone.get_iroh_addr("dev1").await, Some("addr1".to_string()));
     }
 }

@@ -356,6 +356,11 @@ async fn run_heartbeat_loop(
                     }
                 };
 
+                // Store iroh addr if device advertised one
+                if let Some(addr) = &req.iroh_node_addr {
+                    state.relay.set_iroh_addr(&device_id, addr.clone()).await;
+                }
+
                 let device_opt = state.db.devices().find_one(doc!{ "short_id": &device_id }).await?;
 
                 let Some(device) = device_opt else {
@@ -363,7 +368,11 @@ async fn run_heartbeat_loop(
                     break;
                 };
 
-                let body = device.handle_heartbeat(claims.clone(), &state.db, req, &state.config).await?;
+                let mut body = device.handle_heartbeat(claims.clone(), &state.db, req, &state.config).await?;
+
+                // Advertise the iroh ticket-signing public key so the device can
+                // verify tickets CLIs present on direct connections.
+                body.iroh_ticket_pubkey = Some(state.iroh_ticket_signer.public_b64());
 
                 info!("sending heartbeat response");
                 match write_msg(&mut send, &body).await {

@@ -9,7 +9,7 @@ use crate::{
     auth::AuthManager,
     config::Config,
     devices,
-    streams::{quic::open_quic_io, stream_type::StreamType},
+    streams::{quic::open_device_io, stream_type::StreamType},
     util::command::current_exe_path,
 };
 
@@ -21,10 +21,12 @@ pub async fn connect_device_ssh(device_name: &str) -> Result<()> {
 
     let token = AuthManager::get_cli_token().await?;
 
-    let (conn, mut quic) = open_quic_io(
+    let (conn, mut quic) = open_device_io(
         &resolved.host,
+        &resolved.url,
         &token,
         &resolved.short_id,
+        &resolved.id,
         StreamType::Ssh {
             token: token.to_string(),
         },

@@ -130,6 +130,35 @@ reason = "Transitive via self_update's S3 XML backend, which m87-client does not
 id = "RUSTSEC-2026-0195" # quick-xml: unbounded NsReader namespace-declaration allocation (mem DoS)
 reason = "Same transitive self_update path as RUSTSEC-2026-0194; m87-client uses the GitHub (JSON) update backend, not the S3 XML backend, so NsReader never parses untrusted XML. Blocked on self_update adopting quick-xml >=0.41."
 
+# --- paste: unmaintained, transitive via iroh's netlink stack ---
+[[advisories.ignore]]
+id = "RUSTSEC-2024-0436" # paste unmaintained
+reason = "Build-time-only proc-macro (token pasting), pulled transitively via iroh -> netwatch -> netdev -> netlink-packet-core. No runtime or security impact — the crate is archived/unmaintained, not vulnerable, and the advisory notes no safe upgrade is available. Will clear when iroh's netlink dependency chain moves off paste."
+
+# --- atomic-polyfill: unmaintained, transitive via iroh ---
+[[advisories.ignore]]
+id = "RUSTSEC-2023-0089" # atomic-polyfill unmaintained
+reason = "Unmaintained (superseded by portable-atomic), pulled transitively via iroh. No known vulnerability and no safe upgrade available; the crate only provides atomic shims. Will clear when iroh's dependency chain moves off atomic-polyfill."
+
+# --- hickory (DNS) DoS advisories: iroh 0.98.2 exact-pins hickory 0.26.0-beta.4 ---
+# iroh uses hickory for its DNS-based node discovery. iroh 0.98.2 pins
+# `hickory-resolver = "=0.26.0-beta.4"` (exact), so there is NO upgrade path to
+# the fixed >=0.26.1 without bumping iroh itself (a breaking change tracked
+# separately). These are CPU/loop DoS bugs reachable only via malicious DNS
+# responses during discovery — no RCE or data exposure. Revisit as soon as iroh
+# ships a release that moves off the vulnerable hickory beta.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0118" # hickory: NSEC3 closest-encloser proof — unbounded loop
+reason = "DoS-only (unbounded loop on crafted cross-zone DNSSEC responses) in hickory 0.26.0-beta.4, exact-pinned by iroh 0.98.2. No fix without an iroh bump. Only reachable via malicious DNS during iroh node discovery; no RCE/data impact. Will clear when iroh moves to hickory >=0.26.1."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0119" # hickory: O(n^2) name compression — CPU exhaustion on encode
+reason = "DoS-only (quadratic CPU during DNS message encoding) in hickory 0.26.0-beta.4, exact-pinned by iroh 0.98.2. No fix without an iroh bump. Reachable only on the iroh discovery DNS path; no RCE/data impact. Will clear when iroh moves to hickory >=0.26.1."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0120" # hickory: NSEC3 closest-encloser proof — unbounded loop
+reason = "DoS-only (unbounded loop on crafted cross-zone DNSSEC responses) in hickory 0.26.0-beta.4, exact-pinned by iroh 0.98.2. No fix without an iroh bump. Only reachable via malicious DNS during iroh node discovery; no RCE/data impact. Will clear when iroh moves to hickory >=0.26.1."
+
 
 [licenses]
 # List of explicitly allowed licenses

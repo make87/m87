@@ -5,7 +5,7 @@ use std::os::fd::{FromRawFd, RawFd};
 use tokio::io::split;
 use tokio::task;
 
-use crate::streams::quic::open_quic_io;
+use crate::streams::quic::open_device_io;
 use crate::streams::stream_type::StreamType;
 use crate::{auth::AuthManager, config::Config, devices, util::shutdown::SHUTDOWN};
 
@@ -46,10 +46,12 @@ pub async fn open_serial(device: &str, port: &str, baud: u32) -> Result<()> {
         baud: Some(baud),
         name: port.to_string(),
     };
-    let (_, remote_io) = open_quic_io(
+    let (_conn, remote_io) = open_device_io(
         &resolved.host,
+        &resolved.url,
         &token,
         &resolved.short_id,
+        &resolved.id,
         stream_type,
         cfg.trust_invalid_server_cert,
     )

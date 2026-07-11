@@ -49,6 +49,36 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
     );
     debug!("Connecting QUIC control tunnel to {}", control_host);
 
+    // ── iroh P2P endpoint ────────────────────────────────────────────────────────
+    use crate::streams::iroh_p2p::IROH_ALPN;
+    use iroh::endpoint::presets;
+    use std::time::Duration as StdDuration;
+
+    let iroh_ep = {
+        match iroh::Endpoint::builder(presets::N0)
+            .alpns(vec![IROH_ALPN.to_vec()])
+            .bind()
+            .await
+        {
+            Ok(ep) => {
+                // Give it up to 10 s to register with its relay (best-effort)
+                tokio::time::timeout(StdDuration::from_secs(10), ep.online())
+                    .await
+                    .ok();
+                debug!("iroh endpoint bound, addr: {:?}", ep.addr());
+                Some(ep)
+            }
+            Err(e) => {
+                warn!("iroh: could not bind endpoint, P2P disabled: {e}");
+                None
+            }
+        }
+    };
+
+    let iroh_node_addr_json: Option<String> = iroh_ep
+        .as_ref()
+        .and_then(|ep| serde_json::to_string(&ep.addr()).ok());
+
     let (_endpoint, quic_conn): (_, Connection) =
         get_quic_connection(&control_host, &token, config.trust_invalid_server_cert)
             .await
@@ -82,9 +112,16 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
         first_heartbeat: true,
     }));
 
+    // Server's iroh ticket-signing public key (base64), learned from heartbeat
+    // responses. The iroh accept loop verifies CLI connection tickets against
+    // it. None until the first heartbeat response carrying it arrives.
+    let server_ticket_pubkey: Arc<tokio::sync::RwLock<Option<String>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
+
     let manager_clone = unit_manager.clone();
     let _receiver = tokio::spawn({
         let state = state.clone();
+        let server_ticket_pubkey = server_ticket_pubkey.clone();
         use crate::device::deployment_manager::ack_event;
         async move {
             loop {
@@ -94,6 +131,15 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                     msg = read_msg::<HeartbeatResponse>(&mut recv) => {
                         let resp = msg?;
                         tracing::debug!("Received heartbeat response");
+
+                        // Cache the server's ticket-signing public key for the
+                        // iroh accept loop to verify direct-connection tickets.
+                        if let Some(pk) = resp.iroh_ticket_pubkey.as_deref() {
+                            let mut guard = server_ticket_pubkey.write().await;
+                            if guard.as_deref() != Some(pk) {
+                                *guard = Some(pk.to_string());
+                            }
+                        }
 
                         // Don't hold `state` across `set_desired_units` /
                         // `apply_lifecycle_updates` / `ack_event` — those can
@@ -165,8 +211,10 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
 
     let mut shutdown = shutdown_rx.clone();
 
+    let iroh_node_addr_for_sender = iroh_node_addr_json.clone();
     let _sender = tokio::spawn({
         let state = state.clone();
+        let iroh_node_addr = iroh_node_addr_for_sender;
         async move {
             loop {
                 use std::time::Duration;
@@ -192,6 +240,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                                 last_instruction_hash: st.last_instruction_hash.clone(),
                                 deploy_report: Some(claimed.report.clone()),
                                 supported_revision_format: Some(2),
+                                iroh_node_addr: iroh_node_addr.clone(),
                                 ..Default::default()
                             }
                         };
@@ -220,6 +269,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                             let mut req = HeartbeatRequest {
                                 last_instruction_hash: st.last_instruction_hash.clone(),
                                 supported_revision_format: Some(2),
+                                iroh_node_addr: iroh_node_addr.clone(),
                                 ..Default::default()
                             };
 
@@ -314,6 +364,51 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
         });
     }
 
+    // ── iroh P2P accept loop ──────────────────────────────────────────────────────────
+    if let Some(iroh_ep) = iroh_ep {
+        let unit_manager_iroh = unit_manager.clone();
+        let udp_channels_iroh = udp_channels.clone();
+        let mut iroh_shutdown = shutdown_rx.clone();
+        let iroh_ep_clone = iroh_ep.clone();
+        let iroh_short_id = short_id.to_string();
+        let iroh_pubkey = server_ticket_pubkey.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = iroh_shutdown.changed() => {
+                        debug!("iroh accept loop: shutdown signal");
+                        break;
+                    }
+                    incoming = iroh_ep_clone.accept() => {
+                        let Some(incoming) = incoming else {
+                            debug!("iroh endpoint closed");
+                            break;
+                        };
+                        let unit_manager = unit_manager_iroh.clone();
+                        let udp_channels = udp_channels_iroh.clone();
+                        let short_id = iroh_short_id.clone();
+                        let pubkey = iroh_pubkey.clone();
+                        tokio::spawn(async move {
+                            let conn = match incoming.await {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    warn!("iroh: incoming connection handshake failed: {e}");
+                                    return;
+                                }
+                            };
+                            handle_iroh_connection(
+                                conn, unit_manager, udp_channels, short_id, pubkey,
+                            )
+                            .await;
+                        });
+                    }
+                }
+            }
+            iroh_ep_clone.close().await;
+        });
+    }
+
     let mut shutdown = shutdown_rx.clone();
     //  CONTROL STREAM ACCEPT LOOP
     loop {
@@ -330,7 +425,7 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                     Ok((send, recv)) => {
                         debug!("QUIC: new control stream accepted");
 
-                        let io = QuicIo { recv, send };
+                        let io = QuicIo::from_quinn(recv, send);
                         let udp_channels_clone = udp_channels.clone();
                         let datagram_tx_clone = datagram_tx.clone();
                         let unit_manager_clone = unit_manager.clone();
@@ -391,4 +486,164 @@ pub async fn read_msg<T: DeserializeOwned>(io: &mut quinn::RecvStream) -> Result
     let msg: T = serde_json::from_slice::<T>(&buf)?;
 
     Ok(msg)
+}
+
+#[cfg(feature = "runtime")]
+async fn handle_iroh_connection(
+    conn: iroh::endpoint::Connection,
+    unit_manager: Arc<DeploymentManager>,
+    udp_channels: crate::streams::udp_manager::UdpChannelManager,
+    device_short_id: String,
+    server_ticket_pubkey: Arc<tokio::sync::RwLock<Option<String>>>,
+) {
+    use bytes::{BufMut, Bytes, BytesMut};
+
+    use crate::streams::{self, quic::QuicIo};
+
+    // Authenticate: the CLI opens a uni-stream and sends a server-signed
+    // connection ticket. We verify the *server's* signature — we already trust
+    // the server — rather than re-checking the CLI's own credentials. This is
+    // what lets any caller the server accepts (OAuth users and API keys) use a
+    // direct connection.
+    let signed_ticket: m87_shared::iroh_ticket::SignedIrohTicket = {
+        let mut recv =
+            match tokio::time::timeout(std::time::Duration::from_secs(5), conn.accept_uni()).await {
+                Ok(Ok(r)) => r,
+                _ => {
+                    warn!("iroh: auth stream missing or timed out");
+                    return;
+                }
+            };
+
+        let mut len_buf = [0u8; 2];
+        if recv.read_exact(&mut len_buf).await.is_err() {
+            warn!("iroh: failed to read ticket length");
+            return;
+        }
+        let len = u16::from_be_bytes(len_buf) as usize;
+        if len == 0 || len > 8192 {
+            warn!("iroh: invalid ticket length {len}");
+            return;
+        }
+        let mut buf = vec![0u8; len];
+        if recv.read_exact(&mut buf).await.is_err() {
+            warn!("iroh: failed to read ticket");
+            return;
+        }
+        match serde_json::from_slice(&buf) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("iroh: ticket not valid JSON: {e}");
+                return;
+            }
+        }
+    };
+
+    // Verify the ticket against the server's advertised signing key.
+    let Some(pubkey_b64) = server_ticket_pubkey.read().await.clone() else {
+        warn!("iroh: no server ticket key known yet — rejecting connection");
+        return;
+    };
+    let verifying_key = match m87_shared::iroh_ticket::verifying_key_from_b64(&pubkey_b64) {
+        Ok(k) => k,
+        Err(e) => {
+            warn!("iroh: bad server ticket key: {e}");
+            return;
+        }
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    match signed_ticket.verify(&verifying_key, &device_short_id, now_ms) {
+        Ok(ticket) => {
+            debug!("iroh: connection authorized for subject '{}'", ticket.subject)
+        }
+        Err(e) => {
+            warn!("iroh: ticket rejected: {e}");
+            return;
+        }
+    }
+
+    // Per-connection UDP datagram plumbing. The relay multiplexes every
+    // device's datagrams over one tunnel, but each iroh connection carries its
+    // own — so egress must go back over *this* connection, not the relay.
+    let (iroh_dgram_tx, mut iroh_dgram_rx) =
+        tokio::sync::mpsc::channel::<(u32, bytes::Bytes)>(2048);
+
+    // Egress: device → CLI. Frame `[channel_id][payload]` and send as a datagram.
+    {
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            while let Some((id, payload)) = iroh_dgram_rx.recv().await {
+                let mut buf = BytesMut::with_capacity(4 + payload.len());
+                buf.put_u32(id);
+                buf.extend_from_slice(&payload);
+                if conn.send_datagram(buf.freeze()).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Ingress: CLI → device. Route each datagram to its channel by id.
+    {
+        let conn = conn.clone();
+        let udp_channels = udp_channels.clone();
+        tokio::spawn(async move {
+            loop {
+                match conn.read_datagram().await {
+                    Ok(d) => {
+                        if d.len() < 4 {
+                            continue;
+                        }
+                        let id = u32::from_be_bytes([d[0], d[1], d[2], d[3]]);
+                        let payload = Bytes::copy_from_slice(&d[4..]);
+                        match udp_channels.get(id).await {
+                            Some(ch) => {
+                                debug!("iroh ingress: datagram id={id} len={} → channel", payload.len());
+                                let _ = ch.sender.try_send(payload);
+                            }
+                            None => {
+                                debug!("iroh ingress: datagram id={id} has no channel — dropping");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("iroh ingress: read_datagram ended: {e}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Accept bi-directional streams and route them. UDP forward streams get
+    // this connection's datagram sender so their responses go back over iroh.
+    loop {
+        match conn.accept_bi().await {
+            Ok((send, recv)) => {
+                let io = QuicIo::from_iroh(recv, send);
+                let unit_manager = unit_manager.clone();
+                let udp_channels = udp_channels.clone();
+                let datagram_tx = iroh_dgram_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = streams::router::handle_incoming_stream(
+                        io,
+                        udp_channels,
+                        datagram_tx,
+                        unit_manager,
+                    )
+                    .await
+                    {
+                        warn!("iroh: stream handler error: {e}");
+                    }
+                });
+            }
+            Err(e) => {
+                debug!("iroh: connection closed: {e}");
+                break;
+            }
+        }
+    }
 }

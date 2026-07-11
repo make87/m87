@@ -310,6 +310,20 @@ impl E2EInfra {
         Ok(())
     }
 
+    /// Base URL for reaching the server's HTTP API from the host (test side).
+    /// The server's in-container 8084 port is published to an ephemeral host
+    /// port; tests use this to call server endpoints directly with reqwest.
+    pub async fn server_base_url(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let port = self.server.get_host_port_ipv4(8084).await?;
+        Ok(format!("https://localhost:{}", port))
+    }
+
+    /// The admin API key seeded into the CLI credentials and trusted by the
+    /// server (`M87_API_KEY`). Usable as a `Bearer` token for direct API calls.
+    pub fn admin_key() -> &'static str {
+        ADMIN_KEY
+    }
+
     /// Execute a CLI command and return the output
     pub async fn cli_exec(&self, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
         let cmd = format!("m87 {} --verbose", args.join(" "));

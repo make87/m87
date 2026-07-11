@@ -1,4 +1,4 @@
-use crate::streams::quic::open_quic_io;
+use crate::streams::quic::open_device_io;
 use crate::streams::stream_type::StreamType;
 use crate::{auth::AuthManager, config::Config, devices, util::shutdown::SHUTDOWN};
 use anyhow::{Context, Result};
@@ -44,10 +44,12 @@ pub async fn run_exec_capture(
     let stream_type = StreamType::Exec {
         token: token.to_string(),
     };
-    let (_, io) = open_quic_io(
+    let (_conn, io) = open_device_io(
         &resolved.host,
+        &resolved.url,
         &token,
         &resolved.short_id,
+        &resolved.id,
         stream_type,
         config.trust_invalid_server_cert,
     )
@@ -76,10 +78,12 @@ pub async fn run_exec(device: &str, command: Vec<String>, stdin: bool, tty: bool
     let stream_type = StreamType::Exec {
         token: token.to_string(),
     };
-    let (_, io) = open_quic_io(
+    let (_conn, io) = open_device_io(
         &resolved.host,
+        &resolved.url,
         &token,
         &resolved.short_id,
+        &resolved.id,
         stream_type,
         config.trust_invalid_server_cert,
     )

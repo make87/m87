@@ -2,7 +2,7 @@ use crate::{
     auth::AuthManager,
     config::Config,
     devices,
-    streams::{quic::open_quic_io, stream_type::StreamType},
+    streams::{quic::open_device_io, stream_type::StreamType},
 };
 use anyhow::{Result, anyhow};
 use m87_shared::metrics::SystemMetrics;
@@ -33,10 +33,12 @@ async fn run_metrics_inner(device: &str) -> Result<()> {
         token: token.clone(),
     };
 
-    let (conn, io) = open_quic_io(
+    let (conn, io) = open_device_io(
         &resolved.host,
+        &resolved.url,
         &token,
         &resolved.short_id,
+        &resolved.id,
         stream_type,
         config.trust_invalid_server_cert,
     )

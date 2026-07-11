@@ -1,4 +1,4 @@
-use crate::streams::quic::open_quic_io;
+use crate::streams::quic::open_device_io;
 use crate::streams::stream_type::StreamType;
 use crate::{auth::AuthManager, config::Config, devices, util::shutdown::SHUTDOWN};
 use anyhow::{Context, Result};
@@ -18,10 +18,12 @@ pub async fn run_logs(device: &str) -> Result<()> {
     let stream_type = StreamType::Logs {
         token: token.to_string(),
     };
-    let (_, mut io) = open_quic_io(
+    let (conn, mut io) = open_device_io(
         &resolved.host,
+        &resolved.url,
         &token,
         &resolved.short_id,
+        &resolved.id,
         stream_type,
         config.trust_invalid_server_cert,
     )
@@ -75,6 +77,11 @@ pub async fn run_logs(device: &str) -> Result<()> {
         _ = stdin_rx.recv() => {},
         _ = SHUTDOWN.cancelled() => {},
     }
+
+    // Stop reading, then tear the connection down gracefully so iroh doesn't log
+    // an "Aborting ungracefully" endpoint-drop error on exit.
+    read_task.abort();
+    conn.close_gracefully(b"logs closed").await;
 
     println!("\nLogs stream closed.");
     Ok(())

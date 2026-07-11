@@ -3,6 +3,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use m87_shared::deploy_spec::{FailureAggQuery, FailureAggResponse};
 use m87_shared::device::{AddDeviceAccessBody, AuditLog, DeviceStatus};
+use m87_shared::iroh_ticket::{IrohTicket, SignedIrohTicket};
 use m87_shared::roles::Role;
 use m87_shared::users::User;
 use mongodb::bson::doc;
@@ -37,7 +38,62 @@ pub fn create_route() -> Router<AppState> {
             "/{id}/access/{email_or_org_id}",
             delete(remove_device_access),
         )
+        .route("/{id}/iroh-addr", get(get_device_iroh_addr))
         .merge(deploy_spec_route())
+}
+
+#[derive(serde::Serialize)]
+struct IrohAddrResponse {
+    iroh_node_addr: String,
+    /// Short-lived, server-signed ticket the CLI presents to the device to
+    /// authorize the direct connection.
+    ticket: SignedIrohTicket,
+}
+
+/// How long an issued iroh connection ticket is valid. Short: the CLI fetches
+/// a fresh one per connection attempt.
+const IROH_TICKET_TTL_MS: u64 = 60_000;
+
+async fn get_device_iroh_addr(
+    claims: Claims,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ServerAppResult<IrohAddrResponse> {
+    let device_id =
+        ObjectId::parse_str(&id).map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
+
+    // The role check here IS the authorization: a ticket is only minted for a
+    // caller the server has already verified can reach this device.
+    let device_opt = claims
+        .find_one_with_scope_and_role(&state.db.devices(), doc! { "_id": device_id }, Role::Viewer)
+        .await?;
+    let device = device_opt.ok_or_else(|| ServerError::not_found("Device not found"))?;
+
+    let addr = state
+        .relay
+        .get_iroh_addr(&device.short_id)
+        .await
+        .ok_or_else(|| ServerError::not_found("iroh not available"))?;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let ticket = IrohTicket {
+        device_short_id: device.short_id.clone(),
+        subject: claims.user_email.clone(),
+        issued_at_ms: now_ms,
+        expires_at_ms: now_ms + IROH_TICKET_TTL_MS,
+    };
+    let signed = state.iroh_ticket_signer.sign(&ticket);
+
+    Ok(ServerResponse::builder()
+        .body(IrohAddrResponse {
+            iroh_node_addr: addr,
+            ticket: signed,
+        })
+        .status_code(axum::http::StatusCode::OK)
+        .build())
 }
 
 async fn get_devices(

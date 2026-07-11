@@ -1,5 +1,31 @@
-# E2E test image - extends production image with Docker CLI
-FROM m87-client:latest
+# E2E-only image. Copies a host-built (native glibc) `m87` binary into a
+# glibc-matched base with the tools the e2e suite needs. NO cargo build happens
+# here — the binary is compiled once on the host (reusing the cargo `target/`
+# cache) and staged into this build context by
+# tests/src/e2e_containers/setup.rs, so this image builds in seconds.
+#
+# This one image backs both the CLI container and the runtime/agent container,
+# so it carries: docker CLI (for `m87 <dev> docker` proxy tests), netcat-openbsd
+# (`nc`, for the UDP-forward test), and curl.
+#
+# NOT used for production — see m87-client/Dockerfile for the static musl ->
+# alpine build. ubuntu:24.04 matches the glibc of the GitHub runner that
+# compiles the binary (glibc is backward- but not forward-compatible).
+FROM ubuntu:24.04
 
-# Install Docker CLI for e2e testing
-RUN apk add --no-cache docker-cli
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        netcat-openbsd \
+        docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Binary is staged next to this Dockerfile by setup.rs (build context = temp dir).
+COPY m87 /app/m87
+
+ENV PATH="/app:${PATH}"
+
+ENTRYPOINT ["/app/m87"]

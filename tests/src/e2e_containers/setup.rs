@@ -34,113 +34,142 @@ async fn build_images() -> Result<(), String> {
         .map(|p| p.parent().map(|p| p.to_path_buf()).unwrap_or(p))
         .unwrap_or_else(|_| std::path::PathBuf::from(".."));
 
-    // Build server image
-    tracing::info!(
-        "Building {} (Docker cache will speed up if unchanged)...",
-        SERVER_IMAGE
-    );
-    let status = Command::new("docker")
-        .args([
-            "build",
-            "-t",
-            SERVER_IMAGE,
-            "-f",
-            "m87-server/Dockerfile",
-            "--build-arg",
-            "BUILD_PROFILE=release",
-            ".",
-        ])
-        .current_dir(&workspace_root)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await;
+    // 1) Compile the binaries ONCE on the host, reusing the cargo `target/`
+    //    cache. This replaces two cold in-Docker release compiles (one per
+    //    image, recompiling the whole workspace) with a single incremental host
+    //    build. In CI these are already built by a prior workflow step, so this
+    //    is a fast up-to-date no-op; locally it just builds what's stale.
+    cargo_build(&workspace_root, &["build", "-p", "m87-server"], "m87-server").await?;
+    cargo_build(
+        &workspace_root,
+        &["build", "-p", "m87-client", "--features", "runtime,cli"],
+        "m87-client (m87)",
+    )
+    .await?;
 
-    match status {
-        Ok(s) if !s.success() => {
-            return Err(format!(
-                "Failed to build server image (exit code: {:?})",
-                s.code()
-            ));
-        }
-        Err(e) => {
-            return Err(format!("Failed to run docker build for server: {}", e));
-        }
-        _ => {
-            tracing::info!("Server image built successfully");
-        }
-    }
+    let debug_dir = workspace_root.join("target").join("debug");
+    let server_bin = debug_dir.join("m87-server");
+    let client_bin = debug_dir.join("m87");
 
-    // Build base client image first (m87-client:latest)
-    tracing::info!("Building m87-client:latest (base image)...");
-    let status = Command::new("docker")
-        .args([
-            "build",
-            "-t",
-            "m87-client:latest",
-            "-f",
-            "m87-client/Dockerfile",
-            "--build-arg",
-            "BUILD_PROFILE=release",
-            ".",
-        ])
-        .current_dir(&workspace_root)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await;
-
-    match status {
-        Ok(s) if !s.success() => {
-            return Err(format!(
-                "Failed to build base client image (exit code: {:?})",
-                s.code()
-            ));
-        }
-        Err(e) => {
-            return Err(format!("Failed to run docker build for base client: {}", e));
-        }
-        _ => {
-            tracing::info!("Base client image built successfully");
-        }
-    }
-
-    // Build e2e client image (extends base with Docker CLI)
-    tracing::info!(
-        "Building {} (e2e image with Docker CLI)...",
-        CLIENT_IMAGE
-    );
-    let status = Command::new("docker")
-        .args([
-            "build",
-            "-t",
-            CLIENT_IMAGE,
-            "-f",
-            "m87-client/Dockerfile.e2e",
-            ".",
-        ])
-        .current_dir(&workspace_root)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await;
-
-    match status {
-        Ok(s) if !s.success() => {
-            return Err(format!(
-                "Failed to build e2e client image (exit code: {:?})",
-                s.code()
-            ));
-        }
-        Err(e) => {
-            return Err(format!("Failed to run docker build for e2e client: {}", e));
-        }
-        _ => {
-            tracing::info!("E2E client image built successfully");
-        }
-    }
+    // 2) Stage each binary next to its slim COPY-only Dockerfile.e2e in a temp
+    //    build context and build the image. A temp context is required because
+    //    the repo `.dockerignore` excludes `target/`, so we cannot COPY the
+    //    binary from the workspace root.
+    build_e2e_image(
+        &workspace_root,
+        "m87-server/Dockerfile.e2e",
+        &server_bin,
+        "m87-server",
+        SERVER_IMAGE,
+    )
+    .await?;
+    build_e2e_image(
+        &workspace_root,
+        "m87-client/Dockerfile.e2e",
+        &client_bin,
+        "m87",
+        CLIENT_IMAGE,
+    )
+    .await?;
 
     Ok(())
+}
+
+/// Run `cargo <args>` from the workspace root (the `tests` crate is excluded
+/// from the workspace, so we build the members from the parent dir).
+async fn cargo_build(
+    workspace_root: &std::path::Path,
+    args: &[&str],
+    label: &str,
+) -> Result<(), String> {
+    tracing::info!("Host-building {} (reuses cargo target cache)...", label);
+    let status = Command::new("cargo")
+        .args(args)
+        .current_dir(workspace_root)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await;
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!(
+            "Host build of {} failed (exit code: {:?})",
+            label,
+            s.code()
+        )),
+        Err(e) => Err(format!("Failed to run cargo build for {}: {}", label, e)),
+    }
+}
+
+/// Stage `bin` (renamed to `bin_name`) alongside `dockerfile_rel` in a fresh
+/// temp context and `docker build` a slim COPY-only image tagged `image`.
+async fn build_e2e_image(
+    workspace_root: &std::path::Path,
+    dockerfile_rel: &str,
+    bin: &std::path::Path,
+    bin_name: &str,
+    image: &str,
+) -> Result<(), String> {
+    tracing::info!("Building {} (copy-only, host-built binary)...", image);
+
+    let ctx = tempfile::tempdir()
+        .map_err(|e| format!("Failed to create temp build context for {}: {}", image, e))?;
+    let ctx_path = ctx.path();
+
+    std::fs::copy(bin, ctx_path.join(bin_name)).map_err(|e| {
+        format!(
+            "Failed to stage binary {} into build context: {}",
+            bin.display(),
+            e
+        )
+    })?;
+    std::fs::copy(workspace_root.join(dockerfile_rel), ctx_path.join("Dockerfile"))
+        .map_err(|e| format!("Failed to stage {} into build context: {}", dockerfile_rel, e))?;
+
+    // `docker buildx build --load` so we can attach a layer cache. The base
+    // image + apt layer are stable across runs; only the final `COPY <binary>`
+    // layer changes, so caching skips the ~40s apt install every run. GitHub's
+    // Actions cache backend (`type=gha`) is only available inside a GHA runner
+    // with a `docker-container` buildx builder (set up by setup-buildx-action),
+    // so we add the cache flags only there; locally it's a plain buildx build.
+    let mut args: Vec<String> = vec![
+        "buildx".into(),
+        "build".into(),
+        "--load".into(),
+        "-t".into(),
+        image.into(),
+    ];
+    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+        let scope = image.replace(':', "-");
+        args.push(format!("--cache-from=type=gha,scope={scope}"));
+        // ignore-error keeps a cache-export hiccup (e.g. missing token) from
+        // failing the whole image build.
+        args.push(format!(
+            "--cache-to=type=gha,scope={scope},mode=max,ignore-error=true"
+        ));
+    }
+    args.push(".".into());
+
+    let status = Command::new("docker")
+        .args(&args)
+        .current_dir(ctx_path)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await;
+
+    match status {
+        Ok(s) if s.success() => {
+            tracing::info!("{} built successfully", image);
+            Ok(())
+        }
+        Ok(s) => Err(format!(
+            "Failed to build {} (exit code: {:?})",
+            image,
+            s.code()
+        )),
+        Err(e) => Err(format!("Failed to run docker build for {}: {}", image, e)),
+    }
 }
 
 /// Create Docker network for container communication (runs once per test run)
