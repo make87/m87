@@ -179,8 +179,19 @@ async fn download_resumable(
     dest: &Path,
     interactive: bool,
 ) -> Result<()> {
+    download_resumable_with(client, url, dest, interactive, Duration::from_secs(60)).await
+}
+
+/// Implementation of [`download_resumable`] with an injectable per-chunk stall
+/// timeout (tests use a short one so the stall→resume path is fast to exercise).
+async fn download_resumable_with(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    interactive: bool,
+    stall: Duration,
+) -> Result<()> {
     const MAX_ATTEMPTS: u32 = 300;
-    const STALL: Duration = Duration::from_secs(60);
     const RETRY_DELAY: Duration = Duration::from_secs(5);
 
     let mut total: Option<u64> = None;
@@ -246,7 +257,7 @@ async fn download_resumable(
         let mut got = 0u64;
         let mut clean_end = false;
         loop {
-            match tokio::time::timeout(STALL, body.next()).await {
+            match tokio::time::timeout(stall, body.next()).await {
                 Ok(Some(Ok(chunk))) => {
                     if let Err(e) = file.write_all(&chunk).await {
                         warn!("update download: write error: {e}");
@@ -371,6 +382,114 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&buf).to_string()
+    }
+
+    fn parse_range_start(req: &str) -> Option<u64> {
+        req.lines()
+            .find(|l| l.to_lowercase().starts_with("range:"))
+            .and_then(|l| l.split("bytes=").nth(1))
+            .and_then(|s| s.split('-').next())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    }
+
+    /// End-to-end "update to a new version over a bad connection": a flaky server
+    /// STALLS on the first request (sends a third, then hangs), DROPS on the
+    /// second (sends more, then closes mid-body), and only completes on the
+    /// third. The download must resume through both failures, and the gzipped
+    /// "new binary" must decompress to exactly the original bytes.
+    #[tokio::test]
+    async fn self_update_download_survives_flaky_connection() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::net::TcpListener;
+
+        // The "new version" binary and its gzip release asset.
+        let binary: Vec<u8> = (0..6000u32).map(|i| (i.wrapping_mul(31) % 253) as u8).collect();
+        let mut enc = GzEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(&binary).unwrap();
+        let gz = enc.finish().unwrap();
+        let total = gz.len();
+        let third = total / 3;
+        let two_thirds = 2 * total / 3;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let gz_srv = Arc::new(gz);
+        let hits = Arc::new(AtomicUsize::new(0));
+
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut s, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let n = hits.fetch_add(1, Ordering::SeqCst);
+                let gz_srv = gz_srv.clone();
+                tokio::spawn(async move {
+                    let req = read_http_request(&mut s).await;
+                    let start = parse_range_start(&req).unwrap_or(0) as usize;
+                    let partial = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{}/{total}\r\n\r\n",
+                        total - start,
+                        total - 1
+                    );
+                    match n {
+                        // STALL: first third, then hold the socket open (no more
+                        // data, no close) until well past the client's stall.
+                        0 => {
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nAccept-Ranges: bytes\r\n\r\n"
+                            );
+                            let _ = s.write_all(hdr.as_bytes()).await;
+                            let _ = s.write_all(&gz_srv[..third]).await;
+                            let _ = s.flush().await;
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                        }
+                        // DROP: some more, then close mid-body.
+                        1 => {
+                            let _ = s.write_all(partial.as_bytes()).await;
+                            let _ = s.write_all(&gz_srv[start..two_thirds]).await;
+                            let _ = s.flush().await;
+                        }
+                        // COMPLETE: the remainder.
+                        _ => {
+                            let _ = s.write_all(partial.as_bytes()).await;
+                            let _ = s.write_all(&gz_srv[start..]).await;
+                            let _ = s.flush().await;
+                        }
+                    }
+                });
+            }
+        });
+
+        let dir = self_update::TempDir::new().unwrap();
+        let gz_path = dir.path().join("m87-x86_64-unknown-linux-musl.gz");
+        let client = reqwest::Client::builder().build().unwrap();
+        download_resumable_with(
+            &client,
+            &format!("http://{addr}/asset"),
+            &gz_path,
+            false,
+            Duration::from_millis(300), // short stall so the stall→resume path is quick
+        )
+        .await
+        .expect("download must complete despite a stall and a drop");
+
+        // Decompress exactly as update() does and verify byte-for-byte integrity.
+        self_update::Extract::from_source(&gz_path)
+            .archive(self_update::ArchiveKind::Plain(Some(self_update::Compression::Gz)))
+            .extract_into(dir.path())
+            .unwrap();
+        let out = dir.path().join("m87-x86_64-unknown-linux-musl");
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            binary,
+            "decompressed new-version binary must match after a flaky download"
+        );
+
+        server.abort();
     }
 
     /// The whole point of the rewrite: a dropped connection mid-download must be
