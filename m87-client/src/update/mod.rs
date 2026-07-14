@@ -1,9 +1,12 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use futures::StreamExt;
 use self_update::cargo_crate_version;
 use self_update::version::bump_is_greater;
 use serde::Deserialize;
-use std::fs::File;
-use tracing::{error, info};
+use std::path::Path;
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tracing::{error, info, warn};
 
 const GITHUB_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/make87/m87/releases/latest";
 
@@ -89,11 +92,20 @@ pub async fn update(interactive: bool) -> Result<bool> {
     let tmp_dir = self_update::TempDir::new()?;
     let download_path = tmp_dir.path().join(&asset.name);
 
-    let tmp_file = File::create(&download_path)?;
-    self_update::Download::from_url(&asset.browser_download_url)
-        .set_header(reqwest::header::ACCEPT, "application/octet-stream".parse()?)
-        .show_progress(interactive)
-        .download_to(tmp_file)?;
+    // Resumable download — the fleet runs on ~10 KB/s LTE where a one-shot pull
+    // reliably times out. Stream with HTTP Range resume so drops/stalls just
+    // continue from the bytes already on disk.
+    let dl_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .build()?;
+    download_resumable(
+        &dl_client,
+        &asset.browser_download_url,
+        &download_path,
+        interactive,
+    )
+    .await
+    .with_context(|| format!("downloading {}", asset.name))?;
 
     // If compressed, let self_update gunzip it (ArchiveKind::Plain + Gz — a bare
     // single-file .gz, not a tar). It writes the decompressed file into the dir
@@ -127,6 +139,164 @@ pub async fn update(interactive: bool) -> Result<bool> {
         println!("Updated from v{} → v{}", current_version, new_version);
     }
     Ok(true)
+}
+
+/// Total expected size of a download response: the `Content-Range` total for a
+/// `206 Partial Content`, else `Content-Length` for a full `200`.
+fn response_total(resp: &reqwest::Response) -> Option<u64> {
+    if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        resp.headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.rsplit('/').next())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    } else {
+        resp.content_length()
+    }
+}
+
+async fn open_output(dest: &Path, append: bool) -> std::io::Result<tokio::fs::File> {
+    tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(dest)
+        .await
+}
+
+/// Download `url` to `dest`, resuming across drops/stalls via HTTP `Range`.
+///
+/// The device fleet runs on ~10 KB/s LTE where a one-shot pull reliably times
+/// out, so: no overall request timeout (a multi-MB file legitimately takes
+/// minutes), but a per-chunk *stall* timeout aborts a frozen connection so we
+/// reconnect and continue from the bytes already on disk. Each attempt
+/// re-requests the (stable) GitHub URL, which issues a fresh signed CDN
+/// redirect, so resuming keeps working even after a previous signed URL expires.
+async fn download_resumable(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    interactive: bool,
+) -> Result<()> {
+    download_resumable_with(client, url, dest, interactive, Duration::from_secs(60)).await
+}
+
+/// Implementation of [`download_resumable`] with an injectable per-chunk stall
+/// timeout (tests use a short one so the stall→resume path is fast to exercise).
+async fn download_resumable_with(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    interactive: bool,
+    stall: Duration,
+) -> Result<()> {
+    const MAX_ATTEMPTS: u32 = 300;
+    const RETRY_DELAY: Duration = Duration::from_secs(5);
+
+    let mut total: Option<u64> = None;
+    let mut attempt: u32 = 0;
+
+    loop {
+        let have = tokio::fs::metadata(dest).await.map(|m| m.len()).unwrap_or(0);
+        if let Some(t) = total {
+            if have >= t {
+                return Ok(()); // complete
+            }
+        }
+
+        attempt += 1;
+        if attempt > MAX_ATTEMPTS {
+            return Err(anyhow!(
+                "download did not complete after {MAX_ATTEMPTS} attempts ({have} bytes)"
+            ));
+        }
+
+        // Ask for the remaining bytes (whole file on the first attempt).
+        let mut req = client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/octet-stream");
+        if have > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={have}-"));
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("update download: connect failed at {have} bytes: {e}");
+                tokio::time::sleep(RETRY_DELAY).await;
+                continue;
+            }
+        };
+        // 416 means we already have the whole file.
+        if have > 0 && resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            return Ok(());
+        }
+        let resp = match resp.error_for_status() {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("update download: http error at {have} bytes: {e}");
+                tokio::time::sleep(RETRY_DELAY).await;
+                continue;
+            }
+        };
+
+        // Append only when the server honored our Range (206); if it ignored it
+        // (200 with have>0) we must restart from 0 (open_output truncates).
+        let resuming = resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        let append = have > 0 && resuming;
+        if total.is_none() {
+            total = response_total(&resp);
+        }
+
+        let mut file = open_output(dest, append)
+            .await
+            .context("opening update download file")?;
+
+        let mut body = resp.bytes_stream();
+        let mut got = 0u64;
+        let mut clean_end = false;
+        loop {
+            match tokio::time::timeout(stall, body.next()).await {
+                Ok(Some(Ok(chunk))) => {
+                    if let Err(e) = file.write_all(&chunk).await {
+                        warn!("update download: write error: {e}");
+                        break;
+                    }
+                    got += chunk.len() as u64;
+                }
+                Ok(Some(Err(e))) => {
+                    warn!("update download: stream error at {}: {e}", have + got);
+                    break;
+                }
+                Ok(None) => {
+                    clean_end = true;
+                    break;
+                }
+                Err(_) => {
+                    warn!("update download: stalled at {} bytes, resuming", have + got);
+                    break;
+                }
+            }
+        }
+        let _ = file.flush().await;
+
+        if interactive {
+            match total {
+                Some(t) => println!("  {} / {} bytes", have + got, t),
+                None => println!("  {} bytes", have + got),
+            }
+        }
+
+        // A clean body end on an open-ended range means we reached EOF; verify
+        // against the known total when we have one.
+        if clean_end && total.map_or(true, |t| have + got >= t) {
+            return Ok(());
+        }
+        if got == 0 {
+            tokio::time::sleep(RETRY_DELAY).await;
+        }
+    }
 }
 
 /// Helper for daemon use — silently apply and exit if updated.
@@ -197,6 +367,186 @@ mod tests {
         assert!(release.assets.is_empty());
     }
 
+    async fn read_http_request(s: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        loop {
+            let n = s.read(&mut tmp).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    fn parse_range_start(req: &str) -> Option<u64> {
+        req.lines()
+            .find(|l| l.to_lowercase().starts_with("range:"))
+            .and_then(|l| l.split("bytes=").nth(1))
+            .and_then(|s| s.split('-').next())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    }
+
+    /// End-to-end "update to a new version over a bad connection": a flaky server
+    /// STALLS on the first request (sends a third, then hangs), DROPS on the
+    /// second (sends more, then closes mid-body), and only completes on the
+    /// third. The download must resume through both failures, and the gzipped
+    /// "new binary" must decompress to exactly the original bytes.
+    #[tokio::test]
+    async fn self_update_download_survives_flaky_connection() {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::net::TcpListener;
+
+        // The "new version" binary and its gzip release asset.
+        let binary: Vec<u8> = (0..6000u32).map(|i| (i.wrapping_mul(31) % 253) as u8).collect();
+        let mut enc = GzEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(&binary).unwrap();
+        let gz = enc.finish().unwrap();
+        let total = gz.len();
+        let third = total / 3;
+        let two_thirds = 2 * total / 3;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let gz_srv = Arc::new(gz);
+        let hits = Arc::new(AtomicUsize::new(0));
+
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut s, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let n = hits.fetch_add(1, Ordering::SeqCst);
+                let gz_srv = gz_srv.clone();
+                tokio::spawn(async move {
+                    let req = read_http_request(&mut s).await;
+                    let start = parse_range_start(&req).unwrap_or(0) as usize;
+                    let partial = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{}/{total}\r\n\r\n",
+                        total - start,
+                        total - 1
+                    );
+                    match n {
+                        // STALL: first third, then hold the socket open (no more
+                        // data, no close) until well past the client's stall.
+                        0 => {
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nAccept-Ranges: bytes\r\n\r\n"
+                            );
+                            let _ = s.write_all(hdr.as_bytes()).await;
+                            let _ = s.write_all(&gz_srv[..third]).await;
+                            let _ = s.flush().await;
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                        }
+                        // DROP: some more, then close mid-body.
+                        1 => {
+                            let _ = s.write_all(partial.as_bytes()).await;
+                            let _ = s.write_all(&gz_srv[start..two_thirds]).await;
+                            let _ = s.flush().await;
+                        }
+                        // COMPLETE: the remainder.
+                        _ => {
+                            let _ = s.write_all(partial.as_bytes()).await;
+                            let _ = s.write_all(&gz_srv[start..]).await;
+                            let _ = s.flush().await;
+                        }
+                    }
+                });
+            }
+        });
+
+        let dir = self_update::TempDir::new().unwrap();
+        let gz_path = dir.path().join("m87-x86_64-unknown-linux-musl.gz");
+        let client = reqwest::Client::builder().build().unwrap();
+        download_resumable_with(
+            &client,
+            &format!("http://{addr}/asset"),
+            &gz_path,
+            false,
+            Duration::from_millis(300), // short stall so the stall→resume path is quick
+        )
+        .await
+        .expect("download must complete despite a stall and a drop");
+
+        // Decompress exactly as update() does and verify byte-for-byte integrity.
+        self_update::Extract::from_source(&gz_path)
+            .archive(self_update::ArchiveKind::Plain(Some(self_update::Compression::Gz)))
+            .extract_into(dir.path())
+            .unwrap();
+        let out = dir.path().join("m87-x86_64-unknown-linux-musl");
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            binary,
+            "decompressed new-version binary must match after a flaky download"
+        );
+
+        server.abort();
+    }
+
+    /// The whole point of the rewrite: a dropped connection mid-download must be
+    /// resumed via `Range`, not restarted. Server sends half the body then drops
+    /// on request 1, and serves the remainder as `206` on the `Range` retry.
+    #[tokio::test]
+    async fn download_resumable_resumes_after_drop() {
+        use tokio::net::TcpListener;
+
+        let payload: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+        let total = payload.len();
+        let half = total / 2;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv_payload = payload.clone();
+
+        let server = tokio::spawn(async move {
+            // Request 1: send half the body under a full Content-Length, then drop.
+            let (mut s, _) = listener.accept().await.unwrap();
+            read_http_request(&mut s).await;
+            let hdr = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nAccept-Ranges: bytes\r\n\r\n"
+            );
+            s.write_all(hdr.as_bytes()).await.unwrap();
+            s.write_all(&srv_payload[..half]).await.unwrap();
+            s.flush().await.unwrap();
+            drop(s); // connection drops mid-body
+
+            // Request 2: must be a Range resume for the remainder → serve 206.
+            let (mut s, _) = listener.accept().await.unwrap();
+            let req = read_http_request(&mut s).await;
+            assert!(
+                req.to_lowercase().contains(&format!("range: bytes={half}-")),
+                "expected a resume Range request, got:\n{req}"
+            );
+            let rem = total - half;
+            let hdr = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {rem}\r\nContent-Range: bytes {half}-{}/{total}\r\n\r\n",
+                total - 1
+            );
+            s.write_all(hdr.as_bytes()).await.unwrap();
+            s.write_all(&srv_payload[half..]).await.unwrap();
+            s.flush().await.unwrap();
+        });
+
+        let dir = self_update::TempDir::new().unwrap();
+        let dest = dir.path().join("m87");
+        let client = reqwest::Client::builder().build().unwrap();
+        download_resumable(&client, &format!("http://{addr}/bin"), &dest, false)
+            .await
+            .expect("resumable download should complete across the drop");
+
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        server.await.unwrap();
+    }
+
     // Verifies our use of self_update's gzip extraction: a bare `<name>.gz`
     // extracts to `<name>` (extension stripped) with the original bytes. Guards
     // the ArchiveKind/output-path assumptions the updater relies on.
@@ -209,7 +559,7 @@ mod tests {
         let gz = dir.path().join("m87-x86_64-unknown-linux-musl.gz");
         let payload = b"\x7fELF not-really-a-binary-but-enough-bytes-to-round-trip";
 
-        let mut enc = GzEncoder::new(File::create(&gz).unwrap(), Compression::best());
+        let mut enc = GzEncoder::new(std::fs::File::create(&gz).unwrap(), Compression::best());
         enc.write_all(payload).unwrap();
         enc.finish().unwrap();
 
