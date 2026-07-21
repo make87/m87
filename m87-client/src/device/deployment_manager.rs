@@ -103,8 +103,24 @@ impl LocalRunState {
         }
         let contents = std::fs::read_to_string(&path)
             .with_context(|| format!("read run_state.json in {}", work_dir.display()))?;
-        serde_json::from_str(&contents)
-            .with_context(|| format!("parse run_state.json in {}", work_dir.display()))
+        match serde_json::from_str(&contents) {
+            Ok(st) => Ok(st),
+            Err(e) => {
+                // A corrupt / invalid run_state.json (a truncated write after a
+                // power cut, or an incompatible-schema file from an older build)
+                // must not wedge us. `load` is on the hot path — every reconcile
+                // tick and every heartbeat handshake calls it — so returning Err
+                // here makes the runtime fail at very high frequency. Self-heal:
+                // discard the bad file and start from defaults; the next `save`
+                // rewrites it cleanly.
+                tracing::warn!(
+                    "run_state.json in {} is invalid ({e}); deleting and resetting to defaults",
+                    work_dir.display()
+                );
+                let _ = std::fs::remove_file(&path);
+                Ok(Self::default())
+            }
+        }
     }
 
     pub fn save(work_dir: &Path, st: &Self) -> Result<()> {
@@ -908,16 +924,46 @@ impl DeploymentManager {
             }
         }
 
-        // Phase 2b: start
-        for (_, spec) in &start_map {
-            let wd = self
-                .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
-                .await?;
-            self.apply_service(spec, &desired_rev, &wd).await?;
+        // Phase 2b: start — but ONLY if every stop this pass succeeded. A unit
+        // whose stop failed is still running; bringing the new revision up on
+        // top of it means two containers run at once, contending for the same
+        // exclusive hardware (camera / LTE / …) and taking the device down. When
+        // any stop failed we skip ALL starts, keep the to-start work dirty, and
+        // retry on the next reconcile once the old unit is actually gone. Leaving
+        // the old unit running is stable; running both is the fatal state.
+        if failed_hashes.is_empty() {
+            // A failing start must NOT abort the whole reconcile via `?`: every
+            // sibling not yet processed would be skipped and left "pending" with
+            // no error of its own, and since `start_map` iteration order is
+            // nondeterministic the skipped set varies per run (the flaky
+            // "re-deploy sometimes fixes it" behaviour). Collect failures per
+            // unit instead, mirroring the stop phase.
+            for (_, spec) in &start_map {
+                let wd = self
+                    .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
+                    .await?;
+                if let Err(e) = self.apply_service(spec, &desired_rev, &wd).await {
+                    tracing::error!("apply_service for '{}' failed: {e:#}", spec.id);
+                    failed_hashes.insert(spec.get_hash());
+                }
+            }
+        } else {
+            tracing::warn!(
+                "{} stop step(s) failed; deferring {} start(s) to avoid running \
+                 old and new units concurrently",
+                failed_hashes.len(),
+                start_map.len()
+            );
+            // Keep the deferred starts dirty so they are applied once the stops
+            // succeed on a later pass.
+            for (_, spec) in &start_map {
+                failed_hashes.insert(spec.get_hash());
+            }
         }
 
-        // Clear processed hashes, but keep any whose stop failed so it is retried
-        // on the next reconcile instead of being dropped.
+        // Clear processed hashes, but keep any that failed (stop or start) or
+        // that were deferred because a stop blocked their start, so they are
+        // retried on the next reconcile instead of being dropped.
         let mut ds = self.dirty_services.write().await;
         for h in dirty_hashes {
             if !failed_hashes.contains(&h) {
@@ -928,7 +974,7 @@ impl DeploymentManager {
 
         if !failed_hashes.is_empty() {
             return Err(anyhow!(
-                "{} stop step(s) failed during reconcile",
+                "{} unit(s) failed or were deferred during reconcile",
                 failed_hashes.len()
             ));
         }
@@ -2721,5 +2767,138 @@ mod tests {
         assert_eq!(unhealthy, 2, "each unhealthy transition should report once");
         assert_eq!(healthy, 1, "the recovery should report once");
         Ok(())
+    }
+
+    // ── Reconcile ordering / isolation regressions (customer 0.8.3 report) ─────
+
+    // Reproduces the device-killing symptom: after a deploy that renames a
+    // service (old id removed, new id added), the OLD unit's stop step fails
+    // (e.g. `docker compose down` times out on a flaky LTE link) but reconcile
+    // starts the NEW unit anyway. Both then run at once, contending for the same
+    // exclusive hardware (camera / WittyPi / LTE), and the device falls over.
+    //
+    // reconcile_dirty runs Phase 2a (stop) then Phase 2b (start). A failed stop
+    // is recorded in `failed_hashes` but Phase 2b starts the new unit
+    // UNCONDITIONALLY. Safe invariant: if a stop failed this pass, the new unit
+    // must NOT be started while the old one may still be running.
+    #[tokio::test]
+    async fn failed_stop_must_block_conflicting_start() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let old_marker = td.path().join("old_running");
+        let new_marker = td.path().join("new_running");
+        let old_s = old_marker.display().to_string();
+        let new_s = new_marker.display().to_string();
+
+        // v1: service "old" is up (marker present); its stop step FAILS, so the
+        // old unit is left running (marker not removed — a failed teardown).
+        let v1 = mk_rev(
+            "r1",
+            vec![mk_svc(
+                "old",
+                sh(format!("touch {old_s}")),
+                sh("exit 1"), // stop fails → old stays up
+            )],
+            vec![],
+            vec![],
+        );
+        mgr.set_desired_units(v1, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(old_marker.exists(), "old unit should be running after v1");
+
+        // v2: "old" removed, "new" added — a rename (different id / workspace /
+        // compose project), which is exactly what the customer did to work
+        // around earlier issues.
+        let v2 = mk_rev(
+            "r2",
+            vec![mk_svc("new", sh(format!("touch {new_s}")), sh("true"))],
+            vec![],
+            vec![],
+        );
+        mgr.set_desired_units(v2, vec![]).await?;
+        let _ = mgr.reconcile_dirty().await; // returns Err (stop failed) — expected
+
+        // The old unit could not be torn down (its stop failed).
+        assert!(
+            old_marker.exists(),
+            "old unit's stop failed, so it is still running"
+        );
+        // BUG: the new unit was started anyway → two containers run at once,
+        // fighting over the same hardware. This assertion FAILS on current main.
+        assert!(
+            !new_marker.exists(),
+            "new unit must NOT start while the old unit's stop failed (would run \
+             two containers contending for exclusive hardware)"
+        );
+        Ok(())
+    }
+
+    // Reproduces the "everything stays pending, re-deploy sometimes fixes it"
+    // symptom. reconcile_dirty's start phase is `self.apply_service(...).await?`
+    // — the `?` aborts the WHOLE reconcile on the first unit whose start fails
+    // (e.g. a `pull` step hitting a TLS-handshake timeout). Every not-yet-
+    // processed sibling in the same revision is then skipped and left "pending",
+    // with no error of its own. Because the start set is a HashMap, iteration
+    // order is randomised per run, so a healthy sibling starts on some deploys
+    // and is skipped on others — the flaky "sometimes works / --replace-all
+    // sometimes flips pending→started" the customer observed.
+    #[tokio::test]
+    async fn failing_unit_must_not_block_sibling_start() -> Result<()> {
+        // Same single-reconcile scenario, fresh manager each time. Post-fix the
+        // healthy sibling starts on EVERY run; on current main it is skipped
+        // whenever the failing unit is iterated first (~half the runs), so over
+        // 25 runs the skip count is effectively always > 0.
+        let mut skipped = 0;
+        for i in 0..25 {
+            let td = TempDir::new()?;
+            let mgr = make_mgr(&td).await;
+            let healthy = td.path().join("healthy_started");
+            let healthy_s = healthy.display().to_string();
+
+            let rev = mk_rev(
+                &format!("r{i}"),
+                vec![
+                    // Fails to start (simulates a pull / TLS timeout).
+                    mk_svc("broken", sh("exit 1"), sh("true")),
+                    // Healthy, independent sibling that should always start.
+                    mk_svc("healthy", sh(format!("touch {healthy_s}")), sh("true")),
+                ],
+                vec![],
+                vec![],
+            );
+            mgr.set_desired_units(rev, vec![]).await?;
+            let _ = mgr.reconcile_dirty().await; // Err from the broken unit
+
+            if !healthy.exists() {
+                skipped += 1;
+            }
+        }
+
+        assert_eq!(
+            skipped, 0,
+            "a failing unit's start error aborted reconcile and left a healthy \
+             sibling unstarted on {skipped}/25 runs (the `?` in the start phase \
+             skips every remaining unit)"
+        );
+        Ok(())
+    }
+
+    // A corrupt run_state.json must self-heal, not error on the hot path. Before
+    // the fix, `load` returned Err on invalid JSON, and because it is called on
+    // every reconcile tick and heartbeat handshake, that error fired at very
+    // high frequency. Now the bad file is deleted and defaults are returned.
+    #[test]
+    fn corrupt_run_state_is_deleted_not_errored() {
+        let td = TempDir::new().unwrap();
+        let wd = td.path();
+        let path = wd.join("run_state.json");
+        std::fs::write(&path, "{ this is not valid json").unwrap();
+
+        let st = LocalRunState::load(wd).expect("load must not error on invalid json");
+        assert_eq!(st.last_run_hash, None, "should reset to defaults");
+        assert!(!path.exists(), "invalid run_state.json must be deleted");
+
+        // A subsequent load is clean — no repeated error, file already handled.
+        assert!(LocalRunState::load(wd).is_ok());
     }
 }
