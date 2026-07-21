@@ -205,9 +205,14 @@ impl Mongo {
             )
             .await?;
 
-        // drop old indexes
-        let _ = self.deploy_reports().drop_indexes().await;
-
+        // NOTE: do NOT drop indexes here. `create_index` is idempotent (an index
+        // that already exists is a cheap verify-and-skip), so re-running this on
+        // every startup is free — EXCEPT if we drop first, which forces a full
+        // rebuild of every deploy_reports index on each boot. On a large
+        // collection that pins CPU/memory and, while the indexes are gone, makes
+        // every query collection-scan. The one-time migration off the old
+        // partial index has long since run across the fleet, so a blanket
+        // `drop_indexes()` now only causes that spike on every restart.
         self.deploy_reports()
             .create_index(
                 IndexModel::builder()

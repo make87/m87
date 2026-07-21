@@ -1537,6 +1537,57 @@ pub struct StepStatus {
     pub error: Option<String>,
 }
 
+impl StepStatus {
+    /// Fold a `StepReport` into this step's live status.
+    ///
+    /// Every *visible* field — `state`, `exit_code`, `error`, and the `attempt`
+    /// detail — is folded by `report_time` (the device-side execution time),
+    /// newest wins, so they always describe ONE report and the row can never go
+    /// internally inconsistent. `attempts_total` and `last_update` are monotonic
+    /// aggregates (max), independent of arrival order.
+    ///
+    /// Why a single ordering key is essential: the snapshot builder streams
+    /// reports in `created_at` (server RECEIVE time) order, but devices queue
+    /// and retry reports over flaky links, so an older-executed report can be
+    /// received later. The previous code overwrote `state`/`exit_code`/`error`
+    /// unconditionally in receive order while guarding only `attempt` by
+    /// `report_time`; a late older report then clobbered `state` while `attempt`
+    /// kept the newer values — producing contradictory rows such as
+    /// "✗ fail … exit 0" and step outcomes derived from stale reports.
+    pub fn apply_report(&mut self, s: &StepReport) {
+        let t = s.report_time;
+        self.attempts_total = self.attempts_total.max(s.attempts);
+        self.last_update = Some(self.last_update.unwrap_or(0).max(t));
+
+        // Older-executed report (or one we've already superseded): keep the
+        // current, newer status untouched.
+        if self.attempt.as_ref().map(|a| a.report_time).unwrap_or(0) > t {
+            return;
+        }
+
+        let error = s
+            .error
+            .as_ref()
+            .map(|e| e.trim().to_string())
+            .filter(|x| !x.is_empty());
+        self.exit_code = s.exit_code;
+        self.error = error.clone();
+        self.state = if s.success {
+            StepState::Success
+        } else {
+            StepState::Failed
+        };
+        self.attempt = Some(StepAttemptStatus {
+            n: s.attempts,
+            report_time: t,
+            success: s.success,
+            exit_code: s.exit_code,
+            error,
+            log_tail: s.log_tail.clone(),
+        });
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepAttemptStatus {
     pub n: u32,
@@ -1896,5 +1947,80 @@ observers:
         let back: JobRun = serde_json::from_str(&json).unwrap();
         assert_eq!(back.status, JobRunStatus::Queued);
         assert_eq!(back.job_def_id, "migrate");
+    }
+
+    // ── StepStatus::apply_report — out-of-order report folding ────────────────
+
+    fn mk_step_status() -> StepStatus {
+        StepStatus {
+            step_id: "svc/0".to_string(),
+            name: "pull".to_string(),
+            is_undo: false,
+            defined_in_spec: true,
+            state: StepState::Pending,
+            last_update: None,
+            attempt: None,
+            attempts_total: 0,
+            exit_code: None,
+            error: None,
+        }
+    }
+
+    fn mk_step_report(report_time: u64, success: bool, exit_code: Option<i32>) -> StepReport {
+        StepReport {
+            revision_id: "r1".to_string(),
+            run_id: "svc".to_string(),
+            name: Some("pull".to_string()),
+            attempts: 1,
+            exit_code,
+            report_time,
+            success,
+            is_undo: false,
+            error: if success {
+                None
+            } else {
+                Some("boom".to_string())
+            },
+            log_tail: None,
+        }
+    }
+
+    // Reproduces the customer's "✗ fail … exit 0" health rows. The snapshot
+    // builder streams reports in `created_at` (server RECEIVE) order, which can
+    // differ from `report_time` (device EXECUTION) order when a device retries a
+    // queued report over a flaky link. Folding an older-executed failure AFTER a
+    // newer success must NOT leave a row that says "failed" but shows exit 0.
+    #[test]
+    fn apply_report_stale_failure_does_not_clobber_newer_success() {
+        let mut st = mk_step_status();
+
+        // Newest execution (t=200) succeeded with exit 0.
+        st.apply_report(&mk_step_report(200, true, Some(0)));
+        // A stale failure (t=100) is RECEIVED later and folded afterwards.
+        st.apply_report(&mk_step_report(100, false, Some(1)));
+
+        // The row must reflect the newest execution consistently.
+        assert_eq!(st.state, StepState::Success, "newest execution wins");
+        assert_eq!(st.exit_code, Some(0));
+        assert!(st.error.is_none());
+        let attempt = st.attempt.as_ref().expect("attempt recorded");
+        assert!(attempt.success);
+        assert_eq!(attempt.exit_code, Some(0));
+        // Aggregates are order-independent maxima.
+        assert_eq!(st.last_update, Some(200));
+    }
+
+    // The forward direction must still land on the newer report regardless of
+    // arrival order: an older success followed by a newer failure ends failed.
+    #[test]
+    fn apply_report_newer_failure_wins_over_older_success() {
+        let mut st = mk_step_status();
+        st.apply_report(&mk_step_report(100, true, Some(0)));
+        st.apply_report(&mk_step_report(200, false, Some(1)));
+
+        assert_eq!(st.state, StepState::Failed);
+        assert_eq!(st.exit_code, Some(1));
+        assert_eq!(st.error.as_deref(), Some("boom"));
+        assert_eq!(st.last_update, Some(200));
     }
 }

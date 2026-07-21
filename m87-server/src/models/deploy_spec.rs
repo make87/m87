@@ -9,7 +9,7 @@ use m87_shared::{
         BucketRow, BucketTotals, DeployReport, DeployReportKind, DeploymentRevision,
         DeploymentStatusSnapshot, FailureAggResponse, JobDef, JobRun, JobRunStatus,
         ObserveStatusItem, Outcome, RollbackStatus, RunStatus, ServiceSpec, SliceLevel, Step,
-        StepAttemptStatus, StepState, StepStatus, UnitKind, UpdateDeployRevisionBody,
+        StepState, StepStatus, UnitKind, UpdateDeployRevisionBody,
     },
     device::ObserveStatus,
 };
@@ -896,37 +896,11 @@ impl DeployReportDoc {
                             continue;
                         }
 
-                        let st = &mut run.steps[slot];
-                        st.attempts_total = st.attempts_total.max(s.attempts);
-                        st.exit_code = s.exit_code;
-                        st.error = s
-                            .error
-                            .as_ref()
-                            .map(|e| e.trim().to_string())
-                            .filter(|x| !x.is_empty());
-                        st.last_update = Some(st.last_update.unwrap_or(0).max(t));
-                        st.state = if s.success {
-                            StepState::Success
-                        } else {
-                            StepState::Failed
-                        };
-
-                        let attempt = StepAttemptStatus {
-                            n: s.attempts,
-                            report_time: t,
-                            success: s.success,
-                            exit_code: s.exit_code,
-                            error: s
-                                .error
-                                .as_ref()
-                                .map(|e| e.trim().to_string())
-                                .filter(|x| !x.is_empty()),
-                            log_tail: s.log_tail.clone(),
-                        };
-
-                        if st.attempt.as_ref().map(|a| a.report_time).unwrap_or(0) <= t {
-                            st.attempt = Some(attempt);
-                        }
+                        // Fold status/exit/error/attempt together by
+                        // `report_time` (newest execution wins) so the row can't
+                        // go internally inconsistent when reports arrive out of
+                        // `created_at` order. See `StepStatus::apply_report`.
+                        run.steps[slot].apply_report(&s);
                     }
                 }
                 DeployReportKind::JobRunReport(_) => {
