@@ -180,6 +180,40 @@ struct ObserveDecision {
     consecutive: u32,
 }
 
+/// Test-only fault injection. If `M87_CRASH_AT` matches `point` and this point
+/// hasn't fired before (one-shot via a marker file under `root_dir`), hard-exit
+/// the process — emulating a power cut at that exact spot with no cleanup or
+/// destructors, the way a Pi loses power mid-reconcile. No-op in production
+/// (env unset). One-shot so a restarted runtime makes forward progress instead
+/// of crash-looping on the same point.
+fn maybe_crash(root_dir: &Path, point: &str) {
+    // Trigger via env var OR a `<root>/.crash_at` file (the file is far more
+    // robust to plumb through a container exec than an env var).
+    let want = std::env::var("M87_CRASH_AT").ok().or_else(|| {
+        std::fs::read_to_string(root_dir.join(".crash_at"))
+            .ok()
+            .map(|s| s.trim().to_string())
+    });
+    let want = match want {
+        Some(v) if !v.is_empty() => v,
+        _ => return,
+    };
+    if want != point {
+        return;
+    }
+    // Emulate power loss. `m87 runtime run` is a supervised, multi-process tree,
+    // so a single `process::exit` is just respawned — it does NOT take the
+    // device down. Instead, signal that reconcile reached this point and then
+    // FREEZE, so the test can SIGKILL the whole tree at exactly this spot (a
+    // true power cut). Recovery clears `.crash_at`, so the restarted runtime
+    // does not freeze again.
+    let _ = std::fs::write(root_dir.join(format!(".reached_{point}")), b"1");
+    tracing::error!("M87_CRASH_AT={point}: frozen at reconcile point for power-loss emulation");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
 fn now_ms_u64() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -600,14 +634,44 @@ impl DeploymentManager {
             Some(c) => c,
             None => return Ok(()),
         };
+        let desired_svcs = desired.get_service_map();
         let mut ds = self.dirty_services.write().await;
-        for (hash, svc) in desired.get_service_map() {
+        for (hash, svc) in &desired_svcs {
             let wd = self
                 .resolve_workdir_for(&svc.id, svc.workdir.as_ref())
                 .await?;
             let st = LocalRunState::load(&wd).unwrap_or_default();
-            if st.last_run_hash.as_deref() != Some(&hash) {
-                ds.insert(hash);
+            if st.last_run_hash.as_deref() != Some(hash.as_str()) {
+                ds.insert(hash.clone());
+            }
+        }
+
+        // Re-queue pending teardowns a restart would otherwise forget. The dirty
+        // set is in-memory, so a crash between "reconcile decided to stop a
+        // removed unit" and "that stop confirmed" loses the intent — on restart
+        // we'd rebuild work from the DESIRED revision only and start the
+        // replacement while the old unit is still alive (two on the camera).
+        // For every unit that was in the PREVIOUS revision, is gone from desired,
+        // and whose stop was never confirmed (`last_run_hash` still set — and by
+        // the stop-only-deletes-on-success invariant its workspace + stop steps
+        // are therefore still on disk), re-queue it so reconcile's
+        // `(Some(old), None) -> to_stop` path runs its stop before the update is
+        // considered done.
+        let desired_ids: HashSet<String> = desired_svcs.values().map(|s| s.id.clone()).collect();
+        if let Some(prev) = RevisionStore::get_previous_config(Some(self.root_dir.clone()))? {
+            for (hash, svc) in prev.get_service_map() {
+                if desired_ids.contains(&svc.id) {
+                    // Still desired (e.g. a same-id spec change) — handled by the
+                    // normal dirty path above, not a teardown.
+                    continue;
+                }
+                let wd = self
+                    .resolve_workdir_for(&svc.id, svc.workdir.as_ref())
+                    .await?;
+                let st = LocalRunState::load(&wd).unwrap_or_default();
+                if st.last_run_hash.is_some() {
+                    ds.insert(hash);
+                }
             }
         }
         Ok(())
@@ -622,6 +686,81 @@ impl DeploymentManager {
         for r in runs {
             q.push_back(r);
         }
+    }
+
+    /// Durably record how to stop a unit, next to the unit it starts. Written
+    /// write-ahead (before the unit starts) so a reap can find its stop steps
+    /// even after it's renamed away and dropped out of `previous`. Best-effort —
+    /// a missing manifest only weakens multi-hop reap, never blocks a deploy.
+    fn save_unit_manifest(wd: &Path, spec: &ServiceSpec) {
+        if let Ok(json) = serde_json::to_string_pretty(spec) {
+            let _ = std::fs::write(wd.join("unit.json"), json);
+        }
+    }
+
+    /// Tear down any orphan no longer reachable through the desired/previous
+    /// revisions. `set_dirty_services` (+`previous`) covers a single-hop rename,
+    /// but `previous` only holds one revision back — after two quick renames an
+    /// interrupted teardown is in NEITHER previous nor desired. For every
+    /// workspace whose unit still looks running (`last_run_hash` set = stop never
+    /// confirmed) and whose id is in neither revision, run the stop steps
+    /// recorded in its `unit.json` ledger. Units still in `previous` are left to
+    /// `set_dirty_services` (avoids a double stop). Fully agnostic — it just
+    /// re-runs the unit's own recorded stop.
+    pub(crate) async fn reap_orphaned_units(&self) -> Result<()> {
+        // Only reap when we actually know the desired state. If the config is
+        // absent/unreadable, `keep` would be empty and we'd tear down every
+        // workspace — a transient read miss must not nuke running units.
+        let desired = match RevisionStore::get_desired_config(Some(self.root_dir.clone()))? {
+            Some(d) => Some(d),
+            None => return Ok(()),
+        };
+        let previous = RevisionStore::get_previous_config(Some(self.root_dir.clone()))?;
+        let keep: HashSet<String> = desired
+            .iter()
+            .chain(previous.iter())
+            .flat_map(|r| r.services.iter().map(|s| s.id.clone()))
+            .collect();
+        let rev = desired.as_ref().and_then(|d| d.id.clone()).unwrap_or_default();
+
+        let ws_root = self.root_dir.join("workspaces");
+        let mut rd = match tokio::fs::read_dir(&ws_root).await {
+            Ok(rd) => rd,
+            Err(_) => return Ok(()),
+        };
+        while let Some(entry) = rd.next_entry().await? {
+            if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let id = match entry.file_name().into_string() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if keep.contains(&id) {
+                continue;
+            }
+            let dir = entry.path();
+            // Only reap a unit whose stop was never confirmed.
+            if LocalRunState::load(&dir)
+                .unwrap_or_default()
+                .last_run_hash
+                .is_none()
+            {
+                continue;
+            }
+            let spec: ServiceSpec = match std::fs::read_to_string(dir.join("unit.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+            {
+                Some(s) => s,
+                None => continue, // no ledger -> nothing to run (agnostic)
+            };
+            tracing::info!("reaping orphaned unit '{id}' from teardown ledger");
+            if let Err(e) = self.stop_service(&spec, &rev, &dir).await {
+                tracing::error!("reap of orphaned unit '{id}' failed: {e:#}");
+            }
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -696,6 +835,13 @@ impl DeploymentManager {
             // upgraded device doesn't run duplicate containers fighting for
             // resources. Safe/no-op on a device that was always on 0.8.x.
             self.reap_legacy_workspaces().await;
+
+            // Tear down multi-hop orphans (an interrupted teardown that has since
+            // fallen out of `previous`) from the durable per-unit ledger, before
+            // reconciling — otherwise they'd run alongside the current revision.
+            if let Err(e) = self.reap_orphaned_units().await {
+                tracing::error!("reap_orphaned_units failed: {e:#}");
+            }
 
             let _ = self.set_dirty_services().await;
 
@@ -908,6 +1054,12 @@ impl DeploymentManager {
             start_map.insert(s.id.clone(), s);
         }
 
+        // Reconcile has decided a unit must be stopped but hasn't run its stop
+        // yet. Crash here to test that the teardown intent survives a restart
+        // (today it does not — the dirty set is in-memory and rebuilt from the
+        // desired revision only, so a removed unit's pending stop is forgotten).
+        maybe_crash(&self.root_dir, "before_stops");
+
         // Phase 2a: stop first. A failing stop step must NOT be silently
         // swallowed — it leaves a half-torn-down unit. Record the failure so the
         // service stays dirty (and is retried) and the error is surfaced to the
@@ -923,6 +1075,10 @@ impl DeploymentManager {
                 failed_hashes.insert(spec.get_hash());
             }
         }
+
+        // Old units have been stopped; new ones not yet started. Crash here to
+        // test that a power cut mid-transition converges to a single unit.
+        maybe_crash(&self.root_dir, "after_stop_before_start");
 
         // Phase 2b: start — but ONLY if every stop this pass succeeded. A unit
         // whose stop failed is still running; bringing the new revision up on
@@ -1015,6 +1171,12 @@ impl DeploymentManager {
 
         self.materialize_files_svc(spec, wd).await?;
 
+        // Record this unit's teardown ledger BEFORE starting it (write-ahead), so
+        // that even if it's later renamed away and falls out of `previous`, a
+        // boot-time reap can still find its stop steps and tear it down. See
+        // `reap_orphaned_units`.
+        Self::save_unit_manifest(wd, spec);
+
         let result = self
             .execute_steps(
                 &spec.id,
@@ -1028,6 +1190,9 @@ impl DeploymentManager {
 
         match result {
             Ok(()) => {
+                // Start steps ran (container is up) but success is NOT yet
+                // recorded — crash here to test idempotent re-run on restart.
+                maybe_crash(&self.root_dir, "after_start_steps");
                 let mut st2 = LocalRunState::load(wd)?;
                 st2.last_run_hash = Some(spec.get_hash());
                 st2.startup_failures = 0;
@@ -2900,5 +3065,104 @@ mod tests {
 
         // A subsequent load is clean — no repeated error, file already handled.
         assert!(LocalRunState::load(wd).is_ok());
+    }
+
+    // Reproduces the customer's intent-loss orphan at the reconcile level. A
+    // rename whose old-unit stop was never confirmed (crash before it ran) must
+    // be re-queued on restart so the stop runs before the new unit — otherwise
+    // the old container is orphaned alongside the new one. The in-memory dirty
+    // set is lost on the crash; `set_dirty_services` (the boot path) must
+    // reconstruct the pending teardown from `previous` + the still-set
+    // `last_run_hash`.
+    #[tokio::test]
+    async fn removed_unit_with_unconfirmed_stop_is_reaped_on_restart() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let marker_a = td.path().join("a");
+        let marker_b = td.path().join("b");
+        let a = marker_a.display().to_string();
+        let b = marker_b.display().to_string();
+
+        // v1: cam-a up (marker A), with a working stop that removes A.
+        let v1 = mk_rev(
+            "r1",
+            vec![mk_svc(
+                "cam-a",
+                sh(format!("touch {a}")),
+                sh(format!("rm -f {a}")),
+            )],
+            vec![],
+            vec![],
+        );
+        mgr.set_desired_units(v1, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(marker_a.exists(), "cam-a should be running");
+
+        // Rename to cam-b: records previous=v1 (still has cam-a) and marks dirty.
+        let v2 = mk_rev(
+            "r2",
+            vec![mk_svc("cam-b", sh(format!("touch {b}")), sh("true"))],
+            vec![],
+            vec![],
+        );
+        mgr.set_desired_units(v2, vec![]).await?;
+
+        // Simulate a crash BEFORE cam-a's stop ran: drop the in-memory dirty set,
+        // then reboot -> set_dirty_services() rebuilds the work-set.
+        mgr.dirty_services.write().await.clear();
+        mgr.set_dirty_services().await?;
+        let _ = mgr.reconcile_dirty().await;
+
+        assert!(
+            !marker_a.exists(),
+            "cam-a's pending stop must be re-run after the restart — not orphaned"
+        );
+        assert!(marker_b.exists(), "cam-b should be running");
+        Ok(())
+    }
+
+    // A: a MULTI-HOP orphan — one that was left running by an interrupted
+    // rename and has since fallen out of `previous_units.json` after a further
+    // deploy — must still be torn down from the durable per-unit ledger m87
+    // records when it starts a unit. `previous` only holds one revision back, so
+    // B alone can't see it.
+    #[tokio::test]
+    async fn multi_hop_orphan_is_reaped_from_ledger() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+        let marker_a = td.path().join("a");
+        let a = marker_a.display().to_string();
+
+        // v1: cam-a runs; its teardown must be recorded durably in its workspace.
+        let v1 = mk_rev(
+            "r1",
+            vec![mk_svc(
+                "cam-a",
+                sh(format!("touch {a}")),
+                sh(format!("rm -f {a}")),
+            )],
+            vec![],
+            vec![],
+        );
+        mgr.set_desired_units(v1, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        assert!(marker_a.exists());
+
+        // Two renames WITHOUT reconciling in between → cam-a is never stopped and
+        // falls out of `previous` (which is now cam-b), then out of desired too.
+        let v2 = mk_rev("r2", vec![mk_svc("cam-b", sh("true"), sh("true"))], vec![], vec![]);
+        mgr.set_desired_units(v2, vec![]).await?;
+        let v3 = mk_rev("r3", vec![mk_svc("cam-c", sh("true"), sh("true"))], vec![], vec![]);
+        mgr.set_desired_units(v3, vec![]).await?;
+
+        // Boot reap must still tear cam-a down from the ledger, even though it's
+        // in neither previous(cam-b) nor desired(cam-c).
+        mgr.reap_orphaned_units().await?;
+
+        assert!(
+            !marker_a.exists(),
+            "multi-hop orphan cam-a must be reaped from the durable ledger"
+        );
+        Ok(())
     }
 }
