@@ -405,14 +405,14 @@ pub async fn create_deployment(
     }
 }
 
-/// The revision update fans out to several DB writes server-side (update the
-/// revision, invalidate the deployment hash, delete matching deploy_reports,
-/// audit log), so it can legitimately take longer than a quick read — well past
-/// the default 10s client timeout under load, which is the "operation timed
-/// out" customers hit and fixed by re-running. Give it a generous per-request
-/// timeout and retry on a timeout / connection drop.
-const DEPLOY_TIMEOUT: Duration = Duration::from_secs(60);
-const DEPLOY_MAX_ATTEMPTS: u32 = 3;
+/// Timeout + retry budget for "heavy" endpoints — ones that fan out to multiple
+/// DB writes or stream/fold/aggregate over `deploy_reports` server-side. These
+/// can legitimately take longer than a quick read, well past the default 10s
+/// client timeout under load, which is the "operation timed out" customers hit
+/// and fixed by re-running. Only applied to idempotent requests (GET reads and
+/// the idempotent revision update), so retrying is always safe.
+const HEAVY_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const HEAVY_MAX_ATTEMPTS: u32 = 3;
 
 pub async fn update_deployment(
     api_url: &str,
@@ -424,14 +424,44 @@ pub async fn update_deployment(
 ) -> Result<()> {
     let url = format!("{}/device/{}/revisions/{}", api_url, device_id, revision_id);
     let client = get_client(trust_invalid_server_cert)?;
-    post_json_retrying(&client, &url, token, &body, DEPLOY_TIMEOUT, DEPLOY_MAX_ATTEMPTS).await
+    let resp = send_retrying(
+        || client.post(&url).bearer_auth(token).json(&body),
+        HEAVY_REQUEST_TIMEOUT,
+        HEAVY_MAX_ATTEMPTS,
+    )
+    .await?;
+    resp.error_for_status().map(|_| ()).map_err(|e| anyhow!(e))
 }
 
-/// POST `body` as JSON, retrying on a timeout / connection drop (NOT on an HTTP
-/// error status — a real server error won't fix itself on retry). Safe to retry
-/// because the revision update is idempotent (supersede-by-id / whole-revision
-/// `$set`), so a request that actually landed before the client gave up is
-/// harmless to repeat.
+/// Send a request (rebuilt by `build` each attempt, since a `RequestBuilder` is
+/// single-use), retrying on a timeout / connection drop with a per-request
+/// timeout. Does NOT retry on an HTTP error status — a real server error won't
+/// fix itself. Only use for idempotent requests.
+async fn send_retrying<F>(
+    build: F,
+    timeout: Duration,
+    max_attempts: u32,
+) -> Result<reqwest::Response>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    let mut last_err = None;
+    for attempt in 1..=max_attempts {
+        match build().timeout(timeout).send().await {
+            Ok(resp) => return Ok(resp),
+            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < max_attempts => {
+                tracing::warn!("request failed ({e}); retry {attempt}/{max_attempts}");
+                last_err = Some(e);
+            }
+            Err(e) => return Err(anyhow!(e)),
+        }
+    }
+    Err(anyhow!(last_err.expect("loop runs at least once")))
+}
+
+/// Test wrapper preserving the earlier `post_json_retrying` surface used by the
+/// retry tests: POST JSON with the heavy retry policy, returning `()`.
+#[cfg(test)]
 async fn post_json_retrying<B: serde::Serialize>(
     client: &Client,
     url: &str,
@@ -440,27 +470,13 @@ async fn post_json_retrying<B: serde::Serialize>(
     timeout: Duration,
     max_attempts: u32,
 ) -> Result<()> {
-    let mut last_err = None;
-    for attempt in 1..=max_attempts {
-        match client
-            .post(url)
-            .bearer_auth(token)
-            .json(body)
-            .timeout(timeout)
-            .send()
-            .await
-        {
-            Ok(resp) => return resp.error_for_status().map(|_| ()).map_err(|e| anyhow!(e)),
-            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < max_attempts => {
-                tracing::warn!(
-                    "deploy request to {url} failed ({e}); retry {attempt}/{max_attempts}"
-                );
-                last_err = Some(e);
-            }
-            Err(e) => return Err(anyhow!(e)),
-        }
-    }
-    Err(anyhow!(last_err.expect("loop runs at least once")))
+    let resp = send_retrying(
+        || client.post(url).bearer_auth(token).json(body),
+        timeout,
+        max_attempts,
+    )
+    .await?;
+    resp.error_for_status().map(|_| ()).map_err(|e| anyhow!(e))
 }
 
 pub async fn delete_deployment(
@@ -511,7 +527,14 @@ pub async fn get_deployment_reports(
     );
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = client.get(&url).bearer_auth(token).send().await?;
+    // Heavy read (server scans deploy_reports); tolerate a slow server under
+    // load with a longer timeout + retry (idempotent GET).
+    let res = send_retrying(
+        || client.get(&url).bearer_auth(token),
+        HEAVY_REQUEST_TIMEOUT,
+        HEAVY_MAX_ATTEMPTS,
+    )
+    .await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -532,7 +555,16 @@ pub async fn get_device_revision_snapshot(
     );
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = client.get(&url).bearer_auth(token).send().await?;
+    // The `m87 health` snapshot streams and folds ALL deploy_reports for the
+    // device+revision server-side — the heaviest read in the API, and the one
+    // most likely to exceed the default timeout on a busy device. Longer
+    // timeout + retry (idempotent GET).
+    let res = send_retrying(
+        || client.get(&url).bearer_auth(token),
+        HEAVY_REQUEST_TIMEOUT,
+        HEAVY_MAX_ATTEMPTS,
+    )
+    .await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
