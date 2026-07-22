@@ -405,6 +405,15 @@ pub async fn create_deployment(
     }
 }
 
+/// The revision update fans out to several DB writes server-side (update the
+/// revision, invalidate the deployment hash, delete matching deploy_reports,
+/// audit log), so it can legitimately take longer than a quick read — well past
+/// the default 10s client timeout under load, which is the "operation timed
+/// out" customers hit and fixed by re-running. Give it a generous per-request
+/// timeout and retry on a timeout / connection drop.
+const DEPLOY_TIMEOUT: Duration = Duration::from_secs(60);
+const DEPLOY_MAX_ATTEMPTS: u32 = 3;
+
 pub async fn update_deployment(
     api_url: &str,
     token: &str,
@@ -415,18 +424,43 @@ pub async fn update_deployment(
 ) -> Result<()> {
     let url = format!("{}/device/{}/revisions/{}", api_url, device_id, revision_id);
     let client = get_client(trust_invalid_server_cert)?;
+    post_json_retrying(&client, &url, token, &body, DEPLOY_TIMEOUT, DEPLOY_MAX_ATTEMPTS).await
+}
 
-    let res = client
-        .post(&url)
-        .bearer_auth(token)
-        .json(&body)
-        .send()
-        .await?;
-
-    match res.error_for_status() {
-        Ok(_) => Ok(()),
-        Err(e) => Err(anyhow!(e)),
+/// POST `body` as JSON, retrying on a timeout / connection drop (NOT on an HTTP
+/// error status — a real server error won't fix itself on retry). Safe to retry
+/// because the revision update is idempotent (supersede-by-id / whole-revision
+/// `$set`), so a request that actually landed before the client gave up is
+/// harmless to repeat.
+async fn post_json_retrying<B: serde::Serialize>(
+    client: &Client,
+    url: &str,
+    token: &str,
+    body: &B,
+    timeout: Duration,
+    max_attempts: u32,
+) -> Result<()> {
+    let mut last_err = None;
+    for attempt in 1..=max_attempts {
+        match client
+            .post(url)
+            .bearer_auth(token)
+            .json(body)
+            .timeout(timeout)
+            .send()
+            .await
+        {
+            Ok(resp) => return resp.error_for_status().map(|_| ()).map_err(|e| anyhow!(e)),
+            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < max_attempts => {
+                tracing::warn!(
+                    "deploy request to {url} failed ({e}); retry {attempt}/{max_attempts}"
+                );
+                last_err = Some(e);
+            }
+            Err(e) => return Err(anyhow!(e)),
+        }
     }
+    Err(anyhow!(last_err.expect("loop runs at least once")))
 }
 
 pub async fn delete_deployment(
@@ -997,5 +1031,85 @@ pub async fn remove_org_device(
     match res.error_for_status() {
         Ok(_) => Ok(()),
         Err(e) => Err(anyhow!(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Clone)]
+    enum Resp {
+        /// Accept the request but never respond (client times out).
+        Stall,
+        /// Respond with an HTTP status and empty body.
+        Status(u16),
+    }
+
+    /// Minimal raw-TCP HTTP mock: the Nth connection gets `seq[N]` (or 204 once
+    /// the sequence is exhausted). Returns the base URL and a per-connection hit
+    /// counter.
+    async fn spawn_http_mock(seq: Vec<Resp>) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        tokio::spawn(async move {
+            for _ in 0..16 {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let idx = h.fetch_add(1, Ordering::SeqCst);
+                let behavior = seq.get(idx).cloned().unwrap_or(Resp::Status(204));
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await; // drain request
+                    match behavior {
+                        Resp::Stall => {
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                        }
+                        Resp::Status(code) => {
+                            let msg =
+                                format!("HTTP/1.1 {code} X\r\nContent-Length: 0\r\n\r\n");
+                            let _ = sock.write_all(msg.as_bytes()).await;
+                        }
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    // Reproduces the customer's intermittent `deploy` timeout: the first request
+    // stalls past the (test-short) timeout, but a retry succeeds. Without the
+    // retry this errors out — exactly the "operation timed out" the customer had
+    // to fix by re-running the command.
+    #[tokio::test]
+    async fn deploy_retries_on_timeout_then_succeeds() {
+        let (base, hits) = spawn_http_mock(vec![Resp::Stall, Resp::Status(204)]).await;
+        let client = get_client(true).unwrap();
+        let body = serde_json::json!({ "revision": "yaml" });
+        let url = format!("{base}/device/d/revisions/r");
+        let r = post_json_retrying(&client, &url, "tok", &body, Duration::from_millis(300), 3).await;
+        assert!(r.is_ok(), "deploy should succeed via retry after a timeout: {r:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "should have retried exactly once");
+    }
+
+    // A real server error is NOT a timeout — it must surface, not be retried into
+    // a false success (a deterministic 500 like the earlier `$set` bug won't fix
+    // itself on retry).
+    #[tokio::test]
+    async fn deploy_does_not_retry_on_server_error() {
+        let (base, hits) = spawn_http_mock(vec![Resp::Status(500)]).await;
+        let client = get_client(true).unwrap();
+        let body = serde_json::json!({});
+        let url = format!("{base}/device/d/revisions/r");
+        let r = post_json_retrying(&client, &url, "tok", &body, Duration::from_millis(500), 3).await;
+        assert!(r.is_err(), "a 500 must not be retried into success");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "must not retry a server error");
     }
 }
