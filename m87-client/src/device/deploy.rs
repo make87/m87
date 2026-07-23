@@ -21,6 +21,10 @@ pub enum SpecType {
     Compose,
     Runspec,
     Deployment,
+    /// A single job definition. Must be explicit: a `JobDef` is a structural
+    /// subset of a `ServiceSpec`, so auto-detection always resolves a bare unit
+    /// YAML to a service — the only way to deploy a job is `--type job`.
+    Job,
 }
 
 impl Default for SpecType {
@@ -163,6 +167,17 @@ pub async fn deploy_file(
                     // Single ServiceSpec or JobDef.
                     parse_unit_yaml(&s, base_dir)?
                 }
+            }
+        }
+        SpecType::Job => {
+            let s = load_file_to_string(&file)?;
+            let mut jd = JobDef::from_yaml(&s).context(
+                "failed to parse as a job definition (use `--type job` only for a JobDef)",
+            )?;
+            jd.resolve_file_references(base_dir)?;
+            UpdateDeployRevisionBody {
+                add_job: Some(jd.to_yaml()?),
+                ..Default::default()
             }
         }
         SpecType::Deployment => {
