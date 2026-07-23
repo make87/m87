@@ -108,6 +108,18 @@ id = "RUSTSEC-2026-0074" # libcrux-sha3: incorrect incremental SHAKE output
 reason = "Pulled via russh's libcrux-ml-kem 0.0.4 (post-quantum KEX). Fix requires a russh bump, blocked by the libc =0.2.177 pin. Correctness bug in the incremental SHAKE API on the same outbound-client SSH path; will clear when russh upgrades."
 
 [[advisories.ignore]]
+id = "RUSTSEC-2026-0207" # libcrux-sha3: incorrect incremental SHAKE output on multiple squeeze calls
+reason = "Same libcrux-sha3 via russh's libcrux-ml-kem 0.0.4 as RUSTSEC-2026-0074 (fixed in 0.0.10, unreachable while ml-kem 0.0.4 pins ^0.0.4). Fix requires a russh bump, blocked by the libc =0.2.177 pin. Outbound-client SSH KEX path only; will clear when russh upgrades."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0208" # libcrux-sha3: potential panic in AVX2 SHAKE-256
+reason = "Same libcrux-sha3 via russh's libcrux-ml-kem 0.0.4 as RUSTSEC-2026-0074/0207 (fixed in 0.0.10, unreachable while ml-kem 0.0.4 pins ^0.0.4). Fix requires a russh bump, blocked by the libc =0.2.177 pin. Outbound-client SSH KEX path only; will clear when russh upgrades."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0212" # libcrux-secrets: potentially incorrect constant-time swap/select on aarch64
+reason = "libcrux-secrets via russh's libcrux-ml-kem 0.0.4 (post-quantum KEX; fixed in 0.0.6, unreachable while ml-kem 0.0.4 pins ^0.0.4). Fix requires a russh bump, blocked by the libc =0.2.177 pin. Outbound-client SSH KEX path only; will clear when russh upgrades."
+
+[[advisories.ignore]]
 id = "RUSTSEC-2026-0173" # proc-macro-error2 unmaintained
 reason = "Build-time-only proc-macro, pulled via russh's libcrux-ml-kem -> hax-lib-macros. No runtime or security impact. Will clear when russh (and its libcrux deps) upgrade past the libc pin."
 
