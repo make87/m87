@@ -194,14 +194,15 @@ impl M87SshHandler {
                     .flatten();
 
                     match data {
+                        // The PTY read is blocking, so `None` means EOF or a
+                        // read error — the child exited / the pty closed. End
+                        // the task instead of spinning a 10ms-paced loop forever.
+                        None => break,
+                        // SSH channel gone → nothing left to forward to. Stop.
                         Some(bytes) => {
                             if handle.data(channel, bytes.into()).await.is_err() {
-                                tokio::time::sleep(Duration::from_millis(10)).await;
-                                continue;
+                                break;
                             }
-                        }
-                        None => {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
                         }
                     }
                 }
@@ -491,7 +492,9 @@ impl server::Handler for M87SshHandler {
             let handle = handle.clone();
             async move {
                 loop {
-                    let data = tokio::task::spawn_blocking({
+                    // Ok(Some) = data, Ok(None) = idle (Ok(0), NOT EOF for a PTY),
+                    // Err = a real read error → stop instead of idling forever.
+                    let data: Result<Option<Vec<u8>>, ()> = tokio::task::spawn_blocking({
                         let reader = reader.clone();
                         move || {
                             use std::io::Read;
@@ -499,23 +502,26 @@ impl server::Handler for M87SshHandler {
                             let mut guard = reader.lock().unwrap();
 
                             match guard.read(&mut buf) {
-                                Ok(n) if n > 0 => Some(buf[..n].to_vec()),
-                                Ok(_) => None, // NOT EOF for PTY
-                                Err(_) => None,
+                                Ok(n) if n > 0 => Ok(Some(buf[..n].to_vec())),
+                                Ok(_) => Ok(None),
+                                Err(_) => Err(()),
                             }
                         }
                     })
                     .await
-                    .ok()
-                    .flatten();
+                    .unwrap_or(Err(()));
 
-                    if let Some(bytes) = data {
-                        if handle.data(channel, bytes.into()).await.is_err() {
-                            break;
+                    match data {
+                        Ok(Some(bytes)) => {
+                            if handle.data(channel, bytes.into()).await.is_err() {
+                                break;
+                            }
                         }
-                    } else {
-                        // PTY idle — do NOT exit
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        // PTY idle — do NOT exit; the child-wait task closes the
+                        // channel on exit, which then breaks this loop.
+                        Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
+                        // Real read error (pty broken) → stop.
+                        Err(()) => break,
                     }
                 }
             }
