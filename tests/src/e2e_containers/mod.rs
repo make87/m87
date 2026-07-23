@@ -4,6 +4,7 @@ mod runtime_args;
 mod backward_compat;
 pub mod containers;
 mod deployment;
+mod deployment_docker;
 mod device_registration;
 mod docker;
 mod logs_status;

@@ -405,6 +405,15 @@ pub async fn create_deployment(
     }
 }
 
+/// Timeout + retry budget for "heavy" endpoints — ones that fan out to multiple
+/// DB writes or stream/fold/aggregate over `deploy_reports` server-side. These
+/// can legitimately take longer than a quick read, well past the default 10s
+/// client timeout under load, which is the "operation timed out" customers hit
+/// and fixed by re-running. Only applied to idempotent requests (GET reads and
+/// the idempotent revision update), so retrying is always safe.
+const HEAVY_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const HEAVY_MAX_ATTEMPTS: u32 = 3;
+
 pub async fn update_deployment(
     api_url: &str,
     token: &str,
@@ -415,18 +424,59 @@ pub async fn update_deployment(
 ) -> Result<()> {
     let url = format!("{}/device/{}/revisions/{}", api_url, device_id, revision_id);
     let client = get_client(trust_invalid_server_cert)?;
+    let resp = send_retrying(
+        || client.post(&url).bearer_auth(token).json(&body),
+        HEAVY_REQUEST_TIMEOUT,
+        HEAVY_MAX_ATTEMPTS,
+    )
+    .await?;
+    resp.error_for_status().map(|_| ()).map_err(|e| anyhow!(e))
+}
 
-    let res = client
-        .post(&url)
-        .bearer_auth(token)
-        .json(&body)
-        .send()
-        .await?;
-
-    match res.error_for_status() {
-        Ok(_) => Ok(()),
-        Err(e) => Err(anyhow!(e)),
+/// Send a request (rebuilt by `build` each attempt, since a `RequestBuilder` is
+/// single-use), retrying on a timeout / connection drop with a per-request
+/// timeout. Does NOT retry on an HTTP error status — a real server error won't
+/// fix itself. Only use for idempotent requests.
+async fn send_retrying<F>(
+    build: F,
+    timeout: Duration,
+    max_attempts: u32,
+) -> Result<reqwest::Response>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    let mut last_err = None;
+    for attempt in 1..=max_attempts {
+        match build().timeout(timeout).send().await {
+            Ok(resp) => return Ok(resp),
+            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < max_attempts => {
+                tracing::warn!("request failed ({e}); retry {attempt}/{max_attempts}");
+                last_err = Some(e);
+            }
+            Err(e) => return Err(anyhow!(e)),
+        }
     }
+    Err(anyhow!(last_err.expect("loop runs at least once")))
+}
+
+/// Test wrapper preserving the earlier `post_json_retrying` surface used by the
+/// retry tests: POST JSON with the heavy retry policy, returning `()`.
+#[cfg(test)]
+async fn post_json_retrying<B: serde::Serialize>(
+    client: &Client,
+    url: &str,
+    token: &str,
+    body: &B,
+    timeout: Duration,
+    max_attempts: u32,
+) -> Result<()> {
+    let resp = send_retrying(
+        || client.post(url).bearer_auth(token).json(body),
+        timeout,
+        max_attempts,
+    )
+    .await?;
+    resp.error_for_status().map(|_| ()).map_err(|e| anyhow!(e))
 }
 
 pub async fn delete_deployment(
@@ -477,7 +527,14 @@ pub async fn get_deployment_reports(
     );
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = client.get(&url).bearer_auth(token).send().await?;
+    // Heavy read (server scans deploy_reports); tolerate a slow server under
+    // load with a longer timeout + retry (idempotent GET).
+    let res = send_retrying(
+        || client.get(&url).bearer_auth(token),
+        HEAVY_REQUEST_TIMEOUT,
+        HEAVY_MAX_ATTEMPTS,
+    )
+    .await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -498,7 +555,16 @@ pub async fn get_device_revision_snapshot(
     );
     let client = get_client(trust_invalid_server_cert)?;
 
-    let res = client.get(&url).bearer_auth(token).send().await?;
+    // The `m87 health` snapshot streams and folds ALL deploy_reports for the
+    // device+revision server-side — the heaviest read in the API, and the one
+    // most likely to exceed the default timeout on a busy device. Longer
+    // timeout + retry (idempotent GET).
+    let res = send_retrying(
+        || client.get(&url).bearer_auth(token),
+        HEAVY_REQUEST_TIMEOUT,
+        HEAVY_MAX_ATTEMPTS,
+    )
+    .await?;
 
     match res.error_for_status() {
         Ok(r) => Ok(r.json().await?),
@@ -997,5 +1063,85 @@ pub async fn remove_org_device(
     match res.error_for_status() {
         Ok(_) => Ok(()),
         Err(e) => Err(anyhow!(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Clone)]
+    enum Resp {
+        /// Accept the request but never respond (client times out).
+        Stall,
+        /// Respond with an HTTP status and empty body.
+        Status(u16),
+    }
+
+    /// Minimal raw-TCP HTTP mock: the Nth connection gets `seq[N]` (or 204 once
+    /// the sequence is exhausted). Returns the base URL and a per-connection hit
+    /// counter.
+    async fn spawn_http_mock(seq: Vec<Resp>) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        tokio::spawn(async move {
+            for _ in 0..16 {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let idx = h.fetch_add(1, Ordering::SeqCst);
+                let behavior = seq.get(idx).cloned().unwrap_or(Resp::Status(204));
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await; // drain request
+                    match behavior {
+                        Resp::Stall => {
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                        }
+                        Resp::Status(code) => {
+                            let msg =
+                                format!("HTTP/1.1 {code} X\r\nContent-Length: 0\r\n\r\n");
+                            let _ = sock.write_all(msg.as_bytes()).await;
+                        }
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    // Reproduces the customer's intermittent `deploy` timeout: the first request
+    // stalls past the (test-short) timeout, but a retry succeeds. Without the
+    // retry this errors out — exactly the "operation timed out" the customer had
+    // to fix by re-running the command.
+    #[tokio::test]
+    async fn deploy_retries_on_timeout_then_succeeds() {
+        let (base, hits) = spawn_http_mock(vec![Resp::Stall, Resp::Status(204)]).await;
+        let client = get_client(true).unwrap();
+        let body = serde_json::json!({ "revision": "yaml" });
+        let url = format!("{base}/device/d/revisions/r");
+        let r = post_json_retrying(&client, &url, "tok", &body, Duration::from_millis(300), 3).await;
+        assert!(r.is_ok(), "deploy should succeed via retry after a timeout: {r:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "should have retried exactly once");
+    }
+
+    // A real server error is NOT a timeout — it must surface, not be retried into
+    // a false success (a deterministic 500 like the earlier `$set` bug won't fix
+    // itself on retry).
+    #[tokio::test]
+    async fn deploy_does_not_retry_on_server_error() {
+        let (base, hits) = spawn_http_mock(vec![Resp::Status(500)]).await;
+        let client = get_client(true).unwrap();
+        let body = serde_json::json!({});
+        let url = format!("{base}/device/d/revisions/r");
+        let r = post_json_retrying(&client, &url, "tok", &body, Duration::from_millis(500), 3).await;
+        assert!(r.is_err(), "a 500 must not be retried into success");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "must not retry a server error");
     }
 }

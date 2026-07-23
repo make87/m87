@@ -169,17 +169,20 @@ pub fn to_update_doc(
             .map_err(|e| ServerError::bad_request(&format!("invalid YAML in `add_job`: {}", e)))?;
         let bson = to_bson(&job)
             .map_err(|e| ServerError::bad_request(&format!("JobDef -> bson failed: {}", e)))?;
-        return Ok((supersede_unit_by_id("revision.jobs", &job.id, bson), None));
+        // Jobs serialize under the canonical `job_defs` key (the read side
+        // ignores the legacy `jobs` array when `job_defs` exists), so mutate
+        // `revision.job_defs`, NOT the legacy `revision.jobs`.
+        return Ok((supersede_unit_by_id("revision.job_defs", &job.id, bson), None));
     }
 
     if let Some(id) = &body.remove_unit_id {
-        // Remove from all three arrays by id
+        // Remove from all three canonical arrays by id.
         return Ok((
             doc! {
                 "$pull": {
                     "revision.services": { "id": id },
                     "revision.observers": { "id": id },
-                    "revision.jobs": { "id": id },
+                    "revision.job_defs": { "id": id },
                 }
             }
             .into(),
@@ -337,6 +340,23 @@ impl DeployRevisionDoc {
             }
         };
 
+        // Single active revision per device: deactivate any existing active
+        // revisions before inserting a new active one, so a check-then-insert
+        // race can't leave the device with several `active: true` docs. (The
+        // deterministic read in `get_active_device_deployment` still guarantees
+        // convergence even if one slips through.)
+        if active {
+            if let Some(device_id) = device_id {
+                let _ = db
+                    .deploy_revisions()
+                    .update_many(
+                        doc! { "device_id": device_id, "active": true },
+                        doc! { "$set": { "active": false } },
+                    )
+                    .await;
+            }
+        }
+
         let doc = Self {
             id: None,
             revision,
@@ -359,9 +379,18 @@ impl DeployRevisionDoc {
         db: &Arc<Mongo>,
         device_id: ObjectId,
     ) -> ServerResult<Option<Self>> {
+        // Deterministic pick: the newest active revision by `index` (then `_id`).
+        // If a device ever has more than one `active: true` doc (e.g. two
+        // first-deploys racing the check-then-insert in create_deployment), an
+        // unsorted `find_one` returns an ARBITRARY one per call — so the
+        // deployment hash flaps between them, the device never reads
+        // `up_to_date`, and the server sends a new target on every heartbeat,
+        // which drives a heartbeat/reconcile storm. Sorting makes every call
+        // return the SAME revision, so the device converges.
         let doc_opt = db
             .deploy_revisions()
             .find_one(doc! { "device_id": device_id, "active": true })
+            .sort(doc! { "index": -1, "_id": -1 })
             .await?;
 
         match doc_opt {
@@ -1501,5 +1530,47 @@ mod tests {
         };
         let (update, _extra) = to_update_doc(&body).expect("to_update_doc");
         assert_supersedes_by_id(&update, "add_job");
+    }
+
+    // `DeploymentRevision` serializes its jobs under the canonical `job_defs`
+    // key (the read side ignores the legacy `jobs` array when `job_defs` is
+    // present). `add_job` therefore MUST write to `revision.job_defs`; writing
+    // to the legacy `revision.jobs` lands the JobDef in the wrong array — it's
+    // dropped on read, and the mixed legacy/new `jobs` array fails to decode on
+    // the audit-log read-back, which is the 500 the UI hit.
+    #[test]
+    fn add_job_targets_canonical_job_defs_field() {
+        let body = UpdateDeployRevisionBody {
+            add_job: Some("id: job\n".to_string()),
+            ..Default::default()
+        };
+        let (update, _extra) = to_update_doc(&body).expect("to_update_doc");
+        let rendered = format!("{update:?}");
+        assert!(
+            rendered.contains("revision.job_defs"),
+            "add_job must write to the canonical `revision.job_defs`. got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("revision.jobs"),
+            "add_job must NOT write to the legacy `revision.jobs`. got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn remove_unit_id_pulls_job_from_canonical_job_defs_field() {
+        let body = UpdateDeployRevisionBody {
+            remove_unit_id: Some("job".to_string()),
+            ..Default::default()
+        };
+        let (update, _extra) = to_update_doc(&body).expect("to_update_doc");
+        let rendered = format!("{update:?}");
+        assert!(
+            rendered.contains("revision.job_defs"),
+            "remove_unit_id must pull the job entry from `revision.job_defs`. got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("revision.jobs"),
+            "remove_unit_id must NOT reference the legacy `revision.jobs`. got: {rendered}"
+        );
     }
 }

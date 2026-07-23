@@ -337,6 +337,22 @@ impl Display for DeploymentRevision {
 }
 
 impl DeploymentRevision {
+    /// Ids of services that *start* something (have startup steps) but declare
+    /// no working `stop` (no stop block, or an empty one). m87 has nothing to
+    /// run to tear these down, so on a rename or reboot the old process/container
+    /// can be orphaned. Surfaced at deploy time so the operator adds a stop that
+    /// fully removes the unit (the teardown contract).
+    pub fn units_without_stop(&self) -> Vec<String> {
+        self.services
+            .iter()
+            .filter(|s| {
+                !s.steps.is_empty()
+                    && s.stop.as_ref().map_or(true, |st| st.steps.is_empty())
+            })
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
     pub fn new(
         services: Vec<ServiceSpec>,
         observers: Vec<ServiceSpec>,
@@ -2022,5 +2038,53 @@ observers:
         assert_eq!(st.exit_code, Some(1));
         assert_eq!(st.error.as_deref(), Some("boom"));
         assert_eq!(st.last_update, Some(200));
+    }
+
+    // E: a service that starts something but declares no working stop can't be
+    // torn down by m87 (a stop that never runs, or is empty, leaves the unit to
+    // orphan on the next rename/reboot). Flag it at deploy time.
+    #[test]
+    fn service_with_start_but_no_stop_is_flagged() {
+        let yaml = r#"
+services:
+  - id: cam
+    steps:
+      - name: up
+        run: docker compose up -d
+"#;
+        let rev = DeploymentRevision::from_yaml(yaml).unwrap();
+        assert_eq!(rev.units_without_stop(), vec!["cam".to_string()]);
+    }
+
+    #[test]
+    fn service_with_stop_is_not_flagged() {
+        let yaml = r#"
+services:
+  - id: cam
+    steps:
+      - name: up
+        run: docker compose up -d
+    stop:
+      steps:
+        - name: down
+          run: docker compose down
+"#;
+        let rev = DeploymentRevision::from_yaml(yaml).unwrap();
+        assert!(rev.units_without_stop().is_empty());
+    }
+
+    #[test]
+    fn pure_observer_without_start_is_not_flagged() {
+        // No start steps → nothing to tear down → not a footgun.
+        let yaml = r#"
+observers:
+  - id: watch
+    observe:
+      health:
+        every: 60s
+        observe: echo ok
+"#;
+        let rev = DeploymentRevision::from_yaml(yaml).unwrap();
+        assert!(rev.units_without_stop().is_empty());
     }
 }

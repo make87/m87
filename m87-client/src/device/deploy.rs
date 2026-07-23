@@ -21,6 +21,10 @@ pub enum SpecType {
     Compose,
     Runspec,
     Deployment,
+    /// A single job definition. Must be explicit: a `JobDef` is a structural
+    /// subset of a `ServiceSpec`, so auto-detection always resolves a bare unit
+    /// YAML to a service — the only way to deploy a job is `--type job`.
+    Job,
 }
 
 impl Default for SpecType {
@@ -72,6 +76,21 @@ async fn resolve_target_deployment_id(
         .await
         .context("failed to get active deployment")?;
     Ok(active)
+}
+
+/// Warn (at deploy time) about services that start something but declare no
+/// working stop. m87 has no way to tear those down on a rename or reboot, so the
+/// old process/container can be orphaned alongside its replacement — the
+/// teardown contract is on the operator here.
+fn warn_units_without_stop(rev: &DeploymentRevision) {
+    for id in rev.units_without_stop() {
+        eprintln!(
+            "warning: service '{id}' has startup steps but no `stop:` steps. m87 cannot \
+             tear it down on a rename or reboot, which can leave it running next to its \
+             replacement (two processes fighting over the same hardware). Add a `stop:` \
+             block that fully removes the unit (e.g. `docker compose down`, not `stop`)."
+        );
+    }
 }
 
 pub async fn deploy_file(
@@ -139,6 +158,7 @@ pub async fn deploy_file(
                     let mut dr = DeploymentRevision::from_yaml(&s)
                         .context("failed to parse as DeploymentRevision")?;
                     let _ = dr.resolve_file_references(base_dir);
+                    warn_units_without_stop(&dr);
                     UpdateDeployRevisionBody {
                         revision: Some(dr.to_yaml()?),
                         ..Default::default()
@@ -149,10 +169,22 @@ pub async fn deploy_file(
                 }
             }
         }
+        SpecType::Job => {
+            let s = load_file_to_string(&file)?;
+            let mut jd = JobDef::from_yaml(&s).context(
+                "failed to parse as a job definition (use `--type job` only for a JobDef)",
+            )?;
+            jd.resolve_file_references(base_dir)?;
+            UpdateDeployRevisionBody {
+                add_job: Some(jd.to_yaml()?),
+                ..Default::default()
+            }
+        }
         SpecType::Deployment => {
             let s = load_file_to_string(&file)?;
             let mut dr = DeploymentRevision::from_yaml(&s)?;
             dr.resolve_file_references(base_dir)?;
+            warn_units_without_stop(&dr);
             UpdateDeployRevisionBody {
                 revision: Some(dr.to_yaml()?),
                 ..Default::default()
@@ -764,6 +796,7 @@ pub async fn deploy_file_replace_all(device_name: &str, file: PathBuf) -> Result
     let s = load_file_to_string(&file)?;
     let mut dr = DeploymentRevision::from_yaml(&s).context("failed to parse revision YAML")?;
     dr.resolve_file_references(base_dir)?;
+    warn_units_without_stop(&dr);
 
     server::update_deployment(
         &api_url,

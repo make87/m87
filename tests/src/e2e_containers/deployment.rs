@@ -382,6 +382,127 @@ async fn test_deploy_replace_all_swaps_spec() -> Result<(), E2EError> {
     Ok(())
 }
 
+/// True if a job with `id` is present under the canonical `job_defs` array of a
+/// `spec --json` revision.
+fn job_in_defs(revision: &Value, id: &str) -> bool {
+    revision
+        .get("job_defs")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .any(|u| u.get("id").and_then(|v| v.as_str()) == Some(id))
+        })
+        .unwrap_or(false)
+}
+
+/// `m87 <dev> deploy <jobdef.yml> --type job` must land the job in the spec's
+/// `job_defs` array — the `add_job` path, which is API/UI-only until now (a bare
+/// unit YAML always resolves to a service). Exercises CLI -> server `add_job` ->
+/// Mongo -> read-back end to end: if `add_job` writes to the wrong field, the
+/// deploy 500s on the audit-log read-back and the job never appears.
+#[tokio::test]
+async fn test_deploy_job_via_cli_lands_in_job_defs() -> Result<(), E2EError> {
+    let setup = TestSetup::init().await?;
+
+    let job_id = "e2e-migrate-job";
+    let job_yaml = format!(
+        r#"id: {job_id}
+steps:
+  - name: run
+    run: "true"
+"#
+    );
+    write_cli_file(&setup, "/tmp/job.yml", &job_yaml).await?;
+    let out = exec_shell(
+        &setup.infra.cli,
+        &format!("m87 {} deploy /tmp/job.yml --type job 2>&1", setup.device.name),
+    )
+    .await?;
+    assert!(
+        !out.contains("failed to add run spec") && !out.contains("500"),
+        "deploy --type job must not error (add_job wrote the wrong field?): {out}"
+    );
+
+    wait_for_device_json(&setup, "spec --json", "job in job_defs", |s| {
+        job_in_defs(s, job_id).then(|| ())
+    })
+    .await?;
+
+    Ok(())
+}
+
+/// A device with MORE THAN ONE `active: true` revision (which a check-then-
+/// insert race in create_deployment can produce) must still resolve to ONE
+/// stable revision. An unsorted `find_one({active:true})` returns an arbitrary
+/// one per call, so the deployment hash flaps, the device never reads
+/// `up_to_date`, and the server sends a new target on every heartbeat — a
+/// heartbeat/reconcile storm. The server must resolve deterministically to the
+/// newest active revision.
+#[tokio::test]
+async fn test_multiple_active_revisions_resolve_to_newest_deterministically() -> Result<(), E2EError>
+{
+    use mongodb::bson::{doc, oid::ObjectId, Document};
+    use mongodb::Client;
+
+    let setup = TestSetup::init().await?;
+
+    // Connect to the same Mongo the server uses (DB "e2e-tests").
+    let port = setup
+        .infra
+        .mongo
+        .get_host_port_ipv4(27017)
+        .await
+        .map_err(|e| E2EError::Setup(e.to_string()))?;
+    let client = Client::with_uri_str(format!("mongodb://localhost:{port}"))
+        .await
+        .map_err(|e| E2EError::Setup(e.to_string()))?;
+    let db = client.database("e2e-tests");
+
+    // Look up the device's Mongo _id by its short_id.
+    let dev: Document = db
+        .collection::<Document>("devices")
+        .find_one(doc! { "short_id": &setup.device.short_id })
+        .await
+        .map_err(|e| E2EError::Setup(e.to_string()))?
+        .ok_or_else(|| E2EError::Setup("device not found in mongo".into()))?;
+    let device_oid: ObjectId = dev
+        .get_object_id("_id")
+        .map_err(|e| E2EError::Setup(e.to_string()))?;
+
+    // Inject two active revisions — an older (index 0) and a newer (index 1).
+    let rev_old = format!("rev-old-{}", setup.device.short_id);
+    let rev_new = format!("rev-new-{}", setup.device.short_id);
+    let revisions = db.collection::<Document>("deploy_revisions");
+    for (rid, index) in [(&rev_old, 0i32), (&rev_new, 1i32)] {
+        revisions
+            .insert_one(doc! {
+                "revision": { "id": rid },
+                "device_id": device_oid,
+                "active": true,
+                "dirty": false,
+                "index": index,
+                "owner_scope": "test",
+                "allowed_scopes": [],
+            })
+            .await
+            .map_err(|e| E2EError::Setup(e.to_string()))?;
+    }
+
+    // `spec --json` resolves the active revision via the server. It must return
+    // the NEWEST consistently across repeated calls, not flap between the two.
+    for _ in 0..6 {
+        let v = device_json(&setup, "spec --json").await?;
+        let id = v.get("id").and_then(|x| x.as_str());
+        assert_eq!(
+            id,
+            Some(rev_new.as_str()),
+            "active revision must resolve deterministically to the newest; got {id:?}"
+        );
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Trait shim: `&str -> &'static str` for the static-lifetime description
 // fields used by `WaitConfig`. We need this because the polling helpers
