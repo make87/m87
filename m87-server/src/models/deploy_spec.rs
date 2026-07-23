@@ -340,6 +340,23 @@ impl DeployRevisionDoc {
             }
         };
 
+        // Single active revision per device: deactivate any existing active
+        // revisions before inserting a new active one, so a check-then-insert
+        // race can't leave the device with several `active: true` docs. (The
+        // deterministic read in `get_active_device_deployment` still guarantees
+        // convergence even if one slips through.)
+        if active {
+            if let Some(device_id) = device_id {
+                let _ = db
+                    .deploy_revisions()
+                    .update_many(
+                        doc! { "device_id": device_id, "active": true },
+                        doc! { "$set": { "active": false } },
+                    )
+                    .await;
+            }
+        }
+
         let doc = Self {
             id: None,
             revision,
@@ -362,9 +379,18 @@ impl DeployRevisionDoc {
         db: &Arc<Mongo>,
         device_id: ObjectId,
     ) -> ServerResult<Option<Self>> {
+        // Deterministic pick: the newest active revision by `index` (then `_id`).
+        // If a device ever has more than one `active: true` doc (e.g. two
+        // first-deploys racing the check-then-insert in create_deployment), an
+        // unsorted `find_one` returns an ARBITRARY one per call — so the
+        // deployment hash flaps between them, the device never reads
+        // `up_to_date`, and the server sends a new target on every heartbeat,
+        // which drives a heartbeat/reconcile storm. Sorting makes every call
+        // return the SAME revision, so the device converges.
         let doc_opt = db
             .deploy_revisions()
             .find_one(doc! { "device_id": device_id, "active": true })
+            .sort(doc! { "index": -1, "_id": -1 })
             .await?;
 
         match doc_opt {
