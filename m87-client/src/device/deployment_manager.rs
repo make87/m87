@@ -8,8 +8,11 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Display,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::{fs, io::AsyncWriteExt, sync::RwLock, time::sleep};
 
@@ -50,6 +53,146 @@ async fn ensure_dirs(dir_path: Option<PathBuf>) -> Result<()> {
     fs::create_dir_all(pending_dir(dir_path.clone())?).await?;
     fs::create_dir_all(inflight_dir(dir_path)?).await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Deploy-report event retention
+//
+// Deploy-report events live as files under `events/pending` until the server
+// acks them. If a device is offline, flaky, or churning, that queue can grow to
+// thousands of stale files that are then replayed forever as "catch-up" on every
+// reconnect — pinning a core and spamming heartbeats. Two backstops keep the
+// folder bounded regardless of connectivity:
+//   * age  — drop events older than `EVENT_RETENTION_SECS` (a stale deploy
+//            report is worthless; the newest RunState already supersedes it).
+//   * count — never keep more than `EVENT_MAX_COUNT` files; drop oldest first.
+// Both are enforced lazily (throttled to once per `PRUNE_MIN_INTERVAL_SECS`) on
+// the enqueue and idle-poll paths, plus once unconditionally at startup.
+// ---------------------------------------------------------------------------
+
+/// Default max age for a queued deploy-report event (2 days). Overridable via
+/// the `deploy_report_retention_secs` insector config value.
+const DEFAULT_EVENT_RETENTION_SECS: u64 = 172_800;
+/// Hard cap on queued event files, enforced even when the age bound would keep
+/// them, so a burst can never pollute the folder with thousands of entries.
+const EVENT_MAX_COUNT: usize = 5_000;
+/// Minimum wall-clock gap between prune scans on the hot paths.
+const PRUNE_MIN_INTERVAL_SECS: u64 = 60;
+
+static EVENT_RETENTION_SECS: AtomicU64 = AtomicU64::new(DEFAULT_EVENT_RETENTION_SECS);
+/// Unix-seconds of the last prune scan; 0 means "never". Guards the throttle.
+static LAST_PRUNE_UNIX: AtomicU64 = AtomicU64::new(0);
+
+/// Set the retention window for queued deploy-report events. Called once at
+/// runtime startup from the loaded [`Config`]; a value of 0 disables the age
+/// bound (the count cap still applies).
+pub fn set_event_retention_secs(secs: u64) {
+    EVENT_RETENTION_SECS.store(secs, Ordering::Relaxed);
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Remove stale/excess `*.json` event files from a single directory.
+///
+/// Deterministic core (no globals, no throttle) so it can be unit-tested with a
+/// fixed `now`: first drops every file whose mtime is older than `max_age`
+/// (when `max_age` is non-zero), then — if more than `max_count` survive —
+/// drops the oldest by mtime until `max_count` remain. Returns the number of
+/// files removed. Files with unreadable metadata are left untouched.
+async fn prune_events_dir(
+    dir: &Path,
+    max_age: Duration,
+    max_count: usize,
+    now: SystemTime,
+) -> Result<usize> {
+    let mut rd = match fs::read_dir(dir).await {
+        Ok(d) => d,
+        Err(_) => return Ok(0),
+    };
+    // (path, mtime) for every json event file.
+    let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let mtime = match entry.metadata().await.and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        files.push((path, mtime));
+    }
+
+    let mut removed = 0usize;
+    // Age bound.
+    if !max_age.is_zero() {
+        let mut survivors = Vec::with_capacity(files.len());
+        for (path, mtime) in files {
+            let age = now.duration_since(mtime).unwrap_or(Duration::ZERO);
+            if age > max_age {
+                if fs::remove_file(&path).await.is_ok() {
+                    removed += 1;
+                }
+            } else {
+                survivors.push((path, mtime));
+            }
+        }
+        files = survivors;
+    }
+    // Count cap: drop oldest first.
+    if files.len() > max_count {
+        files.sort_by_key(|(_, mtime)| *mtime);
+        let overflow = files.len() - max_count;
+        for (path, _) in files.into_iter().take(overflow) {
+            if fs::remove_file(&path).await.is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Prune both the pending and inflight event dirs using the configured
+/// retention window and the hard count cap. Unconditional (no throttle) — use
+/// [`maybe_prune_events`] on hot paths.
+pub async fn prune_events(dir_path: Option<PathBuf>) -> Result<usize> {
+    LAST_PRUNE_UNIX.store(now_unix(), Ordering::Relaxed);
+    let max_age = Duration::from_secs(EVENT_RETENTION_SECS.load(Ordering::Relaxed));
+    let now = SystemTime::now();
+    let mut removed = 0;
+    for dir in [pending_dir(dir_path.clone())?, inflight_dir(dir_path)?] {
+        removed += prune_events_dir(&dir, max_age, EVENT_MAX_COUNT, now).await?;
+    }
+    if removed > 0 {
+        tracing::info!("pruned {removed} stale/excess deploy-report event(s)");
+    }
+    Ok(removed)
+}
+
+/// Throttled prune: runs [`prune_events`] at most once per
+/// `PRUNE_MIN_INTERVAL_SECS`, so it can be called freely from the enqueue and
+/// idle-poll paths without rescanning the directory on every event.
+async fn maybe_prune_events(dir_path: Option<PathBuf>) {
+    let now = now_unix();
+    let last = LAST_PRUNE_UNIX.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < PRUNE_MIN_INTERVAL_SECS {
+        return;
+    }
+    // Claim the slot before doing IO so concurrent callers don't all scan.
+    if LAST_PRUNE_UNIX
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    if let Err(e) = prune_events(dir_path).await {
+        tracing::warn!("event prune failed: {e}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1738,6 +1881,9 @@ impl DeploymentManager {
 // ---------------------------------------------------------------------------
 
 pub async fn enqueue_event(kind: DeployReportKind, dir_path: Option<PathBuf>) -> Result<()> {
+    // Trim stale/excess events before adding another, so the folder can never
+    // grow without bound even under a write storm (throttled internally).
+    maybe_prune_events(dir_path.clone()).await;
     let pending = pending_dir(dir_path.clone())?;
     let hash = kind.get_hash();
     let path = pending.join(format!("{}.json", hash));
@@ -1822,6 +1968,9 @@ pub async fn on_new_event(dir_path: Option<PathBuf>) -> Option<ClaimedEvent> {
         match claim_next_event(dir_path.clone()).await {
             Ok(Some(ev)) => return Some(ev),
             Ok(None) => {
+                // Idle: opportunistically trim the queue (throttled) so an
+                // offline device still ages out its stale backlog.
+                maybe_prune_events(dir_path.clone()).await;
                 sleep(Duration::from_millis(200)).await;
             }
             Err(e) => {
@@ -3162,6 +3311,133 @@ mod tests {
         assert!(
             !marker_a.exists(),
             "multi-hop orphan cam-a must be reaped from the durable ledger"
+        );
+        Ok(())
+    }
+
+    // ── Deploy-report event retention ────────────────────────────────────────
+    //
+    // Regression guard for the heartbeat-storm bug: a device that churned or was
+    // offline accumulated thousands of stale deploy-report events in
+    // `events/pending`, which were then replayed forever as catch-up (pinning a
+    // core and spamming heartbeats). The queue must be bounded by both age and
+    // count regardless of connectivity.
+
+    use filetime::{FileTime, set_file_mtime};
+
+    /// Write a json event file and stamp its mtime `age` in the past.
+    fn write_aged_event(dir: &Path, name: &str, age: Duration) {
+        let path = dir.join(format!("{name}.json"));
+        std::fs::write(&path, "{}").unwrap();
+        let when = SystemTime::now() - age;
+        set_file_mtime(&path, FileTime::from_system_time(when)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prune_drops_events_older_than_max_age() -> Result<()> {
+        let td = TempDir::new()?;
+        let dir = td.path();
+        write_aged_event(dir, "fresh", Duration::from_secs(60));
+        write_aged_event(dir, "stale_a", Duration::from_secs(3 * 86_400));
+        write_aged_event(dir, "stale_b", Duration::from_secs(5 * 86_400));
+
+        let removed = prune_events_dir(
+            dir,
+            Duration::from_secs(86_400), // 1 day
+            10_000,
+            SystemTime::now(),
+        )
+        .await?;
+
+        assert_eq!(removed, 2, "both events older than a day must be dropped");
+        assert!(dir.join("fresh.json").exists(), "recent event must survive");
+        assert!(!dir.join("stale_a.json").exists());
+        assert!(!dir.join("stale_b.json").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prune_enforces_max_count_dropping_oldest_first() -> Result<()> {
+        let td = TempDir::new()?;
+        let dir = td.path();
+        // 6 fresh events, staggered mtimes so "oldest" is deterministic.
+        for i in 0..6u64 {
+            write_aged_event(dir, &format!("ev{i}"), Duration::from_secs(i));
+        }
+
+        let removed = prune_events_dir(
+            dir,
+            Duration::from_secs(0), // age bound disabled
+            3,
+            SystemTime::now(),
+        )
+        .await?;
+
+        assert_eq!(removed, 3, "must trim down to the cap");
+        // ev0..ev2 are the newest (smallest backdate) → survive; ev3..ev5 dropped.
+        assert!(dir.join("ev0.json").exists());
+        assert!(dir.join("ev1.json").exists());
+        assert!(dir.join("ev2.json").exists());
+        assert!(!dir.join("ev5.json").exists(), "oldest must be dropped first");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prune_ignores_non_json_files() -> Result<()> {
+        let td = TempDir::new()?;
+        let dir = td.path();
+        let keep = dir.join("notes.txt");
+        std::fs::write(&keep, "x").unwrap();
+        set_file_mtime(
+            &keep,
+            FileTime::from_system_time(SystemTime::now() - Duration::from_secs(10 * 86_400)),
+        )
+        .unwrap();
+
+        let removed =
+            prune_events_dir(dir, Duration::from_secs(86_400), 10_000, SystemTime::now()).await?;
+
+        assert_eq!(removed, 0, "non-event files must be left untouched");
+        assert!(keep.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prune_events_sweeps_pending_and_inflight() -> Result<()> {
+        let td = TempDir::new()?;
+        let root = td.path().to_path_buf();
+        ensure_dirs(Some(root.clone())).await?;
+        set_event_retention_secs(86_400); // 1 day
+
+        write_aged_event(
+            &pending_dir(Some(root.clone()))?,
+            "old_pending",
+            Duration::from_secs(3 * 86_400),
+        );
+        write_aged_event(
+            &inflight_dir(Some(root.clone()))?,
+            "old_inflight",
+            Duration::from_secs(3 * 86_400),
+        );
+        write_aged_event(
+            &pending_dir(Some(root.clone()))?,
+            "recent",
+            Duration::from_secs(30),
+        );
+
+        let removed = prune_events(Some(root.clone())).await?;
+
+        assert_eq!(removed, 2, "stale events in both dirs must be pruned");
+        assert!(pending_dir(Some(root.clone()))?.join("recent.json").exists());
+        assert!(
+            !pending_dir(Some(root.clone()))?
+                .join("old_pending.json")
+                .exists()
+        );
+        assert!(
+            !inflight_dir(Some(root))?
+                .join("old_inflight.json")
+                .exists()
         );
         Ok(())
     }

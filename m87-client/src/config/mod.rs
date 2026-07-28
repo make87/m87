@@ -13,6 +13,9 @@ pub mod profile;
 fn default_heartbeat_interval() -> u64 {
     300 // 5 min
 }
+fn default_deploy_report_retention_secs() -> u64 {
+    172_800 // 2 days; queued deploy-report events older than this are dropped
+}
 fn default_make87_api_url() -> String {
     "https://api.make87.com".to_string()
 }
@@ -34,6 +37,10 @@ pub struct Config {
     pub log_level: String,
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_secs: u64,
+    /// How long (seconds) a queued deploy-report event may sit unacked before it
+    /// is pruned, so a stale backlog can't be replayed forever as catch-up.
+    #[serde(default = "default_deploy_report_retention_secs")]
+    pub deploy_report_retention_secs: u64,
     pub owner_reference: Option<String>,
     pub auth_domain: String,
     pub auth_audience: String,
@@ -57,6 +64,7 @@ impl Default for Config {
             device_id: get_default_device_id(),
             log_level: "info".to_string(),
             heartbeat_interval_secs: default_heartbeat_interval(),
+            deploy_report_retention_secs: default_deploy_report_retention_secs(),
             owner_reference: None,
             auth_domain: "https://auth.make87.com/".to_string(),
             auth_audience: "https://auth.make87.com".to_string(),

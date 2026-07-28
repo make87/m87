@@ -42,6 +42,14 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
     let token = AuthManager::get_device_token()?;
     let short_id = short_device_id(&config.device_id);
 
+    // Bound the deploy-report event queue: apply the configured retention window
+    // and sweep any stale backlog left over from a churn/offline period before we
+    // start replaying events, so we don't catch-up-spam the server on reconnect.
+    crate::device::deployment_manager::set_event_retention_secs(config.deploy_report_retention_secs);
+    if let Err(e) = crate::device::deployment_manager::prune_events(None).await {
+        warn!("initial deploy-report event prune failed: {e}");
+    }
+
     let control_host = format!(
         "control-{}.{}",
         short_id,
@@ -168,11 +176,23 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
     let _sender = tokio::spawn({
         let state = state.clone();
         async move {
+            use std::time::Duration;
+
+            use crate::device::deployment_manager::on_new_event;
+
+            // Fixed next-heartbeat deadline. It only advances after an actual
+            // send, so a `select!` cancellation (the event arm winning) just
+            // resumes waiting for the SAME instant — it does NOT restart the
+            // interval. Previously the interval arm slept *after* sending, so
+            // every cancellation-and-rebuild fired another heartbeat, turning a
+            // pending-event backlog into a ~20/sec heartbeat storm.
+            let interval = {
+                let st = state.lock().await;
+                st.heartbeat_interval
+            };
+            let mut next_heartbeat = tokio::time::Instant::now();
+
             loop {
-                use std::time::Duration;
-
-                use crate::device::deployment_manager::on_new_event;
-
                 tokio::select! {
                     _ = shutdown.changed() => break,
                         // handle envent rx
@@ -213,8 +233,8 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                     },
 
 
-                    _ = async {
-                        let (req, interval) = {
+                    _ = tokio::time::sleep_until(next_heartbeat) => {
+                        let req = {
                             let mut st = state.lock().await;
 
                             let mut req = HeartbeatRequest {
@@ -226,18 +246,20 @@ pub async fn connect_control_tunnel(unit_manager: Arc<DeploymentManager>) -> Res
                             if st.first_heartbeat {
                                 st.first_heartbeat = false;
                                 req.client_version = Some(env!("CARGO_PKG_VERSION").to_string());
-                                req.system_info = Some(get_system_info().await?);
+                                req.system_info = get_system_info().await.ok();
                             }
 
-                            (req, st.heartbeat_interval)
+                            req
                         };
 
                         tracing::info!("Sending heartbeat request");
 
-                        write_msg(&mut send, &req).await?;
-                        tokio::time::sleep(Duration::from_secs(interval)).await;
-                        Ok::<_, anyhow::Error>(())
-                    } => {}
+                        let _ = write_msg(&mut send, &req).await;
+                        // Advance the deadline only after firing, so the
+                        // interval is honored regardless of select cancellation.
+                        next_heartbeat =
+                            tokio::time::Instant::now() + Duration::from_secs(interval);
+                    }
                 }
             }
         }

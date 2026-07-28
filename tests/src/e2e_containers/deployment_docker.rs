@@ -554,8 +554,21 @@ async fn docker_crash_after_start_recovers_idempotent() -> Result<(), E2EError> 
     crash_at_point(&setup, "after_start_steps").await?;
 
     restart_agent(&setup).await?;
-    wait_running_total(&setup, &short, 1, "single container after crash recovery").await?;
-    assert_eq!(running_count_ver(&setup, &short, "v1").await?, 1);
+    // Converge to exactly one v1 container. Check total AND version in a single
+    // poll: the idempotent start step is `docker rm -f {name}; docker run`, so a
+    // separate `running_count_ver` query can land in the down-then-up gap while
+    // the step re-executes and read 0 even though total momentarily reads 1.
+    wait_for(
+        WaitConfig::with_description("single v1 container after crash recovery")
+            .max_attempts(45)
+            .interval(Duration::from_secs(2)),
+        || async {
+            let total = running_count(&setup, &short).await.unwrap_or(99);
+            let v1 = running_count_ver(&setup, &short, "v1").await.unwrap_or(0);
+            total == 1 && v1 == 1
+        },
+    )
+    .await?;
 
     cleanup(&setup, &short).await;
     Ok(())
