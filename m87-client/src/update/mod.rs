@@ -39,6 +39,63 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
+/// Directory used to stage an update, always a sibling of the running binary.
+///
+/// This must live on the SAME filesystem as the binary it replaces. On the
+/// device fleet `/tmp` is a tmpfs (RAM) mounted on a different filesystem than
+/// `~/.local/bin`, which has two consequences we must avoid:
+///
+///  * `self_replace` (and any `mv`) degrades from an atomic `rename()` to a
+///    multi-megabyte copy. If the process is killed mid-copy the binary on disk
+///    is left truncated, which crash-loops until systemd's start limit gives up
+///    — a bricked device with no way back in.
+///  * a tmpfs partial is lost on reboot, so a slow LTE download can never make
+///    progress across the restarts it is most likely to hit.
+///
+/// Staging next to the target fixes both: the install is an atomic rename, and
+/// the partial persists so the next run resumes instead of restarting.
+fn update_work_dir(exe_path: &Path) -> Result<std::path::PathBuf> {
+    let dir = exe_path
+        .parent()
+        .ok_or_else(|| anyhow!("executable has no parent directory"))?
+        .join(".m87-update");
+    Ok(dir)
+}
+
+/// Version-keyed name for a staged download, so a partial for one release is
+/// never spliced onto a different one when the target moves mid-download.
+fn staged_name(asset_name: &str, version: &str) -> String {
+    format!("{asset_name}-{version}")
+}
+
+/// Delete staged files that do not belong to `keep_version`.
+///
+/// Bounds the staging dir on small SD cards and guarantees a stale partial from
+/// an abandoned target can't be resumed into the wrong binary. Best-effort:
+/// individual failures are ignored so cleanup never blocks an update.
+fn clean_stale_staged(work_dir: &Path, asset_name: &str, keep_version: &str) -> usize {
+    let keep = staged_name(asset_name, keep_version);
+    let mut removed = 0;
+    let Ok(entries) = std::fs::read_dir(work_dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // Only touch our own staging artifacts, and never the one in flight.
+        if !name.starts_with(asset_name) {
+            continue;
+        }
+        if name == keep || name == format!("{keep}.gz") {
+            continue;
+        }
+        if std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 pub async fn update(interactive: bool) -> Result<bool> {
     if interactive {
         println!("Checking for updates...");
@@ -88,9 +145,22 @@ pub async fn update(interactive: bool) -> Result<bool> {
         println!("Downloading {}...", asset.name);
     }
 
-    // Create temp directory for download
-    let tmp_dir = self_update::TempDir::new()?;
-    let download_path = tmp_dir.path().join(&asset.name);
+    // Stage NEXT TO the binary we are replacing (see `update_work_dir`): same
+    // filesystem => atomic rename on install, and the partial survives a reboot
+    // so a slow LTE download resumes instead of restarting from zero.
+    let exe_path = crate::util::command::current_exe_path()?;
+    let work_dir = update_work_dir(&exe_path)?;
+    std::fs::create_dir_all(&work_dir)
+        .with_context(|| format!("creating update staging dir {}", work_dir.display()))?;
+    // Drop partials for other versions before adding another.
+    clean_stale_staged(&work_dir, asset_name, new_version);
+
+    let staged = staged_name(asset_name, new_version);
+    let download_path = if is_gz {
+        work_dir.join(format!("{staged}.gz"))
+    } else {
+        work_dir.join(&staged)
+    };
 
     // Resumable download — the fleet runs on ~10 KB/s LTE where a one-shot pull
     // reliably times out. Stream with HTTP Range resume so drops/stalls just
@@ -109,15 +179,15 @@ pub async fn update(interactive: bool) -> Result<bool> {
 
     // If compressed, let self_update gunzip it (ArchiveKind::Plain + Gz — a bare
     // single-file .gz, not a tar). It writes the decompressed file into the dir
-    // with the `.gz` extension stripped, i.e. `<asset_name>`.
+    // with the `.gz` extension stripped, i.e. `<staged>`.
     let bin_path = if is_gz {
         if interactive {
             println!("Decompressing...");
         }
         self_update::Extract::from_source(&download_path)
             .archive(self_update::ArchiveKind::Plain(Some(self_update::Compression::Gz)))
-            .extract_into(tmp_dir.path())?;
-        tmp_dir.path().join(asset_name)
+            .extract_into(&work_dir)?;
+        work_dir.join(&staged)
     } else {
         download_path
     };
@@ -134,6 +204,12 @@ pub async fn update(interactive: bool) -> Result<bool> {
         println!("Replacing binary...");
     }
     self_update::self_replace::self_replace(&bin_path)?;
+
+    // Installed successfully — drop the staging artifacts so the dir doesn't
+    // accumulate release binaries on a small SD card. Best-effort: a failure
+    // here must not turn a successful update into an error.
+    let _ = std::fs::remove_file(&bin_path);
+    let _ = std::fs::remove_file(work_dir.join(format!("{staged}.gz")));
 
     if interactive {
         println!("Updated from v{} → v{}", current_version, new_version);
@@ -315,6 +391,64 @@ pub async fn daemon_check_and_update() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Update staging: same-filesystem + resumable ──────────────────────────
+    //
+    // Regression guard for the bricked-device failure mode: staging in /tmp
+    // (a tmpfs on a DIFFERENT filesystem than ~/.local/bin on the fleet) turns
+    // the install into a multi-MB copy over the live binary instead of an
+    // atomic rename, and throws the partial away on every reboot.
+
+    #[test]
+    fn staging_dir_is_a_sibling_of_the_binary_it_replaces() {
+        let exe = Path::new("/home/pi/.local/bin/m87");
+        let work = update_work_dir(exe).unwrap();
+
+        // Same parent directory => same filesystem => `self_replace` is an
+        // atomic rename() and can never leave a truncated binary behind.
+        assert_eq!(
+            work.parent().unwrap(),
+            exe.parent().unwrap(),
+            "staging dir must sit beside the target binary, not in /tmp"
+        );
+        assert!(
+            !work.starts_with("/tmp"),
+            "staging must never land in tmpfs: {work:?}"
+        );
+    }
+
+    #[test]
+    fn staged_name_is_version_keyed() {
+        // Version-keying is what stops a partial for one release being resumed
+        // into a different one when the target moves mid-download.
+        assert_ne!(
+            staged_name("m87-aarch64-unknown-linux-musl", "0.8.7"),
+            staged_name("m87-aarch64-unknown-linux-musl", "0.8.8"),
+        );
+    }
+
+    #[test]
+    fn stale_partials_for_other_versions_are_cleaned_but_current_is_kept() {
+        let td = tempfile::TempDir::new().unwrap();
+        let dir = td.path();
+        let asset = "m87-aarch64-unknown-linux-musl";
+
+        let keep = staged_name(asset, "0.8.7");
+        std::fs::write(dir.join(format!("{keep}.gz")), b"in-flight partial").unwrap();
+        std::fs::write(dir.join(&keep), b"extracted").unwrap();
+        std::fs::write(dir.join(staged_name(asset, "0.8.5")), b"stale").unwrap();
+        std::fs::write(dir.join(format!("{}.gz", staged_name(asset, "0.8.6"))), b"stale").unwrap();
+        // Unrelated file must be left alone.
+        std::fs::write(dir.join("m87-previous"), b"backup").unwrap();
+
+        let removed = clean_stale_staged(dir, asset, "0.8.7");
+
+        assert_eq!(removed, 2, "both stale-version artifacts must be removed");
+        assert!(dir.join(format!("{keep}.gz")).exists(), "in-flight partial must survive");
+        assert!(dir.join(&keep).exists(), "current extracted binary must survive");
+        assert!(!dir.join(staged_name(asset, "0.8.5")).exists());
+        assert!(dir.join("m87-previous").exists(), "unrelated files untouched");
+    }
 
     #[test]
     fn test_arch_bin_name_format() {
