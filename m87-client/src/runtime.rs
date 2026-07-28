@@ -64,6 +64,13 @@ SyslogIdentifier=m87-runtime
 TimeoutStopSec=30
 StartLimitBurst=5
 StartLimitIntervalSec=30
+# Cap tasks (processes + threads) in the service cgroup. A healthy runtime sits
+# well under 100; this bounds a runaway (leaked/orphaned child processes or
+# threads) so it trips the service's own limit and gets bounced by
+# Restart=on-failure, instead of exhausting system PIDs and wedging the whole
+# device (fork: Resource temporarily unavailable). Container tasks live in
+# docker's own cgroups, not here, so this does not limit deployed workloads.
+TasksMax=512
 
 [Install]
 WantedBy=multi-user.target
@@ -418,4 +425,27 @@ async fn login_and_run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn service_unit_caps_tasks_to_contain_leaks() {
+        let content = generate_service_content(
+            &PathBuf::from("/usr/local/bin/m87"),
+            "pi",
+            &PathBuf::from("/home/pi"),
+        );
+        // A runaway process/thread leak must trip the service's own cgroup cap
+        // (and get bounced by Restart=on-failure) rather than exhaust system PIDs
+        // and wedge the whole device.
+        assert!(
+            content.contains("TasksMax="),
+            "service unit must set a TasksMax cap:\n{content}"
+        );
+        assert!(content.contains("Restart=on-failure"));
+    }
 }

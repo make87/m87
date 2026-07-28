@@ -956,11 +956,15 @@ impl DeploymentManager {
                     "cd '{}' && docker compose down --remove-orphans",
                     path.display()
                 );
-                let _ = tokio::process::Command::new("/bin/sh")
+                // Bound the teardown: on a struggling device `docker compose
+                // down` can hang indefinitely, which would stall boot-time reap.
+                // kill_on_drop reaps the child if the timeout drops this future.
+                let mut child = tokio::process::Command::new("/bin/sh");
+                child
                     .arg("-lc")
                     .arg(&cmd)
-                    .output()
-                    .await;
+                    .kill_on_drop(true);
+                let _ = tokio::time::timeout(Duration::from_secs(60), child.output()).await;
                 let _ = tokio::fs::remove_dir_all(&path).await;
             }
             // Remove the now-empty legacy parent dir so the reap is a clean no-op next boot.

@@ -60,6 +60,11 @@ pub fn build_command(cmd: &CommandSpec) -> Result<Command> {
             let (p, args) = argv.split_first().ok_or_else(|| anyhow!("empty argv"))?;
             let mut c = Command::new(p);
             c.args(args);
+            // Reap the child if this future is dropped (task cancelled, shutdown,
+            // or a higher-level timeout) so a cancelled step can't orphan a live
+            // process. The internal timeout path in `run_command` still kills +
+            // reaps explicitly; this only covers the drop-without-timeout case.
+            c.kill_on_drop(true);
             Ok(c)
         }
         CommandSpec::Sh(script) => {
@@ -73,6 +78,7 @@ pub fn build_command(cmd: &CommandSpec) -> Result<Command> {
             };
             let mut c = Command::new(sh);
             c.arg("-lc").arg(script);
+            c.kill_on_drop(true);
             Ok(c)
         }
     }
@@ -328,5 +334,63 @@ mod tests {
     #[test]
     fn test_binary_exists_absolute_not_found() {
         assert!(!binary_exists("/nonexistent/path/to/binary"));
+    }
+
+    // ── kill_on_drop: a cancelled/dropped step must not orphan its child ──────
+    //
+    // Regression guard for the fork-exhaustion class: on a real device a step
+    // future can be dropped without hitting `run_command`'s internal timeout
+    // (task shutdown, a higher-level timeout, cancellation). If `build_command`
+    // doesn't set `kill_on_drop(true)`, the live child is orphaned and, repeated
+    // over time, exhausts the process table (`fork: Resource temporarily
+    // unavailable`). These prove the child is actually reaped on drop.
+    #[cfg(target_os = "linux")]
+    mod kill_on_drop_reaps_child {
+        use super::*;
+        use std::time::{Duration, Instant};
+
+        /// True while the process exists and has not been reaped to a zombie.
+        fn proc_alive(pid: u32) -> bool {
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                // `/proc/<pid>/stat` is "pid (comm) STATE ...". comm can contain
+                // spaces/parens, so the state char is the first token after the
+                // final ')'. A zombie (Z) is effectively dead for our purposes.
+                Ok(s) => match s.rfind(')') {
+                    Some(i) => !s[i + 1..].trim_start().starts_with('Z'),
+                    None => true,
+                },
+                Err(_) => false, // no /proc entry => gone
+            }
+        }
+
+        async fn assert_reaped_on_drop(spec: CommandSpec) {
+            let mut cmd = build_command(&spec).unwrap();
+            let child = cmd.spawn().expect("spawn");
+            let pid = child.id().expect("pid while running");
+            assert!(proc_alive(pid), "child {pid} should be running before drop");
+
+            // Drop the future/handle without waiting — kill_on_drop(true) must
+            // SIGKILL and reap it.
+            drop(child);
+
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                if !proc_alive(pid) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("child {pid} survived drop — build_command must set kill_on_drop(true)");
+        }
+
+        #[tokio::test]
+        async fn argv_step_child_is_reaped_when_dropped() {
+            assert_reaped_on_drop(CommandSpec::Argv(vec!["sleep".into(), "30".into()])).await;
+        }
+
+        #[tokio::test]
+        async fn sh_step_child_is_reaped_when_dropped() {
+            assert_reaped_on_drop(CommandSpec::Sh("sleep 30".into())).await;
+        }
     }
 }
