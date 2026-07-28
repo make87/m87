@@ -282,13 +282,6 @@ impl LocalRunState {
         Ok(())
     }
 
-    /// Clear `last_run_hash` so the next reconcile re-runs startup steps.
-    pub fn clear_run_hash(work_dir: &Path) -> Result<()> {
-        let mut st = Self::load(work_dir)?;
-        st.last_run_hash = None;
-        Self::save(work_dir, &st)
-    }
-
     fn failures_mut(&mut self, kind: ObserveKind) -> &mut u32 {
         match kind {
             ObserveKind::Liveness => &mut self.consecutive_alive_failures,
@@ -1638,16 +1631,34 @@ impl DeploymentManager {
         self.maybe_restart_service(spec).await
     }
 
+    /// Handle a unit whose observe/health hook reported failure.
+    ///
+    /// This deliberately does NOT re-run the unit's steps.
+    ///
+    /// It previously cleared the run hash and re-queued the service, so reconcile
+    /// treated the unit as never-provisioned and re-executed the ENTIRE step list
+    /// on every failed health poll — with no backoff and no cap. For any unit
+    /// whose steps include provisioning work (image pulls, setup) that is a
+    /// self-sustaining storm: every poll re-pulls over a possibly metered link,
+    /// and an `on_failure` undo tears the running container down, guaranteeing
+    /// the next poll fails too. Measured on a constrained device: 29 full
+    /// re-runs in 40 minutes, saturating the link and driving the box into swap
+    /// until connectivity dropped — turning an unhealthy unit into an
+    /// unreachable device.
+    ///
+    /// Recovery is explicit instead: the unhealthy state is reported to the
+    /// server (see the observe edge-trigger path) and an operator restarts the
+    /// unit deliberately. Per-step `retry` blocks are untouched — those are a
+    /// bounded, author-chosen policy and still apply while steps execute.
     async fn maybe_restart_service(&self, spec: &ServiceSpec) -> Result<()> {
         match spec.restart {
             RestartPolicy::Never => {}
             RestartPolicy::OnFailure | RestartPolicy::Always => {
-                let wd = self
-                    .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
-                    .await?;
-                LocalRunState::clear_run_hash(&wd)?;
-                self.dirty_services.write().await.insert(spec.get_hash());
-                tracing::info!("restart policy: re-queuing '{}'", spec.id);
+                tracing::warn!(
+                    "unit '{}' reported unhealthy; not re-running its steps. \
+                     Restart the unit to retry.",
+                    spec.id
+                );
             }
         }
         Ok(())
@@ -2754,8 +2765,60 @@ mod tests {
 
     // ── Restart policy tests ──────────────────────────────────────────────────
 
+    // A failing health check must NOT re-provision the unit.
+    //
+    // The previous behaviour cleared the run hash and re-queued the service, so
+    // reconcile re-executed the ENTIRE step list on every failed health poll —
+    // with no backoff and no cap. For a unit whose steps include provisioning
+    // work (`docker compose pull`, image setup) that is a self-sustaining storm:
+    // each poll re-pulls over a metered link, and an `on_failure` undo tears the
+    // running container down, guaranteeing the next poll also fails. Measured on
+    // a constrained device: 29 full re-runs in 40 minutes, saturating the link
+    // and driving the box into swap until connectivity dropped.
+    //
+    // Recovery is now explicit: the unhealthy state is reported (see the observe
+    // edge-trigger tests) and an operator restarts the unit deliberately.
+
+    /// Number of times the start step has executed.
+    fn run_count(marker: &Path) -> usize {
+        std::fs::read_to_string(marker)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
     #[tokio::test]
-    async fn restart_on_failure_marks_service_dirty() -> Result<()> {
+    async fn unhealthy_service_must_not_rerun_provisioning_steps() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        let marker = td.path().join("runs.txt");
+        let svc = mk_svc(
+            "svc",
+            sh(format!("echo run >> {}", marker.display())),
+            sh("true"),
+        );
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        assert_eq!(run_count(&marker), 1, "steps run once on initial deploy");
+
+        // A failing health check fires the restart policy, repeatedly.
+        for _ in 0..3 {
+            mgr.maybe_restart_service(&svc).await?;
+            mgr.reconcile_dirty().await?;
+        }
+
+        assert_eq!(
+            run_count(&marker),
+            1,
+            "provisioning steps must NOT re-run on health failures \
+             (was one full re-run per failed poll, unbounded)"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unhealthy_service_keeps_its_run_hash() -> Result<()> {
         let td = TempDir::new()?;
         let mgr = make_mgr(&td).await;
 
@@ -2764,10 +2827,6 @@ mod tests {
         mgr.set_desired_units(rev, vec![]).await?;
         mgr.reconcile_dirty().await?;
 
-        // Clear dirty set to start clean
-        mgr.dirty_services.write().await.clear();
-
-        // Simulate restart policy triggering
         mgr.maybe_restart_service(&svc).await?;
 
         let wd = mgr
@@ -2775,12 +2834,29 @@ mod tests {
             .await?;
         let st = LocalRunState::load(&wd)?;
         assert!(
-            st.last_run_hash.is_none(),
-            "clear_run_hash should have cleared hash"
+            st.last_run_hash.is_some(),
+            "run hash must survive a health failure — clearing it is what made \
+             reconcile treat the unit as never-provisioned and re-run every step"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unhealthy_service_is_not_requeued() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        let svc = mk_svc("svc", sh("true"), sh("true"));
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+        mgr.dirty_services.write().await.clear();
+
+        mgr.maybe_restart_service(&svc).await?;
+
         assert!(
-            mgr.dirty_services.read().await.contains(&svc.get_hash()),
-            "service should be re-queued in dirty set"
+            mgr.dirty_services.read().await.is_empty(),
+            "a health failure must not re-queue the unit for reconcile"
         );
         Ok(())
     }
