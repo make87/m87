@@ -814,3 +814,168 @@ async fn docker_full_deploy_lifecycle_sequence() -> Result<(), E2EError> {
     assert_eq!(survivors, 1, "7. restart: the surviving unit must still be v2");
     Ok(())
 }
+
+/// The pause/resume/restart operator commands, in sequence against a live unit.
+///
+/// `pause` suspends observe polling *without* stopping the process, so the
+/// container must survive it — a pause that tears the workload down would be a
+/// silent outage. `restart` must replace the container rather than end up with
+/// two, which is the failure mode that wedges a device with exclusive hardware.
+#[tokio::test]
+async fn docker_pause_resume_restart_sequence() -> Result<(), E2EError> {
+    let setup = TestSetup::init().await?;
+    let short = setup.device.short_id.clone();
+    cleanup(&setup, &short).await;
+    prepull(&setup).await?;
+    let dev = setup.device.name.clone();
+
+    let v1 = revision(&[cam_service_entry("cam", &short, "v1", true)]);
+    write_spec(&setup, "/tmp/pr.yml", &v1).await?;
+    deploy(&setup, "/tmp/pr.yml", true).await?;
+    wait_running_total(&setup, &short, 1, "deployed before pause").await?;
+
+    // pause: observation stops, the workload keeps running.
+    exec_shell(&setup.infra.cli, &format!("m87 {dev} pause cam 2>&1")).await?;
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert_eq!(
+        running_count(&setup, &short).await?,
+        1,
+        "pause must suspend observing only — the container has to keep running"
+    );
+
+    // resume: still exactly one, not a second copy.
+    exec_shell(&setup.infra.cli, &format!("m87 {dev} resume cam 2>&1")).await?;
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert_eq!(
+        running_count(&setup, &short).await?,
+        1,
+        "resume must not start a second copy alongside the running one"
+    );
+
+    // restart: stop then start, converging back to exactly one.
+    exec_shell(&setup.infra.cli, &format!("m87 {dev} restart cam 2>&1")).await?;
+    wait_for(
+        WaitConfig::with_description("restart converges to exactly one container")
+            .max_attempts(45)
+            .interval(Duration::from_secs(2)),
+        || async { running_count(&setup, &short).await.map(|n| n == 1).unwrap_or(false) },
+    )
+    .await?;
+
+    let total = running_count(&setup, &short).await?;
+    cleanup(&setup, &short).await;
+    assert_eq!(total, 1, "after restart exactly one container, found {total}");
+    Ok(())
+}
+
+/// Updating the spec **while a unit is stopped**, then starting it.
+///
+/// The new version has to take effect on the next start. If the stopped unit
+/// kept its old run hash it would come back on the previous image, so an
+/// operator who stops, updates and starts would silently get the old workload
+/// back — the worst kind of failure, because everything reports success.
+#[tokio::test]
+async fn docker_update_while_stopped_starts_new_version() -> Result<(), E2EError> {
+    let setup = TestSetup::init().await?;
+    let short = setup.device.short_id.clone();
+    cleanup(&setup, &short).await;
+    prepull(&setup).await?;
+    let dev = setup.device.name.clone();
+
+    let v1 = revision(&[cam_service_entry("cam", &short, "v1", true)]);
+    write_spec(&setup, "/tmp/uw1.yml", &v1).await?;
+    deploy(&setup, "/tmp/uw1.yml", true).await?;
+    wait_running_total(&setup, &short, 1, "v1 running").await?;
+
+    exec_shell(&setup.infra.cli, &format!("m87 {dev} stop cam 2>&1")).await?;
+    wait_running_total(&setup, &short, 0, "stopped before the update").await?;
+
+    // Update the spec while it is down.
+    let v2 = revision(&[cam_service_entry("cam", &short, "v2", true)]);
+    write_spec(&setup, "/tmp/uw2.yml", &v2).await?;
+    deploy(&setup, "/tmp/uw2.yml", true).await?;
+
+    exec_shell(&setup.infra.cli, &format!("m87 {dev} start cam 2>&1")).await?;
+    wait_for(
+        WaitConfig::with_description("starts on the updated version")
+            .max_attempts(45)
+            .interval(Duration::from_secs(2)),
+        || async {
+            let total = running_count(&setup, &short).await.unwrap_or(99);
+            let v2 = running_count_ver(&setup, &short, "v2").await.unwrap_or(0);
+            total == 1 && v2 == 1
+        },
+    )
+    .await?;
+
+    let stale = running_count_ver(&setup, &short, "v1").await?;
+    cleanup(&setup, &short).await;
+    assert_eq!(stale, 0, "stopped unit came back on the OLD version after an update");
+    Ok(())
+}
+
+/// A unit that is unhealthy must recover when the operator redeploys a fix.
+///
+/// Combines the two states an operator actually hits: something is broken and
+/// reporting unhealthy, and the response is to push a corrected spec. The unit
+/// has to converge onto the new definition rather than stay wedged on the old
+/// one — and, since the health check keeps failing until the fix lands, this
+/// also exercises redeploying *while* the restart policy is being triggered.
+#[tokio::test]
+async fn docker_unhealthy_unit_recovers_after_redeploy() -> Result<(), E2EError> {
+    let setup = TestSetup::init().await?;
+    let short = setup.device.short_id.clone();
+    cleanup(&setup, &short).await;
+    prepull(&setup).await?;
+
+    let name_bad = container_name(&short, "v1");
+    let label = cam_label(&short);
+    let broken = format!(
+        r#"services:
+  - id: cam
+    workdir:
+      mode: persistent
+    restart: on_failure
+    steps:
+      - name: up
+        timeout: 60s
+        run: "docker rm -f {name_bad} >/dev/null 2>&1 || true; docker run -d --label {label} --label m87e2ever=v1 --name {name_bad} {CAM_IMAGE} sleep 3600"
+    stop:
+      steps:
+        - name: down
+          timeout: 60s
+          run: "docker rm -f {name_bad}"
+    observe:
+      health:
+        every: 5s
+        observe: "exit 1"
+        fails_after: 1
+"#
+    );
+    write_spec(&setup, "/tmp/bad.yml", &broken).await?;
+    deploy(&setup, "/tmp/bad.yml", true).await?;
+    wait_running_total(&setup, &short, 1, "unhealthy unit running").await?;
+
+    // Let it sit unhealthy for a while, then push the corrected spec.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let fixed = revision(&[cam_service_entry("cam", &short, "v2", true)]);
+    write_spec(&setup, "/tmp/good.yml", &fixed).await?;
+    deploy(&setup, "/tmp/good.yml", true).await?;
+
+    wait_for(
+        WaitConfig::with_description("redeploy converges onto the fixed version")
+            .max_attempts(60)
+            .interval(Duration::from_secs(2)),
+        || async {
+            let total = running_count(&setup, &short).await.unwrap_or(99);
+            let v2 = running_count_ver(&setup, &short, "v2").await.unwrap_or(0);
+            total == 1 && v2 == 1
+        },
+    )
+    .await?;
+
+    let stale = running_count_ver(&setup, &short, "v1").await?;
+    cleanup(&setup, &short).await;
+    assert_eq!(stale, 0, "the unhealthy old unit was left running after the redeploy");
+    Ok(())
+}
