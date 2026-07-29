@@ -1139,7 +1139,14 @@ mod tests {
                         }
                         Resp::Status(code) => {
                             let msg =
-                                format!("HTTP/1.1 {code} X\r\nContent-Length: 0\r\n\r\n");
+                                // `Connection: close` stops the client pooling this
+                                // socket: the mock serves one request per connection,
+                                // so a reused keep-alive connection would hit a closed
+                                // socket and surface as a transport error instead of the
+                                // status under test.
+                                format!(
+                                    "HTTP/1.1 {code} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                );
                             let _ = sock.write_all(msg.as_bytes()).await;
                         }
                     }
