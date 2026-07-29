@@ -1029,6 +1029,20 @@ async fn docker_stop_succeeds_when_workdir_lost_its_files() -> Result<(), E2EErr
     deploy(&setup, "/tmp/lostfiles.yml", true).await?;
     wait_running_total(&setup, &short, 1, "unit running with its declared file").await?;
 
+    // The file must actually be there first — otherwise "delete it" is a no-op
+    // and the whole test proves nothing.
+    let present = exec_shell(
+        &setup.infra.runtime,
+        "find / -path '*/m87/workspaces/cam/needed.conf' 2>/dev/null | wc -l",
+    )
+    .await?;
+    assert_eq!(
+        present.trim(),
+        "1",
+        "precondition: the declared file must exist in the workdir before we remove it \
+         (if this is 0 the workspace path is wrong and the test would pass vacuously)"
+    );
+
     // Force the precondition: the declared file is gone from the workdir.
     exec_shell(
         &setup.infra.runtime,
@@ -1040,11 +1054,7 @@ async fn docker_stop_succeeds_when_workdir_lost_its_files() -> Result<(), E2EErr
         "find / -path '*/m87/workspaces/cam/needed.conf' 2>/dev/null | wc -l",
     )
     .await?;
-    assert_eq!(
-        gone.trim(),
-        "0",
-        "precondition: the declared file must be absent before the stop"
-    );
+    assert_eq!(gone.trim(), "0", "the declared file must be absent before the stop");
 
     exec_shell(&setup.infra.cli, &format!("m87 {dev} stop cam 2>&1")).await?;
 

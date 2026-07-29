@@ -26,6 +26,19 @@ use crate::{
 
 const MAX_TAIL_BYTES: usize = 4 * 1024; // 4 KB
 
+/// Shortest interval an observe hook may actually run at.
+///
+/// The supervisor ticks every 250ms, so a spec asking for `every: 0s` (or
+/// anything sub-second) would spawn an observe process several times a second
+/// for the lifetime of the unit — a deployment spec must not be able to pin the
+/// CPU of the device it is deployed to. One second is far below any legitimate
+/// health-check cadence while still bounding the worst case.
+const MIN_OBSERVE_INTERVAL: Duration = Duration::from_secs(1);
+
+fn observe_interval(requested: Duration) -> Duration {
+    requested.max(MIN_OBSERVE_INTERVAL)
+}
+
 // ---------------------------------------------------------------------------
 // Directory helpers
 // ---------------------------------------------------------------------------
@@ -977,6 +990,9 @@ impl DeploymentManager {
             let mut next_health: HashMap<String, Instant> = HashMap::new();
             let mut next_liveness: HashMap<String, Instant> = HashMap::new();
             let tick = Duration::from_millis(250);
+            // Throttle state for repeated reconcile failures (see below).
+            let mut last_reconcile_err: Option<String> = None;
+            let mut last_reconcile_err_ms: u64 = 0;
 
             // Reap 0.7.x-era orphaned compose projects before reconciling, so an
             // upgraded device doesn't run duplicate containers fighting for
@@ -999,6 +1015,28 @@ impl DeploymentManager {
 
                 // 1) Reconcile dirty services
                 if let Err(e) = self.reconcile_dirty().await {
+                    // Throttle the failure report.
+                    //
+                    // This loop ticks every 250ms, so a unit that stays broken
+                    // used to log, re-read AND re-parse the whole desired
+                    // revision from disk, and enqueue an event four times a
+                    // second indefinitely. On a device with slow storage that is
+                    // a self-inflicted denial of service in its own right — and
+                    // it is what buried the real error in a wall of identical
+                    // log lines. Report a given error once, then at most once a
+                    // minute while it persists; a *different* error still
+                    // reports immediately.
+                    let msg = e.to_string();
+                    let now = now_ms_u64();
+                    let is_new = last_reconcile_err.as_deref() != Some(msg.as_str());
+                    let due = now.saturating_sub(last_reconcile_err_ms) >= 60_000;
+                    if !(is_new || due) {
+                        sleep(tick).await;
+                        continue;
+                    }
+                    last_reconcile_err = Some(msg.clone());
+                    last_reconcile_err_ms = now;
+
                     tracing::error!("reconcile error: {e}");
                     if let Ok(Some(desired)) =
                         RevisionStore::get_desired_config(Some(self.root_dir.clone()))
@@ -1084,7 +1122,7 @@ impl DeploymentManager {
                         if let Some(liveness) = &obs.liveness {
                             let due = next_liveness.get(&hash).copied().unwrap_or(now);
                             if now >= due {
-                                next_liveness.insert(hash.clone(), now + liveness.every);
+                                next_liveness.insert(hash.clone(), now + observe_interval(liveness.every));
                                 let _ = self
                                     .run_observe_check(
                                         ObserveKind::Liveness,
@@ -1099,7 +1137,7 @@ impl DeploymentManager {
                         if let Some(health) = &obs.health {
                             let due = next_health.get(&hash).copied().unwrap_or(now);
                             if now >= due {
-                                next_health.insert(hash.clone(), now + health.every);
+                                next_health.insert(hash.clone(), now + observe_interval(health.every));
                                 let _ = self
                                     .run_observe_check(
                                         ObserveKind::Health,
@@ -2898,6 +2936,25 @@ mod tests {
     /// 250ms, so with no delay a stop that can never succeed re-runs several
     /// times a second indefinitely: a self-inflicted denial of service that
     /// pins CPU and spawns a process per attempt on constrained devices.
+    /// A deployment spec must not be able to pin the device's CPU.
+    ///
+    /// The supervisor ticks every 250ms and schedules observe hooks by adding
+    /// their `every` to now. A spec asking for `every: 0s` would therefore be
+    /// due on every tick, spawning an observe process several times a second
+    /// for as long as the unit exists. The interval is floored so a spec — from
+    /// a user, or generated — cannot turn a health check into a CPU load.
+    #[test]
+    fn observe_interval_is_floored_so_a_spec_cannot_pin_the_cpu() {
+        assert!(
+            observe_interval(Duration::ZERO) >= Duration::from_secs(1),
+            "every: 0s must be floored, otherwise the hook runs on every 250ms tick"
+        );
+        assert!(observe_interval(Duration::from_millis(10)) >= Duration::from_secs(1));
+        // Legitimate intervals are passed through untouched.
+        assert_eq!(observe_interval(Duration::from_secs(30)), Duration::from_secs(30));
+        assert_eq!(observe_interval(Duration::from_secs(1)), Duration::from_secs(1));
+    }
+
     #[tokio::test]
     async fn repeatedly_failing_stop_backs_off_instead_of_spinning() -> Result<()> {
         let td = TempDir::new()?;
