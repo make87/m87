@@ -64,6 +64,21 @@ SyslogIdentifier=m87-runtime
 TimeoutStopSec=30
 StartLimitBurst=5
 StartLimitIntervalSec=30
+# Cap tasks (processes + threads) in the service cgroup. A healthy runtime sits
+# at ~16 tasks; this bounds a runaway (leaked/orphaned child processes or
+# threads) so it trips the service's own limit and gets bounced by
+# Restart=on-failure, instead of exhausting the per-UID process limit and
+# wedging the whole device (fork: Resource temporarily unavailable).
+#
+# 128 is deliberately BELOW systemd's DefaultTasksMax on small devices: that
+# default is 15% of kernel.threads-max, which on a 512 MB Pi Zero 2 W works out
+# to only 171. Setting anything higher here would OVERRIDE that safe default and
+# loosen containment on exactly the hardware that needs it most. 128 still gives
+# a healthy runtime ~8x headroom.
+#
+# Container tasks live in docker's own cgroups, not here, so this does not limit
+# deployed workloads.
+TasksMax=128
 
 [Install]
 WantedBy=multi-user.target
@@ -418,4 +433,44 @@ async fn login_and_run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn service_unit_caps_tasks_to_contain_leaks() {
+        let content = generate_service_content(
+            &PathBuf::from("/usr/local/bin/m87"),
+            "pi",
+            &PathBuf::from("/home/pi"),
+        );
+        // A runaway process/thread leak must trip the service's own cgroup cap
+        // (and get bounced by Restart=on-failure) rather than exhaust the per-UID
+        // process limit and wedge the whole device.
+        let cap: u32 = content
+            .lines()
+            .find_map(|l| l.strip_prefix("TasksMax="))
+            .expect("service unit must set a TasksMax cap")
+            .trim()
+            .parse()
+            .expect("TasksMax must be numeric");
+
+        // Must be BELOW systemd's DefaultTasksMax on the smallest fleet hardware
+        // (15% of kernel.threads-max == 171 on a 512 MB Pi Zero 2 W). A larger
+        // value would override that default and LOOSEN containment on exactly the
+        // devices that brick from fork exhaustion.
+        const SMALLEST_DEVICE_DEFAULT_TASKS_MAX: u32 = 171;
+        assert!(
+            cap < SMALLEST_DEVICE_DEFAULT_TASKS_MAX,
+            "TasksMax={cap} must stay under the {SMALLEST_DEVICE_DEFAULT_TASKS_MAX} \
+             systemd default on small devices, else it loosens containment"
+        );
+        // ...but still leave a healthy runtime (~16 tasks) generous headroom.
+        assert!(cap >= 64, "TasksMax={cap} is too tight for a healthy runtime");
+
+        assert!(content.contains("Restart=on-failure"));
+    }
 }
