@@ -556,8 +556,11 @@ async fn update_unit_lifecycle(
     // the update and acted on it, while the caller saw a server error.
     //
     // Jobs live under the canonical `job_defs` key; the legacy `jobs` array is
-    // ignored by the read side, so mutating it here had no effect.
-    for section in ["services", "observers", "job_defs"] {
+    // ignored by the read side when `job_defs` exists, so mutating only `jobs`
+    // had no effect. Both are written: revisions serialized by current code
+    // carry both keys, while older ones may only have `jobs`, and a section
+    // that isn't present simply gets skipped now.
+    for section in ["services", "observers", "job_defs", "jobs"] {
         let path = format!("revision.{section}.$[elem].lifecycle");
         if let Err(e) = state
             .db
