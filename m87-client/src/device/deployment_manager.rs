@@ -215,6 +215,13 @@ pub struct LocalRunState {
     #[serde(default)]
     pub last_attempt_ms: Option<u64>,
 
+    /// How many times the stop steps have failed consecutively (drives backoff).
+    #[serde(default)]
+    pub stop_failures: u32,
+    /// Timestamp (ms since epoch) of the last stop attempt.
+    #[serde(default)]
+    pub last_stop_attempt_ms: Option<u64>,
+
     // Observe tracking -------------------------------------------------------
     #[serde(default)]
     pub consecutive_health_failures: u32,
@@ -1209,9 +1216,36 @@ impl DeploymentManager {
             let wd = self
                 .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
                 .await?;
+
+            // Back off between repeated stop failures.
+            //
+            // A failed stop keeps the unit dirty so it is retried — that is
+            // deliberate, since a half-torn-down unit is dangerous. But the
+            // reconcile loop ticks every 250ms, so without a delay a stop that
+            // cannot succeed (its command is broken, docker is unavailable, a
+            // container will not die) re-runs several times a SECOND forever.
+            // That is a self-inflicted denial of service: it pins CPU and
+            // spawns a process per iteration on exactly the constrained devices
+            // least able to absorb it. Mirrors the start path's backoff.
+            let st = LocalRunState::load(&wd).unwrap_or_default();
+            if st.stop_failures > 0 {
+                let backoff_ms = 1000 * 2u64.pow(st.stop_failures.min(6));
+                if let Some(last) = st.last_stop_attempt_ms {
+                    if now_ms_u64().saturating_sub(last) < backoff_ms {
+                        // Still cooling down: keep it queued, try again later.
+                        failed_hashes.insert(spec.get_hash());
+                        continue;
+                    }
+                }
+            }
+
             let rev = prev_rev.clone().unwrap_or_else(|| desired_rev.clone());
             if let Err(e) = self.stop_service(spec, &rev, &wd).await {
                 tracing::error!("stop_service for '{}' failed: {e:#}", spec.id);
+                let mut st = LocalRunState::load(&wd).unwrap_or_default();
+                st.stop_failures = st.stop_failures.saturating_add(1);
+                st.last_stop_attempt_ms = Some(now_ms_u64());
+                let _ = LocalRunState::save(&wd, &st);
                 failed_hashes.insert(spec.get_hash());
             }
         }
@@ -1417,6 +1451,10 @@ impl DeploymentManager {
         let mut st = LocalRunState::load(wd).unwrap_or_default();
         st.last_run_hash = None;
         st.startup_failures = 0;
+        // The stop succeeded, so clear its backoff — a unit that recovers must
+        // not stay penalised by earlier failures.
+        st.stop_failures = 0;
+        st.last_stop_attempt_ms = None;
         LocalRunState::save(wd, &st)?;
 
         if let Some(workdir) = &spec.workdir {
@@ -2849,6 +2887,58 @@ mod tests {
             "unit must start once the transient failure clears — this is the \
              self-healing path for flaky links and must survive the removal of \
              the health-check restart"
+        );
+        Ok(())
+    }
+
+    /// A stop that cannot succeed must NOT be retried without limit.
+    ///
+    /// A failed stop deliberately keeps the unit queued — a half-torn-down unit
+    /// is dangerous and must be retried. But the reconcile loop ticks every
+    /// 250ms, so with no delay a stop that can never succeed re-runs several
+    /// times a second indefinitely: a self-inflicted denial of service that
+    /// pins CPU and spawns a process per attempt on constrained devices.
+    #[tokio::test]
+    async fn repeatedly_failing_stop_backs_off_instead_of_spinning() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        let attempts = td.path().join("stop_attempts");
+        let mut svc = mk_svc("svc", sh("true"), sh("true"));
+        let rev1 = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev1, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+
+        // Now make its stop record every attempt and always fail, then remove
+        // the unit from desired so reconcile wants to stop it.
+        svc.stop = Some(StopSpec {
+            steps: vec![mk_step(
+                "down",
+                sh(format!("echo x >> {}; exit 1", attempts.display())),
+            )],
+        });
+        let rev2 = mk_rev("r2", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev2, vec![]).await?;
+        let rev3 = mk_rev("r3", vec![], vec![], vec![]);
+        mgr.set_desired_units(rev3, vec![]).await?;
+
+        // Reconcile as fast as the supervisor loop would (250ms tick) for ~2s.
+        for _ in 0..8 {
+            let _ = mgr.reconcile_dirty().await;
+            sleep(Duration::from_millis(250)).await;
+        }
+
+        let tries = std::fs::read_to_string(&attempts)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        assert!(
+            tries >= 1,
+            "the stop must be attempted at least once (got {tries})"
+        );
+        assert!(
+            tries <= 3,
+            "a failing stop ran {tries} times in ~2s — it must back off, not \
+             retry on every 250ms reconcile tick"
         );
         Ok(())
     }

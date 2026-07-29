@@ -979,3 +979,83 @@ async fn docker_unhealthy_unit_recovers_after_redeploy() -> Result<(), E2EError>
     assert_eq!(stale, 0, "the unhealthy old unit was left running after the redeploy");
     Ok(())
 }
+
+/// A stop step must have the unit's declared `files:` available, even if the
+/// workdir has lost them.
+///
+/// Stop steps are run in the unit's workdir but the files declared in `files:`
+/// were only materialized before *startup* steps. A `docker compose down` needs
+/// its compose file, so a workdir missing it fails the stop — and a failed stop
+/// keeps the unit dirty while the stop path has no backoff, so reconcile retried
+/// it roughly twice a second indefinitely, burning CPU and spawning a docker
+/// invocation per iteration on the device.
+///
+/// The precondition is forced directly (delete the file from the workdir) rather
+/// than reproduced through the sequence that caused it in the field, because
+/// what matters is the invariant: whatever empties the workdir, a stop must
+/// still be able to run.
+#[tokio::test]
+async fn docker_stop_succeeds_when_workdir_lost_its_files() -> Result<(), E2EError> {
+    let setup = TestSetup::init().await?;
+    let short = setup.device.short_id.clone();
+    cleanup(&setup, &short).await;
+    prepull(&setup).await?;
+    let dev = setup.device.name.clone();
+
+    let name = container_name(&short, "v1");
+    let label = cam_label(&short);
+    // The stop step depends on a declared file, exactly as a compose teardown
+    // depends on its compose file.
+    let spec = format!(
+        r#"services:
+  - id: cam
+    workdir:
+      mode: persistent
+    files:
+      needed.conf: |
+        unit-declared file
+    steps:
+      - name: up
+        timeout: 60s
+        run: "docker rm -f {name} >/dev/null 2>&1 || true; docker run -d --label {label} --label m87e2ever=v1 --name {name} {CAM_IMAGE} sleep 3600"
+    stop:
+      steps:
+        - name: down
+          timeout: 60s
+          run: "test -f needed.conf && docker rm -f {name}"
+"#
+    );
+    write_spec(&setup, "/tmp/lostfiles.yml", &spec).await?;
+    deploy(&setup, "/tmp/lostfiles.yml", true).await?;
+    wait_running_total(&setup, &short, 1, "unit running with its declared file").await?;
+
+    // Force the precondition: the declared file is gone from the workdir.
+    exec_shell(
+        &setup.infra.runtime,
+        "find / -path '*/m87/workspaces/cam/needed.conf' -delete 2>/dev/null; true",
+    )
+    .await?;
+    let gone = exec_shell(
+        &setup.infra.runtime,
+        "find / -path '*/m87/workspaces/cam/needed.conf' 2>/dev/null | wc -l",
+    )
+    .await?;
+    assert_eq!(
+        gone.trim(),
+        "0",
+        "precondition: the declared file must be absent before the stop"
+    );
+
+    exec_shell(&setup.infra.cli, &format!("m87 {dev} stop cam 2>&1")).await?;
+
+    wait_for(
+        WaitConfig::with_description("stop completes despite the wiped workdir")
+            .max_attempts(40)
+            .interval(Duration::from_secs(2)),
+        || async { running_count(&setup, &short).await.map(|n| n == 0).unwrap_or(false) },
+    )
+    .await?;
+
+    cleanup(&setup, &short).await;
+    Ok(())
+}
