@@ -1385,6 +1385,19 @@ impl DeploymentManager {
     ) -> Result<()> {
         self.stop_log_follow(&spec.id).await?;
 
+        // Stop steps need the unit's declared `files:` just as startup steps do
+        // — `docker compose down` cannot run without its compose file. With an
+        // ephemeral workdir the directory comes back empty after a runtime
+        // restart, so without this the stop fails permanently. And because a
+        // failed stop keeps the unit dirty with no backoff on the stop path,
+        // reconcile then retries it ~twice a second forever.
+        if let Err(e) = self.materialize_files_svc(spec, wd).await {
+            tracing::warn!(
+                "could not materialize files for '{}' before stop: {e:#}",
+                spec.id
+            );
+        }
+
         if let Some(stop) = &spec.stop {
             self.execute_steps(
                 &spec.id,
@@ -3519,6 +3532,57 @@ mod tests {
                 .join("old_inflight.json")
                 .exists()
         );
+        Ok(())
+    }
+
+    // ── Stop steps must have the unit's declared files ───────────────────────
+    //
+    // `apply_service` materializes a unit's `files:` before running startup
+    // steps, but `stop_service` did not. With `workdir: ephemeral` the workdir
+    // comes back empty after a runtime restart, so a stop step that uses a
+    // declared file (the normal case — `docker compose down` needs its compose
+    // file) fails with "no configuration file provided".
+    //
+    // That failure is not cosmetic: a failed stop keeps the unit dirty and the
+    // stop path has no backoff, so reconcile retried it about twice a second
+    // indefinitely — a self-inflicted denial of service on the device.
+
+    #[tokio::test]
+    async fn stop_steps_get_the_units_declared_files() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        // A stop step that can only succeed if the declared file is present —
+        // mirroring `docker compose down`, which needs its compose file.
+        let mut svc = mk_svc("svc", sh("true"), sh("test -f needed.conf"));
+        svc.workdir = Some(Workdir {
+            mode: WorkdirMode::Ephemeral,
+            path: None,
+        });
+        svc.files.insert(
+            "needed.conf".to_string(),
+            "unit-declared content\n".to_string(),
+        );
+
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+
+        // Simulate the workdir being empty at stop time — exactly what an
+        // ephemeral workdir looks like after a runtime restart.
+        let wd = mgr
+            .resolve_workdir_for(&svc.id, svc.workdir.as_ref())
+            .await?;
+        let _ = std::fs::remove_file(wd.join("needed.conf"));
+        assert!(
+            !wd.join("needed.conf").exists(),
+            "precondition: declared file must be absent before the stop"
+        );
+
+        mgr.stop_service(&svc, "r1", &wd).await.map_err(|e| {
+            anyhow!("stop must materialize the unit's declared files first: {e:#}")
+        })?;
+
         Ok(())
     }
 }
