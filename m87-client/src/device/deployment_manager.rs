@@ -2799,6 +2799,60 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// A deploy that fails because of a transient outage must still recover by
+    /// itself once the outage clears.
+    ///
+    /// This is the property the retry-on-failure behaviour exists for: on a
+    /// flaky uplink a pull can fail for DNS/connectivity reasons, and the device
+    /// has to come good on its own rather than needing someone on site. It is
+    /// deliberately distinct from the health-check path (which no longer re-runs
+    /// steps) — removing that must not have removed this.
+    #[tokio::test]
+    async fn failed_deploy_recovers_once_the_transient_failure_clears() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        // Stands in for "the network is down": the step fails while it exists.
+        let blocker = td.path().join("outage");
+        std::fs::write(&blocker, "down")?;
+        let marker = td.path().join("started");
+
+        let svc = mk_svc(
+            "svc",
+            sh(format!(
+                "test -f {} && exit 1; echo up > {}",
+                blocker.display(),
+                marker.display()
+            )),
+            sh("true"),
+        );
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev, vec![]).await?;
+
+        // First attempt fails — the "outage" is still in effect.
+        let _ = mgr.reconcile_dirty().await;
+        assert!(!marker.exists(), "startup should have failed during the outage");
+
+        // Outage clears. The unit must still be queued for another attempt.
+        std::fs::remove_file(&blocker)?;
+        assert!(
+            mgr.dirty_services.read().await.contains(&svc.get_hash()),
+            "a failed deploy must stay queued so it can recover on its own"
+        );
+
+        // Wait out the backoff (2^1 s after one failure), then reconcile again.
+        sleep(Duration::from_millis(2_200)).await;
+        let _ = mgr.reconcile_dirty().await;
+
+        assert!(
+            marker.exists(),
+            "unit must start once the transient failure clears — this is the \
+             self-healing path for flaky links and must survive the removal of \
+             the health-check restart"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn unhealthy_service_must_not_rerun_provisioning_steps() -> Result<()> {
         let td = TempDir::new()?;
