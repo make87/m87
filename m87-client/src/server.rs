@@ -448,6 +448,19 @@ where
     let mut last_err = None;
     for attempt in 1..=max_attempts {
         match build().timeout(timeout).send().await {
+            Ok(resp) if is_transient_status(resp.status()) && attempt < max_attempts => {
+                // A timeout or gateway error reported as an HTTP *status* rather
+                // than a transport error. These come from a proxy in front of
+                // the API — on a slow uplink a long request is cut short and
+                // answered with 408/504 even though it may well have been
+                // applied server-side. Treating it as fatal surfaced "deploy
+                // failed" to the operator for a deploy that had actually
+                // succeeded, so retry it like the transport-level equivalent.
+                tracing::warn!(
+                    "request returned {}; retry {attempt}/{max_attempts}",
+                    resp.status()
+                );
+            }
             Ok(resp) => return Ok(resp),
             Err(e) if (e.is_timeout() || e.is_connect()) && attempt < max_attempts => {
                 tracing::warn!("request failed ({e}); retry {attempt}/{max_attempts}");
@@ -456,7 +469,27 @@ where
             Err(e) => return Err(anyhow!(e)),
         }
     }
-    Err(anyhow!(last_err.expect("loop runs at least once")))
+    match last_err {
+        Some(e) => Err(anyhow!(e)),
+        // Every attempt came back with a transient status; send once more so the
+        // caller sees the real response (and its status) rather than a synthetic
+        // error, keeping `error_for_status` behaviour intact for the final try.
+        None => build()
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| anyhow!(e)),
+    }
+}
+
+/// Statuses that mean "try again", as opposed to a genuine rejection.
+///
+/// Deliberately narrow: only timeouts and gateway-level failures, which are
+/// produced by infrastructure rather than by the API itself. A 4xx such as 400
+/// or 409 is a real answer and retrying it would just repeat the same mistake.
+/// Retries are only safe because every caller using this helper is idempotent.
+fn is_transient_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 502 | 503 | 504)
 }
 
 /// Test wrapper preserving the earlier `post_json_retrying` surface used by the
@@ -1106,7 +1139,14 @@ mod tests {
                         }
                         Resp::Status(code) => {
                             let msg =
-                                format!("HTTP/1.1 {code} X\r\nContent-Length: 0\r\n\r\n");
+                                // `Connection: close` stops the client pooling this
+                                // socket: the mock serves one request per connection,
+                                // so a reused keep-alive connection would hit a closed
+                                // socket and surface as a transport error instead of the
+                                // status under test.
+                                format!(
+                                    "HTTP/1.1 {code} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                );
                             let _ = sock.write_all(msg.as_bytes()).await;
                         }
                     }
@@ -1143,5 +1183,45 @@ mod tests {
         let r = post_json_retrying(&client, &url, "tok", &body, Duration::from_millis(500), 3).await;
         assert!(r.is_err(), "a 500 must not be retried into success");
         assert_eq!(hits.load(Ordering::SeqCst), 1, "must not retry a server error");
+    }
+
+    // A proxy in front of the API can cut a slow request short and answer 408 or
+    // 504 rather than dropping the connection. That is the same transient
+    // failure as a transport timeout, but it arrives as an HTTP *status*, so it
+    // used to bypass the retry entirely and surface as "deploy failed" — for a
+    // deploy that had in fact been applied.
+    #[tokio::test]
+    async fn deploy_retries_on_proxy_timeout_status() {
+        for code in [408u16, 502, 503, 504] {
+            let (base, hits) = spawn_http_mock(vec![Resp::Status(code), Resp::Status(204)]).await;
+            let client = get_client(true).unwrap();
+            let body = serde_json::json!({ "revision": "yaml" });
+            let url = format!("{base}/device/d/revisions/r");
+            let r =
+                post_json_retrying(&client, &url, "tok", &body, Duration::from_secs(2), 3).await;
+            assert!(r.is_ok(), "{code} should be retried through to success: {r:?}");
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                2,
+                "{code} should have been retried exactly once"
+            );
+        }
+    }
+
+    // The retry must not mask a real rejection. A 400/409 is a considered answer
+    // from the API; repeating it would only repeat the same mistake, and hiding
+    // it behind retries would turn a clear error into a slow one.
+    #[tokio::test]
+    async fn deploy_does_not_retry_client_errors() {
+        for code in [400u16, 409, 422] {
+            let (base, hits) = spawn_http_mock(vec![Resp::Status(code)]).await;
+            let client = get_client(true).unwrap();
+            let body = serde_json::json!({});
+            let url = format!("{base}/device/d/revisions/r");
+            let r =
+                post_json_retrying(&client, &url, "tok", &body, Duration::from_secs(2), 3).await;
+            assert!(r.is_err(), "{code} must surface, not be retried into success");
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "{code} must not be retried");
+        }
     }
 }

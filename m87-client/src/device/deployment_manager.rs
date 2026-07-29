@@ -26,6 +26,19 @@ use crate::{
 
 const MAX_TAIL_BYTES: usize = 4 * 1024; // 4 KB
 
+/// Shortest interval an observe hook may actually run at.
+///
+/// The supervisor ticks every 250ms, so a spec asking for `every: 0s` (or
+/// anything sub-second) would spawn an observe process several times a second
+/// for the lifetime of the unit — a deployment spec must not be able to pin the
+/// CPU of the device it is deployed to. One second is far below any legitimate
+/// health-check cadence while still bounding the worst case.
+const MIN_OBSERVE_INTERVAL: Duration = Duration::from_secs(1);
+
+fn observe_interval(requested: Duration) -> Duration {
+    requested.max(MIN_OBSERVE_INTERVAL)
+}
+
 // ---------------------------------------------------------------------------
 // Directory helpers
 // ---------------------------------------------------------------------------
@@ -214,6 +227,13 @@ pub struct LocalRunState {
     /// Timestamp (ms since epoch) of the last startup attempt.
     #[serde(default)]
     pub last_attempt_ms: Option<u64>,
+
+    /// How many times the stop steps have failed consecutively (drives backoff).
+    #[serde(default)]
+    pub stop_failures: u32,
+    /// Timestamp (ms since epoch) of the last stop attempt.
+    #[serde(default)]
+    pub last_stop_attempt_ms: Option<u64>,
 
     // Observe tracking -------------------------------------------------------
     #[serde(default)]
@@ -970,6 +990,9 @@ impl DeploymentManager {
             let mut next_health: HashMap<String, Instant> = HashMap::new();
             let mut next_liveness: HashMap<String, Instant> = HashMap::new();
             let tick = Duration::from_millis(250);
+            // Throttle state for repeated reconcile failures (see below).
+            let mut last_reconcile_err: Option<String> = None;
+            let mut last_reconcile_err_ms: u64 = 0;
 
             // Reap 0.7.x-era orphaned compose projects before reconciling, so an
             // upgraded device doesn't run duplicate containers fighting for
@@ -992,6 +1015,28 @@ impl DeploymentManager {
 
                 // 1) Reconcile dirty services
                 if let Err(e) = self.reconcile_dirty().await {
+                    // Throttle the failure report.
+                    //
+                    // This loop ticks every 250ms, so a unit that stays broken
+                    // used to log, re-read AND re-parse the whole desired
+                    // revision from disk, and enqueue an event four times a
+                    // second indefinitely. On a device with slow storage that is
+                    // a self-inflicted denial of service in its own right — and
+                    // it is what buried the real error in a wall of identical
+                    // log lines. Report a given error once, then at most once a
+                    // minute while it persists; a *different* error still
+                    // reports immediately.
+                    let msg = e.to_string();
+                    let now = now_ms_u64();
+                    let is_new = last_reconcile_err.as_deref() != Some(msg.as_str());
+                    let due = now.saturating_sub(last_reconcile_err_ms) >= 60_000;
+                    if !(is_new || due) {
+                        sleep(tick).await;
+                        continue;
+                    }
+                    last_reconcile_err = Some(msg.clone());
+                    last_reconcile_err_ms = now;
+
                     tracing::error!("reconcile error: {e}");
                     if let Ok(Some(desired)) =
                         RevisionStore::get_desired_config(Some(self.root_dir.clone()))
@@ -1077,7 +1122,7 @@ impl DeploymentManager {
                         if let Some(liveness) = &obs.liveness {
                             let due = next_liveness.get(&hash).copied().unwrap_or(now);
                             if now >= due {
-                                next_liveness.insert(hash.clone(), now + liveness.every);
+                                next_liveness.insert(hash.clone(), now + observe_interval(liveness.every));
                                 let _ = self
                                     .run_observe_check(
                                         ObserveKind::Liveness,
@@ -1092,7 +1137,7 @@ impl DeploymentManager {
                         if let Some(health) = &obs.health {
                             let due = next_health.get(&hash).copied().unwrap_or(now);
                             if now >= due {
-                                next_health.insert(hash.clone(), now + health.every);
+                                next_health.insert(hash.clone(), now + observe_interval(health.every));
                                 let _ = self
                                     .run_observe_check(
                                         ObserveKind::Health,
@@ -1209,9 +1254,36 @@ impl DeploymentManager {
             let wd = self
                 .resolve_workdir_for(&spec.id, spec.workdir.as_ref())
                 .await?;
+
+            // Back off between repeated stop failures.
+            //
+            // A failed stop keeps the unit dirty so it is retried — that is
+            // deliberate, since a half-torn-down unit is dangerous. But the
+            // reconcile loop ticks every 250ms, so without a delay a stop that
+            // cannot succeed (its command is broken, docker is unavailable, a
+            // container will not die) re-runs several times a SECOND forever.
+            // That is a self-inflicted denial of service: it pins CPU and
+            // spawns a process per iteration on exactly the constrained devices
+            // least able to absorb it. Mirrors the start path's backoff.
+            let st = LocalRunState::load(&wd).unwrap_or_default();
+            if st.stop_failures > 0 {
+                let backoff_ms = 1000 * 2u64.pow(st.stop_failures.min(6));
+                if let Some(last) = st.last_stop_attempt_ms {
+                    if now_ms_u64().saturating_sub(last) < backoff_ms {
+                        // Still cooling down: keep it queued, try again later.
+                        failed_hashes.insert(spec.get_hash());
+                        continue;
+                    }
+                }
+            }
+
             let rev = prev_rev.clone().unwrap_or_else(|| desired_rev.clone());
             if let Err(e) = self.stop_service(spec, &rev, &wd).await {
                 tracing::error!("stop_service for '{}' failed: {e:#}", spec.id);
+                let mut st = LocalRunState::load(&wd).unwrap_or_default();
+                st.stop_failures = st.stop_failures.saturating_add(1);
+                st.last_stop_attempt_ms = Some(now_ms_u64());
+                let _ = LocalRunState::save(&wd, &st);
                 failed_hashes.insert(spec.get_hash());
             }
         }
@@ -1417,6 +1489,10 @@ impl DeploymentManager {
         let mut st = LocalRunState::load(wd).unwrap_or_default();
         st.last_run_hash = None;
         st.startup_failures = 0;
+        // The stop succeeded, so clear its backoff — a unit that recovers must
+        // not stay penalised by earlier failures.
+        st.stop_failures = 0;
+        st.last_stop_attempt_ms = None;
         LocalRunState::save(wd, &st)?;
 
         if let Some(workdir) = &spec.workdir {
@@ -2797,6 +2873,131 @@ mod tests {
         std::fs::read_to_string(marker)
             .map(|s| s.lines().count())
             .unwrap_or(0)
+    }
+
+    /// A deploy that fails because of a transient outage must still recover by
+    /// itself once the outage clears.
+    ///
+    /// This is the property the retry-on-failure behaviour exists for: on a
+    /// flaky uplink a pull can fail for DNS/connectivity reasons, and the device
+    /// has to come good on its own rather than needing someone on site. It is
+    /// deliberately distinct from the health-check path (which no longer re-runs
+    /// steps) — removing that must not have removed this.
+    #[tokio::test]
+    async fn failed_deploy_recovers_once_the_transient_failure_clears() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        // Stands in for "the network is down": the step fails while it exists.
+        let blocker = td.path().join("outage");
+        std::fs::write(&blocker, "down")?;
+        let marker = td.path().join("started");
+
+        let svc = mk_svc(
+            "svc",
+            sh(format!(
+                "test -f {} && exit 1; echo up > {}",
+                blocker.display(),
+                marker.display()
+            )),
+            sh("true"),
+        );
+        let rev = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev, vec![]).await?;
+
+        // First attempt fails — the "outage" is still in effect.
+        let _ = mgr.reconcile_dirty().await;
+        assert!(!marker.exists(), "startup should have failed during the outage");
+
+        // Outage clears. The unit must still be queued for another attempt.
+        std::fs::remove_file(&blocker)?;
+        assert!(
+            mgr.dirty_services.read().await.contains(&svc.get_hash()),
+            "a failed deploy must stay queued so it can recover on its own"
+        );
+
+        // Wait out the backoff (2^1 s after one failure), then reconcile again.
+        sleep(Duration::from_millis(2_200)).await;
+        let _ = mgr.reconcile_dirty().await;
+
+        assert!(
+            marker.exists(),
+            "unit must start once the transient failure clears — this is the \
+             self-healing path for flaky links and must survive the removal of \
+             the health-check restart"
+        );
+        Ok(())
+    }
+
+    /// A stop that cannot succeed must NOT be retried without limit.
+    ///
+    /// A failed stop deliberately keeps the unit queued — a half-torn-down unit
+    /// is dangerous and must be retried. But the reconcile loop ticks every
+    /// 250ms, so with no delay a stop that can never succeed re-runs several
+    /// times a second indefinitely: a self-inflicted denial of service that
+    /// pins CPU and spawns a process per attempt on constrained devices.
+    /// A deployment spec must not be able to pin the device's CPU.
+    ///
+    /// The supervisor ticks every 250ms and schedules observe hooks by adding
+    /// their `every` to now. A spec asking for `every: 0s` would therefore be
+    /// due on every tick, spawning an observe process several times a second
+    /// for as long as the unit exists. The interval is floored so a spec — from
+    /// a user, or generated — cannot turn a health check into a CPU load.
+    #[test]
+    fn observe_interval_is_floored_so_a_spec_cannot_pin_the_cpu() {
+        assert!(
+            observe_interval(Duration::ZERO) >= Duration::from_secs(1),
+            "every: 0s must be floored, otherwise the hook runs on every 250ms tick"
+        );
+        assert!(observe_interval(Duration::from_millis(10)) >= Duration::from_secs(1));
+        // Legitimate intervals are passed through untouched.
+        assert_eq!(observe_interval(Duration::from_secs(30)), Duration::from_secs(30));
+        assert_eq!(observe_interval(Duration::from_secs(1)), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn repeatedly_failing_stop_backs_off_instead_of_spinning() -> Result<()> {
+        let td = TempDir::new()?;
+        let mgr = make_mgr(&td).await;
+
+        let attempts = td.path().join("stop_attempts");
+        let mut svc = mk_svc("svc", sh("true"), sh("true"));
+        let rev1 = mk_rev("r1", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev1, vec![]).await?;
+        mgr.reconcile_dirty().await?;
+
+        // Now make its stop record every attempt and always fail, then remove
+        // the unit from desired so reconcile wants to stop it.
+        svc.stop = Some(StopSpec {
+            steps: vec![mk_step(
+                "down",
+                sh(format!("echo x >> {}; exit 1", attempts.display())),
+            )],
+        });
+        let rev2 = mk_rev("r2", vec![svc.clone()], vec![], vec![]);
+        mgr.set_desired_units(rev2, vec![]).await?;
+        let rev3 = mk_rev("r3", vec![], vec![], vec![]);
+        mgr.set_desired_units(rev3, vec![]).await?;
+
+        // Reconcile as fast as the supervisor loop would (250ms tick) for ~2s.
+        for _ in 0..8 {
+            let _ = mgr.reconcile_dirty().await;
+            sleep(Duration::from_millis(250)).await;
+        }
+
+        let tries = std::fs::read_to_string(&attempts)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        assert!(
+            tries >= 1,
+            "the stop must be attempted at least once (got {tries})"
+        );
+        assert!(
+            tries <= 3,
+            "a failing stop ran {tries} times in ~2s — it must back off, not \
+             retry on every 250ms reconcile tick"
+        );
+        Ok(())
     }
 
     #[tokio::test]
