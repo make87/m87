@@ -549,9 +549,17 @@ async fn update_unit_lifecycle(
     let options = mongodb::options::UpdateOptions::builder()
         .array_filters(vec![array_filter])
         .build();
-    for section in ["services", "observers", "jobs"] {
+    // The unit lives in exactly ONE of these sections, so the other two are
+    // expected to miss — and a positional array update against a section the
+    // revision doesn't have is a Mongo error. Propagating that turned a fully
+    // successful lifecycle change into a 500: the device had already been sent
+    // the update and acted on it, while the caller saw a server error.
+    //
+    // Jobs live under the canonical `job_defs` key; the legacy `jobs` array is
+    // ignored by the read side, so mutating it here had no effect.
+    for section in ["services", "observers", "job_defs"] {
         let path = format!("revision.{section}.$[elem].lifecycle");
-        let _ = state
+        if let Err(e) = state
             .db
             .deploy_revisions()
             .update_one(
@@ -559,7 +567,12 @@ async fn update_unit_lifecycle(
                 doc! { "$set": { path: &lifecycle_bson } },
             )
             .with_options(options.clone())
-            .await?;
+            .await
+        {
+            tracing::debug!(
+                "lifecycle mirror for '{unit_id}' skipped section '{section}': {e}"
+            );
+        }
     }
 
     Ok(ServerResponse::builder()
