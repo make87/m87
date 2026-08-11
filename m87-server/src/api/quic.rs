@@ -33,14 +33,39 @@ pub async fn run_quic_endpoint(
 ) -> ServerResult<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], state.config.unified_port));
 
+    let mut bind_failures: u32 = 0;
+
     loop {
         // Build fresh TLS config
         let server_config =
             crate::api::certificate::create_quic_server_config(&state.config).await?;
 
-        // Create fresh endpoint
-        let endpoint = Endpoint::server(server_config, addr)
-            .map_err(|e| ServerError::internal_error(&format!("bind QUIC: {e:?}")))?;
+        // Create fresh endpoint.
+        //
+        // A bind failure must NOT end this task. Returning here killed the QUIC
+        // listener for the lifetime of the process: HTTPS kept serving (so the
+        // API still answered and the device list still worked) while every
+        // device tunnel was gone and no device could reconnect, until someone
+        // restarted the container. The common trigger was a TLS reload racing
+        // the previous socket's release, giving EADDRINUSE on the immediate
+        // rebind. Retry instead, with a short backoff.
+        let endpoint = match Endpoint::server(server_config, addr) {
+            Ok(ep) => {
+                bind_failures = 0;
+                ep
+            }
+            Err(e) => {
+                bind_failures = (bind_failures + 1).min(6);
+                let wait = Duration::from_millis(250 * (1 << bind_failures));
+                error!(
+                    "bind QUIC on {addr} failed ({e:?}); retrying in {:?} \
+                     (attempt {bind_failures})",
+                    wait
+                );
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+        };
 
         info!("QUIC listening on udp://{}", addr);
         let handshake_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES));
@@ -49,9 +74,33 @@ pub async fn run_quic_endpoint(
             tokio::select! {
                 // === TLS reload request ===
                 _ = reload_rx.changed() => {
-                    info!("QUIC TLS reload requested — restarting QUIC endpoint");
-                    endpoint.close(0u32.into(), b"tls-reload");
-                    break;
+                    // Swap the certificate on the LIVE endpoint instead of
+                    // tearing it down.
+                    //
+                    // Restarting meant close + rebind of the same UDP address,
+                    // and the socket is only released once the endpoint driver
+                    // winds down — so the immediate rebind raced it and failed
+                    // with EADDRINUSE. That error ended this task, and the join
+                    // supervising it discards the result, so QUIC stayed down
+                    // for the lifetime of the process: HTTPS kept serving (the
+                    // API answered, the device list worked) while every device
+                    // tunnel was gone and none could reconnect until a manual
+                    // restart.
+                    //
+                    // Swapping in place keeps the socket bound and existing
+                    // connections alive; new handshakes pick up the new cert.
+                    info!("QUIC TLS reload requested — swapping certificate in place");
+                    match crate::api::certificate::create_quic_server_config(&state.config).await {
+                        Ok(cfg) => {
+                            endpoint.set_server_config(Some(cfg.into()));
+                            info!("QUIC certificate swapped without dropping the endpoint");
+                        }
+                        Err(e) => {
+                            // Keep serving with the previous certificate rather
+                            // than dropping every tunnel over a bad reload.
+                            error!("QUIC TLS reload failed ({e:?}); keeping the current certificate");
+                        }
+                    }
                 }
 
                 // === Incoming QUIC connection ===
@@ -90,6 +139,20 @@ pub async fn run_quic_endpoint(
                     }
                 }
             }
+        }
+
+        // Wait for the endpoint to finish closing before rebinding.
+        //
+        // `close()` only *starts* the shutdown; the UDP socket is released by
+        // the endpoint driver afterwards. Rebinding the same address before
+        // that completes races the release and fails, which is what took the
+        // listener down permanently. Bounded so a stuck connection cannot hang
+        // the restart forever.
+        if timeout(Duration::from_secs(5), endpoint.wait_idle())
+            .await
+            .is_err()
+        {
+            warn!("QUIC endpoint did not go idle within 5s; rebinding anyway");
         }
 
         // Drop endpoint -> closes UDP socket
@@ -664,4 +727,76 @@ pub async fn read_msg<T: DeserializeOwned>(io: &mut quinn::RecvStream) -> Server
         .map_err(|e| ServerError::internal_error(&format!("failed to deserialize message: {e}")))?;
 
     Ok(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::UdpSocket as StdUdpSocket;
+
+    /// Closing an endpoint and immediately rebinding the same UDP address
+    /// fails — which is why a TLS reload must never do that.
+    ///
+    /// This is the production failure, reproduced: a reload closed the QUIC
+    /// endpoint and rebound the same address straight away. `close()` only
+    /// starts the shutdown and `wait_idle()` only waits for connections, so the
+    /// socket is still held by the endpoint driver and the rebind fails with
+    /// EADDRINUSE. That error ended the QUIC task, and the join supervising it
+    /// discards the result, so QUIC stayed down for the lifetime of the
+    /// process: HTTPS kept serving (the API answered, the device list worked)
+    /// while every device tunnel was gone and none could reconnect until a
+    /// manual restart.
+    ///
+    /// The fix is to swap the certificate on the live endpoint instead. This
+    /// test pins the hazard so nobody reintroduces close-and-rebind.
+    #[tokio::test]
+    async fn closing_then_immediately_rebinding_the_same_addr_fails() {
+        let addr: SocketAddr = {
+            let probe = StdUdpSocket::bind("127.0.0.1:0").expect("probe bind");
+            probe.local_addr().expect("probe addr")
+        };
+
+        let first = Endpoint::client(addr).expect("initial bind should succeed");
+        first.close(0u32.into(), b"tls-reload");
+        let _ = timeout(Duration::from_secs(5), first.wait_idle()).await;
+        drop(first);
+
+        assert!(
+            Endpoint::client(addr).is_err(),
+            "rebinding {addr} straight after close unexpectedly succeeded — if this \
+             ever becomes reliable the close-and-rebind approach would be safe, but \
+             it is not, which is why the TLS reload swaps the config in place"
+        );
+    }
+
+    /// Swapping the server config on a live endpoint keeps the socket bound.
+    ///
+    /// This is what the TLS reload now does: existing connections keep running
+    /// and new handshakes pick up the new certificate, with no window in which
+    /// the endpoint is unbound and no chance of losing the address.
+    #[tokio::test]
+    async fn swapping_server_config_keeps_the_endpoint_bound() {
+        let addr: SocketAddr = {
+            let probe = StdUdpSocket::bind("127.0.0.1:0").expect("probe bind");
+            probe.local_addr().expect("probe addr")
+        };
+
+        let endpoint = Endpoint::client(addr).expect("bind");
+        let before = endpoint.local_addr().expect("local addr");
+
+        // Clearing/replacing the server config must not disturb the socket.
+        endpoint.set_server_config(None);
+
+        let after = endpoint.local_addr().expect("still bound after swap");
+        assert_eq!(
+            before, after,
+            "the endpoint must keep the same bound address across a config swap"
+        );
+
+        // And the address is genuinely still held by us.
+        assert!(
+            Endpoint::client(addr).is_err(),
+            "address should still be bound by the live endpoint after the swap"
+        );
+    }
 }

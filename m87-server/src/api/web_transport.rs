@@ -26,40 +26,66 @@ use crate::{
 
 use super::quic::handle_forward_supervised;
 
+
+/// Build the WebTransport QUIC server config (certificate + ALPN + transport).
+///
+/// Extracted so a TLS reload can swap the certificate on the live endpoint
+/// instead of tearing the endpoint down and rebinding the same UDP address.
+async fn build_wt_server_config(state: &AppState) -> ServerResult<quinn::ServerConfig> {
+    let (certs, key) = load_cert_and_key(&state.config).await?;
+
+    let mut tls_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| ServerError::internal_error(&format!("WT TLS build: {e}")))?;
+
+    tls_config.max_early_data_size = u32::MAX;
+    tls_config.alpn_protocols = vec![
+        b"h3".to_vec(),
+        b"h3-32".to_vec(),
+        b"h3-31".to_vec(),
+        b"h3-30".to_vec(),
+        b"h3-29".to_vec(),
+    ];
+
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
+        QuicServerConfig::try_from(tls_config)
+            .map_err(|e| ServerError::internal_error(&format!("WT quic cfg: {e}")))?,
+    ));
+
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
+    server_config.transport = Arc::new(transport_config);
+
+    Ok(server_config)
+}
+
 pub async fn run_webtransport(
     state: AppState,
     mut reload_rx: watch::Receiver<()>,
 ) -> ServerResult<()> {
+    let mut bind_failures: u32 = 0;
     let addr = SocketAddr::from(([0, 0, 0, 0], state.config.webtransport_port));
 
     loop {
-        let (certs, key) = load_cert_and_key(&state.config).await?;
+        let server_config = build_wt_server_config(&state).await?;
 
-        let mut tls_config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .map_err(|e| ServerError::internal_error(&format!("WT TLS build: {e}")))?;
-
-        tls_config.max_early_data_size = u32::MAX;
-        tls_config.alpn_protocols = vec![
-            b"h3".to_vec(),
-            b"h3-32".to_vec(),
-            b"h3-31".to_vec(),
-            b"h3-30".to_vec(),
-            b"h3-29".to_vec(),
-        ];
-
-        let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
-            QuicServerConfig::try_from(tls_config)
-                .map_err(|e| ServerError::internal_error(&format!("WT quic cfg: {e}")))?,
-        ));
-
-        let mut transport_config = quinn::TransportConfig::default();
-        transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
-        server_config.transport = Arc::new(transport_config);
-
-        let endpoint = quinn::Endpoint::server(server_config, addr)
-            .map_err(|e| ServerError::internal_error(&format!("WT bind: {e}")))?;
+        // A bind failure must not end this task — see the note in quic.rs. If it
+        // does, WebTransport stays down for the lifetime of the process while
+        // the rest of the server keeps serving, so the failure is invisible.
+        let endpoint = match quinn::Endpoint::server(server_config, addr) {
+            Ok(ep) => {
+                bind_failures = 0;
+                ep
+            }
+            Err(e) => {
+                bind_failures = (bind_failures + 1).min(6);
+                let wait = std::time::Duration::from_millis(250 * (1 << bind_failures));
+                error!("WT bind on {addr} failed ({e}); retrying in {wait:?}");
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+        };
 
         info!("WebTransport listening (HTTP/3) on udp://{}", addr);
 
@@ -81,10 +107,32 @@ pub async fn run_webtransport(
                 }
 
                 _ = reload_rx.changed() => {
-                    warn!("WT TLS reload requested");
-                    break;
+                    // Swap in place rather than rebinding — see the note in
+                    // quic.rs: closing and immediately rebinding the same UDP
+                    // address races the socket release and fails, which took
+                    // the listener down permanently.
+                    warn!("WT TLS reload requested — swapping certificate in place");
+                    match build_wt_server_config(&state).await {
+                        Ok(cfg) => {
+                            endpoint.set_server_config(Some(cfg));
+                            info!("WT certificate swapped without dropping the endpoint");
+                        }
+                        Err(e) => {
+                            error!("WT TLS reload failed ({e:?}); keeping the current certificate");
+                        }
+                    }
                 }
             }
+        }
+
+        // Let the endpoint finish closing before rebinding the same address:
+        // `close()` only starts the shutdown, and rebinding too early races the
+        // socket's release.
+        if tokio::time::timeout(std::time::Duration::from_secs(5), endpoint.wait_idle())
+            .await
+            .is_err()
+        {
+            warn!("WT endpoint did not go idle within 5s; rebinding anyway");
         }
 
         // drop endpoint, then loop to rebuild with new cert
