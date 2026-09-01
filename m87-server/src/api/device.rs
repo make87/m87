@@ -108,6 +108,27 @@ async fn update_device_by_id(
 ) -> ServerAppResult<PublicDevice> {
     let device_id =
         ObjectId::parse_str(&id).map_err(|_| ServerError::bad_request("Invalid ObjectId"))?;
+
+    // Changing ownership or the allowed-scopes ACL is privileged: the generic
+    // update path enforces only Editor, which is enough to push config/version
+    // but must NOT be enough to rewrite who can reach the device. Require Admin
+    // for those fields, matching the `add_device_access` bar. Otherwise an
+    // Editor could take over the device or share it with arbitrary scopes.
+    if payload.touches_access_control() {
+        claims
+            .find_one_with_scope_and_role::<DeviceDoc>(
+                &state.db.devices(),
+                doc! { "_id": device_id },
+                Role::Admin,
+            )
+            .await
+            .map_err(|_| {
+                ServerError::forbidden(
+                    "Changing owner_scope or allowed_scopes requires Admin on the device",
+                )
+            })?;
+    }
+
     let _ = AuditLogDoc::add(
         &state.db,
         &claims,

@@ -37,6 +37,27 @@ fn default_stable_version() -> String {
     "latest".to_string()
 }
 
+/// MongoDB duplicate-key error code (E11000). A unique-index violation on
+/// insert surfaces here, which is how a colliding `short_id` (or `_id`) is
+/// rejected race-safely at enrollment.
+const MONGO_DUPLICATE_KEY_CODE: i32 = 11000;
+
+/// True if `err` is a MongoDB duplicate-key (E11000) error. `insert_one`
+/// funnels write failures into `ErrorKind::Write(WriteError)`, but we also
+/// match the bulk shape defensively in case a future path reports it that way.
+fn is_duplicate_key_error(err: &mongodb::error::Error) -> bool {
+    use mongodb::error::{ErrorKind, WriteFailure};
+    match err.kind.as_ref() {
+        ErrorKind::Write(WriteFailure::WriteError(we)) => we.code == MONGO_DUPLICATE_KEY_CODE,
+        ErrorKind::InsertMany(ime) => ime
+            .write_errors
+            .as_ref()
+            .map(|errs| errs.iter().any(|e| e.code == MONGO_DUPLICATE_KEY_CODE))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 #[derive(Deserialize, Serialize, Default)]
 pub struct UpdateDeviceBody {
     pub system_info: Option<DeviceSystemInfo>,
@@ -58,6 +79,17 @@ impl Display for UpdateDeviceBody {
 }
 
 impl UpdateDeviceBody {
+    /// True if this update would change access-control fields — device
+    /// ownership (`owner_scope`) or the shared-access ACL (`allowed_scopes`).
+    ///
+    /// These are privileged: `POST /device/{id}` is otherwise reachable with
+    /// Editor, but rewriting who can reach a device must require Admin (the
+    /// same bar as `add_device_access`). Without this gate an Editor could
+    /// seize ownership or silently grant the device to arbitrary scopes.
+    pub fn touches_access_control(&self) -> bool {
+        self.owner_scope.is_some() || self.allowed_scopes.is_some()
+    }
+
     pub fn to_update_doc(&self) -> Document {
         let mut update_fields = doc! {};
 
@@ -155,10 +187,32 @@ impl DeviceDoc {
             }
         };
 
+        // The relay addresses every tunnel solely by `short_id` — the first 6
+        // hex chars of SHA256(device_id), a 24-bit space grindable in seconds.
+        // Enrollment lets the client choose `device_id`, so without this guard
+        // an attacker could register a device whose `short_id` collides with a
+        // victim's, seize the victim's relay slot on connect, and MITM its
+        // traffic. `short_id` must therefore be unique across devices.
+        //
+        // This pre-check gives a clean error in the common case; the unique
+        // index on `short_id` (see `Mongo::ensure_indexes`) is the race-safe
+        // backstop, enforced again when we handle the insert result below.
+        let short_id = short_device_id(&device_id.to_string());
+        if db
+            .devices()
+            .find_one(doc! { "short_id": &short_id })
+            .await?
+            .is_some()
+        {
+            return Err(ServerError::bad_request(
+                "device short id collision; regenerate the device id and retry",
+            ));
+        }
+
         let now = DateTime::now();
         let node = DeviceDoc {
             id: Some(device_id.clone()),
-            short_id: short_device_id(&device_id.to_string()),
+            short_id,
             name: create_body.name,
             updated_at: now,
             created_at: now,
@@ -175,8 +229,17 @@ impl DeviceDoc {
             last_deployment_hash: "".to_string(),
             pending_lifecycle_updates: vec![],
         };
-        let _ = db.devices().insert_one(node.clone()).await?;
-        Ok(())
+        // Race-safe backstop: even if two colliding enrollments pass the
+        // pre-check concurrently, the unique `short_id` (and `_id`) index makes
+        // exactly one insert win. Surface the loser as a clean 400 rather than
+        // a generic 500 so it never looks like a server fault.
+        match db.devices().insert_one(node.clone()).await {
+            Ok(_) => Ok(()),
+            Err(e) if is_duplicate_key_error(&e) => Err(ServerError::bad_request(
+                "device id or short id already exists; regenerate the device id and retry",
+            )),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn invalidate_deployment_hash(
@@ -634,5 +697,68 @@ impl AccessControlled for DeviceDoc {
     }
     fn allowed_scopes(&self) -> Option<Vec<String>> {
         Some(self.allowed_scopes.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Critical-2 regression: only `owner_scope` / `allowed_scopes` count as
+    /// access-control changes. The device update handler uses this to require
+    /// Admin (not just Editor) before touching ownership or the ACL — otherwise
+    /// an Editor could seize the device or share it with arbitrary scopes.
+    #[test]
+    fn touches_access_control_flags_only_privileged_fields() {
+        // Non-privileged fields never trip the gate.
+        assert!(!UpdateDeviceBody::default().touches_access_control());
+
+        let benign = UpdateDeviceBody {
+            version: Some("1.2.3".to_string()),
+            target_version: Some("latest".to_string()),
+            ..Default::default()
+        };
+        assert!(!benign.touches_access_control());
+
+        // Ownership transfer requires Admin.
+        let owner = UpdateDeviceBody {
+            owner_scope: Some("user:attacker@evil.com".to_string()),
+            ..Default::default()
+        };
+        assert!(owner.touches_access_control());
+
+        // ACL change requires Admin.
+        let acl = UpdateDeviceBody {
+            allowed_scopes: Some(vec!["org:victim".to_string()]),
+            ..Default::default()
+        };
+        assert!(acl.touches_access_control());
+    }
+
+    /// Critical-1 threat model: `short_id` is only the first 6 hex chars of
+    /// SHA256(device_id) — a 24-bit space where collisions are trivially found
+    /// (here, among sequential ids). Because the relay routes tunnels solely by
+    /// `short_id`, two devices sharing one lets a newcomer hijack the other's
+    /// tunnel. This pins WHY enrollment must reject colliding short_ids
+    /// (`DeviceDoc::create_from` + the unique index); if someone widens the
+    /// namespace enough that this stops finding a collision, revisit that guard.
+    #[test]
+    fn short_ids_collide_and_therefore_must_be_unique() {
+        use std::collections::HashMap;
+
+        let mut seen: HashMap<String, String> = HashMap::new();
+        for i in 0..200_000u64 {
+            // Any 24-hex string is a valid device id for short_id purposes.
+            let device_id = format!("{:024x}", i);
+            let short = short_device_id(&device_id);
+            if let Some(prev) = seen.insert(short, device_id.clone()) {
+                assert_ne!(
+                    prev, device_id,
+                    "distinct device ids must be what collided"
+                );
+                return; // found two distinct ids sharing a routing key
+            }
+        }
+        panic!("expected a short_id collision within the 24-bit space");
     }
 }

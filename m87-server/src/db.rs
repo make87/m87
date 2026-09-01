@@ -148,6 +148,38 @@ impl Mongo {
             )
             .await?;
 
+        // Unique routing key. The relay addresses tunnels solely by `short_id`,
+        // so two devices sharing one lets a newcomer hijack the incumbent's
+        // tunnel and MITM its traffic. This unique index is the race-safe
+        // backstop for the application-level collision check in
+        // `DeviceDoc::create_from`.
+        //
+        // Best-effort on purpose: if a legacy deployment already holds duplicate
+        // short_ids the build fails, and we must not refuse to start over it —
+        // the create-time check still blocks new collisions. Log loudly so an
+        // operator dedupes and restores the backstop.
+        if let Err(e) = self
+            .devices()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "short_id": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .name(Some("short_id_unique".to_string()))
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+        {
+            tracing::warn!(
+                "failed to create unique short_id index (duplicate short_ids in DB?): {e}. \
+                 New collisions are still blocked at enrollment, but dedupe devices to \
+                 restore the race-safe backstop."
+            );
+        }
+
         self.api_keys()
             .create_index(IndexModel::builder().keys(doc! { "key_id": 1 }).build())
             .await?;
