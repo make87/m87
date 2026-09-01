@@ -73,6 +73,17 @@ async fn server_creates_expected_indexes() -> Result<(), E2EError> {
         "users is missing the email index; have: {users:?}"
     );
 
+    // devices: the UNIQUE short_id index (Critical 1). The relay routes tunnels
+    // solely by short_id, so this uniqueness is the race-safe backstop that
+    // stops a colliding enrollment from hijacking a victim's tunnel. It is
+    // created best-effort at boot (a legacy DB with duplicates would skip it),
+    // but a clean e2e DB must have it.
+    let devices = index_names(&client, db, "devices").await?;
+    assert!(
+        devices.iter().any(|n| n == "short_id_unique"),
+        "devices is missing the unique short_id index; have: {devices:?}"
+    );
+
     tracing::info!("All expected MongoDB indexes are present");
     Ok(())
 }

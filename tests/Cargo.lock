@@ -2688,10 +2688,12 @@ dependencies = [
 name = "tests"
 version = "0.0.0-dev0"
 dependencies = [
+ "hex",
  "mongodb",
  "regex",
  "reqwest",
  "serde_json",
+ "sha2",
  "tempfile",
  "testcontainers",
  "thiserror",
