@@ -18,6 +18,7 @@ mod misc;
 mod mongo_indexes;
 mod monitoring;
 pub mod setup;
+mod access_control_hardening;
 mod forward;
 
 // Re-export commonly used items

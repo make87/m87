@@ -37,6 +37,27 @@ fn default_stable_version() -> String {
     "latest".to_string()
 }
 
+/// MongoDB duplicate-key error code (E11000). A unique-index violation on
+/// insert surfaces here, which is how a colliding `short_id` (or `_id`) is
+/// rejected race-safely at enrollment.
+const MONGO_DUPLICATE_KEY_CODE: i32 = 11000;
+
+/// True if `err` is a MongoDB duplicate-key (E11000) error. `insert_one`
+/// funnels write failures into `ErrorKind::Write(WriteError)`, but we also
+/// match the bulk shape defensively in case a future path reports it that way.
+fn is_duplicate_key_error(err: &mongodb::error::Error) -> bool {
+    use mongodb::error::{ErrorKind, WriteFailure};
+    match err.kind.as_ref() {
+        ErrorKind::Write(WriteFailure::WriteError(we)) => we.code == MONGO_DUPLICATE_KEY_CODE,
+        ErrorKind::InsertMany(ime) => ime
+            .write_errors
+            .as_ref()
+            .map(|errs| errs.iter().any(|e| e.code == MONGO_DUPLICATE_KEY_CODE))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 #[derive(Deserialize, Serialize, Default)]
 pub struct UpdateDeviceBody {
     pub system_info: Option<DeviceSystemInfo>,
@@ -58,6 +79,16 @@ impl Display for UpdateDeviceBody {
 }
 
 impl UpdateDeviceBody {
+    /// True if this update would change access-control fields — device
+    /// ownership (`owner_scope`) or the shared-access ACL (`allowed_scopes`).
+    ///
+    /// These are privileged: the generic update path accepts Editor, but
+    /// changing who can reach a device requires Admin (the same bar as
+    /// `add_device_access`).
+    pub fn touches_access_control(&self) -> bool {
+        self.owner_scope.is_some() || self.allowed_scopes.is_some()
+    }
+
     pub fn to_update_doc(&self) -> Document {
         let mut update_fields = doc! {};
 
@@ -155,10 +186,26 @@ impl DeviceDoc {
             }
         };
 
+        // `short_id` is the relay's routing key and must be unique across
+        // devices. Reject an enrollment that would reuse an existing one; the
+        // unique index (see `Mongo::ensure_indexes`) enforces this again on
+        // insert to close the concurrent-enrollment race.
+        let short_id = short_device_id(&device_id.to_string());
+        if db
+            .devices()
+            .find_one(doc! { "short_id": &short_id })
+            .await?
+            .is_some()
+        {
+            return Err(ServerError::bad_request(
+                "device short id collision; regenerate the device id and retry",
+            ));
+        }
+
         let now = DateTime::now();
         let node = DeviceDoc {
             id: Some(device_id.clone()),
-            short_id: short_device_id(&device_id.to_string()),
+            short_id,
             name: create_body.name,
             updated_at: now,
             created_at: now,
@@ -175,8 +222,15 @@ impl DeviceDoc {
             last_deployment_hash: "".to_string(),
             pending_lifecycle_updates: vec![],
         };
-        let _ = db.devices().insert_one(node.clone()).await?;
-        Ok(())
+        // If two enrollments race past the pre-check, the unique index lets
+        // only one insert win; report the other as a clean 400, not a 500.
+        match db.devices().insert_one(node.clone()).await {
+            Ok(_) => Ok(()),
+            Err(e) if is_duplicate_key_error(&e) => Err(ServerError::bad_request(
+                "device id or short id already exists; regenerate the device id and retry",
+            )),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn invalidate_deployment_hash(
@@ -634,5 +688,65 @@ impl AccessControlled for DeviceDoc {
     }
     fn allowed_scopes(&self) -> Option<Vec<String>> {
         Some(self.allowed_scopes.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only `owner_scope` / `allowed_scopes` count as access-control changes.
+    /// The device update handler uses this to require Admin (not just Editor)
+    /// before those fields can be modified.
+    #[test]
+    fn touches_access_control_flags_only_privileged_fields() {
+        // Non-privileged fields never trip the gate.
+        assert!(!UpdateDeviceBody::default().touches_access_control());
+
+        let benign = UpdateDeviceBody {
+            version: Some("1.2.3".to_string()),
+            target_version: Some("latest".to_string()),
+            ..Default::default()
+        };
+        assert!(!benign.touches_access_control());
+
+        // Ownership transfer requires Admin.
+        let owner = UpdateDeviceBody {
+            owner_scope: Some("user:someone@example.com".to_string()),
+            ..Default::default()
+        };
+        assert!(owner.touches_access_control());
+
+        // ACL change requires Admin.
+        let acl = UpdateDeviceBody {
+            allowed_scopes: Some(vec!["org:example".to_string()]),
+            ..Default::default()
+        };
+        assert!(acl.touches_access_control());
+    }
+
+    /// `short_id` is the first 6 hex chars of SHA256(device_id) — a 24-bit
+    /// space where distinct ids can map to the same value, which is why
+    /// enrollment enforces uniqueness (`DeviceDoc::create_from` + the unique
+    /// index). If the namespace is ever widened so this no longer finds a
+    /// collision, revisit that guard.
+    #[test]
+    fn short_ids_collide_and_therefore_must_be_unique() {
+        use std::collections::HashMap;
+
+        let mut seen: HashMap<String, String> = HashMap::new();
+        for i in 0..200_000u64 {
+            // Any 24-hex string is a valid device id for short_id purposes.
+            let device_id = format!("{:024x}", i);
+            let short = short_device_id(&device_id);
+            if let Some(prev) = seen.insert(short, device_id.clone()) {
+                assert_ne!(
+                    prev, device_id,
+                    "distinct device ids must be what collided"
+                );
+                return; // found two distinct ids sharing a routing key
+            }
+        }
+        panic!("expected a short_id collision within the 24-bit space");
     }
 }

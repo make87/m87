@@ -148,6 +148,27 @@ impl Mongo {
             )
             .await?;
 
+        // Unique index on `short_id`. Created best-effort so startup is never
+        // blocked if the build can't complete; enrollment enforces uniqueness
+        // regardless (see `DeviceDoc::create_from`).
+        if let Err(e) = self
+            .devices()
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "short_id": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .name(Some("short_id_unique".to_string()))
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+        {
+            tracing::warn!("failed to create unique short_id index: {e}");
+        }
+
         self.api_keys()
             .create_index(IndexModel::builder().keys(doc! { "key_id": 1 }).build())
             .await?;
