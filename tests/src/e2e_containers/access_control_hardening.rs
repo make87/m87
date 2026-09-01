@@ -1,17 +1,14 @@
-//! E2E coverage for the two device-access-control fixes.
+//! E2E coverage for device access-control rules.
 //!
-//! Critical 1 — `short_id` collisions let an attacker hijack a victim's relay
-//! tunnel. Enrollment must reject a device whose `short_id` collides with an
-//! existing one.
+//! - Enrollment enforces `short_id` uniqueness: a device whose `short_id`
+//!   collides with an existing one is rejected.
+//! - `POST /device/{id}` requires Admin to change `owner_scope` /
+//!   `allowed_scopes`; an Editor may only update benign fields.
 //!
-//! Critical 2 — `POST /device/{id}` only required Editor, yet let the payload
-//! rewrite `owner_scope` / `allowed_scopes`. Rewriting the ACL must require
-//! Admin, so an Editor cannot seize the device or share it with new scopes.
-//!
-//! Both tests drive the server's REST API directly. That is the only way to
+//! Both tests drive the server's REST API directly, which is the only way to
 //! exercise the exact fields (`device_id`, `owner_scope`) and a non-admin
-//! Editor principal — the CLI in the harness authenticates with the admin key,
-//! which bypasses all scope/role checks.
+//! Editor principal — the harness CLI authenticates with the admin key, which
+//! bypasses scope/role checks.
 
 use super::containers::E2EInfra;
 use super::helpers::E2EError;
@@ -139,8 +136,8 @@ async fn enroll(
     }
 
     // 3) Poll check: once approved the server creates the device + key. A
-    //    non-success status here is the Critical-1 rejection (create_from
-    //    refuses the colliding short_id) → report as "not created".
+    //    non-success status means the server declined to create it (e.g. a
+    //    colliding short_id) → report as "not created".
     for _ in 0..15 {
         let check = http
             .post(format!("{base_url}/auth/request/check"))
@@ -171,8 +168,8 @@ async fn enroll(
     Ok(None)
 }
 
-/// Critical 1: a second device whose `short_id` collides with an existing one
-/// must be refused at enrollment, or it could hijack the incumbent's tunnel.
+/// A second device whose `short_id` collides with an existing one must be
+/// refused at enrollment.
 #[tokio::test]
 async fn colliding_short_id_enrollment_is_rejected() -> Result<(), E2EError> {
     let infra = E2EInfra::init().await?;
@@ -185,23 +182,23 @@ async fn colliding_short_id_enrollment_is_rejected() -> Result<(), E2EError> {
     let base_url = format!("https://localhost:{port}");
     let http = http_client();
 
-    let (victim_id, attacker_id, short) = find_colliding_ids();
-    assert_ne!(victim_id, attacker_id, "collision must be two distinct ids");
-    tracing::info!("victim_id={victim_id} attacker_id={attacker_id} short_id={short}");
+    let (first_id, second_id, short) = find_colliding_ids();
+    assert_ne!(first_id, second_id, "collision must be two distinct ids");
+    tracing::info!("first_id={first_id} second_id={second_id} short_id={short}");
 
-    // Victim enrolls first and must succeed.
-    let victim_key = enroll(&http, &base_url, &victim_id, "user:victim@test.local").await?;
+    // First device enrolls and must succeed.
+    let first_key = enroll(&http, &base_url, &first_id, "user:one@test.local").await?;
     assert!(
-        victim_key.is_some(),
-        "victim enrollment should succeed and mint an API key"
+        first_key.is_some(),
+        "first enrollment should succeed and mint an API key"
     );
 
-    // Attacker (different owner) enrolls a device whose short_id collides. The
-    // server must refuse to create it.
-    let attacker_key = enroll(&http, &base_url, &attacker_id, "user:attacker@evil.com").await?;
+    // Second device (different owner) has a colliding short_id; the server must
+    // refuse to create it.
+    let second_key = enroll(&http, &base_url, &second_id, "user:two@test.local").await?;
     assert!(
-        attacker_key.is_none(),
-        "colliding-short_id enrollment must be rejected (would allow tunnel hijack)"
+        second_key.is_none(),
+        "colliding-short_id enrollment must be rejected"
     );
 
     // Ground truth: exactly one device owns the shared short_id in the DB.
@@ -212,15 +209,15 @@ async fn colliding_short_id_enrollment_is_rejected() -> Result<(), E2EError> {
         .map_err(|e| E2EError::Setup(format!("count devices: {e}")))?;
     assert_eq!(
         count, 1,
-        "exactly one device may hold a short_id; found {count} (collision not enforced)"
+        "exactly one device may hold a short_id; found {count}"
     );
 
     tracing::info!("short_id collision enrollment correctly rejected");
     Ok(())
 }
 
-/// Critical 2: an Editor (a device's own enrollment key is Editor-scoped) may
-/// update benign fields but must NOT rewrite `owner_scope` or `allowed_scopes`.
+/// An Editor (a device's own enrollment key is Editor-scoped) may update
+/// benign fields but must NOT rewrite `owner_scope` or `allowed_scopes`.
 #[tokio::test]
 async fn editor_cannot_rewrite_ownership_or_acl() -> Result<(), E2EError> {
     let infra = E2EInfra::init().await?;
@@ -235,7 +232,7 @@ async fn editor_cannot_rewrite_ownership_or_acl() -> Result<(), E2EError> {
 
     // Enroll a device; its returned API key is Editor on `device:<device_id>`.
     let device_id = fresh_device_id();
-    let owner_scope = "user:victim@test.local";
+    let owner_scope = "user:owner@test.local";
     let editor_key = enroll(&http, &base_url, &device_id, owner_scope)
         .await?
         .ok_or_else(|| E2EError::Setup("enrollment did not return an API key".into()))?;
@@ -257,26 +254,26 @@ async fn editor_cannot_rewrite_ownership_or_acl() -> Result<(), E2EError> {
         benign.status()
     );
 
-    // Attack 1: try to seize ownership. Must be forbidden.
-    let seize = http
+    // Editor may not change ownership. Must be forbidden.
+    let owner_change = http
         .post(&device_url)
         .bearer_auth(&editor_key)
-        .json(&json!({ "owner_scope": "user:attacker@evil.com" }))
+        .json(&json!({ "owner_scope": "user:other@test.local" }))
         .send()
         .await
         .map_err(|e| E2EError::Exec(format!("owner_scope update: {e}")))?;
     assert_eq!(
-        seize.status().as_u16(),
+        owner_change.status().as_u16(),
         403,
         "Editor rewriting owner_scope must be forbidden, got {}",
-        seize.status()
+        owner_change.status()
     );
 
-    // Attack 2: try to share the device with a new scope. Must be forbidden.
+    // Editor may not add scopes to the ACL. Must be forbidden.
     let share = http
         .post(&device_url)
         .bearer_auth(&editor_key)
-        .json(&json!({ "allowed_scopes": ["org:evil", format!("device:{device_id}")] }))
+        .json(&json!({ "allowed_scopes": ["org:extra", format!("device:{device_id}")] }))
         .send()
         .await
         .map_err(|e| E2EError::Exec(format!("allowed_scopes update: {e}")))?;
@@ -287,7 +284,7 @@ async fn editor_cannot_rewrite_ownership_or_acl() -> Result<(), E2EError> {
         share.status()
     );
 
-    // Ground truth in Mongo: ownership unchanged, evil scope never added.
+    // Ground truth in Mongo: ownership unchanged, extra scope never added.
     let client = mongo_client(&infra).await?;
     let oid = ObjectId::parse_str(&device_id)
         .map_err(|e| E2EError::Setup(format!("device id not an ObjectId: {e}")))?;
@@ -311,8 +308,8 @@ async fn editor_cannot_rewrite_ownership_or_acl() -> Result<(), E2EError> {
         })
         .unwrap_or_default();
     assert!(
-        !allowed.iter().any(|s| s == "org:evil"),
-        "allowed_scopes must not contain the injected scope; have: {allowed:?}"
+        !allowed.iter().any(|s| s == "org:extra"),
+        "allowed_scopes must not contain the rejected scope; have: {allowed:?}"
     );
 
     tracing::info!("Editor correctly blocked from rewriting ownership/ACL");

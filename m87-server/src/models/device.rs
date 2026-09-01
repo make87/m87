@@ -82,10 +82,9 @@ impl UpdateDeviceBody {
     /// True if this update would change access-control fields — device
     /// ownership (`owner_scope`) or the shared-access ACL (`allowed_scopes`).
     ///
-    /// These are privileged: `POST /device/{id}` is otherwise reachable with
-    /// Editor, but rewriting who can reach a device must require Admin (the
-    /// same bar as `add_device_access`). Without this gate an Editor could
-    /// seize ownership or silently grant the device to arbitrary scopes.
+    /// These are privileged: the generic update path accepts Editor, but
+    /// changing who can reach a device requires Admin (the same bar as
+    /// `add_device_access`).
     pub fn touches_access_control(&self) -> bool {
         self.owner_scope.is_some() || self.allowed_scopes.is_some()
     }
@@ -187,16 +186,10 @@ impl DeviceDoc {
             }
         };
 
-        // The relay addresses every tunnel solely by `short_id` — the first 6
-        // hex chars of SHA256(device_id), a 24-bit space grindable in seconds.
-        // Enrollment lets the client choose `device_id`, so without this guard
-        // an attacker could register a device whose `short_id` collides with a
-        // victim's, seize the victim's relay slot on connect, and MITM its
-        // traffic. `short_id` must therefore be unique across devices.
-        //
-        // This pre-check gives a clean error in the common case; the unique
-        // index on `short_id` (see `Mongo::ensure_indexes`) is the race-safe
-        // backstop, enforced again when we handle the insert result below.
+        // `short_id` is the relay's routing key and must be unique across
+        // devices. Reject an enrollment that would reuse an existing one; the
+        // unique index (see `Mongo::ensure_indexes`) enforces this again on
+        // insert to close the concurrent-enrollment race.
         let short_id = short_device_id(&device_id.to_string());
         if db
             .devices()
@@ -229,10 +222,8 @@ impl DeviceDoc {
             last_deployment_hash: "".to_string(),
             pending_lifecycle_updates: vec![],
         };
-        // Race-safe backstop: even if two colliding enrollments pass the
-        // pre-check concurrently, the unique `short_id` (and `_id`) index makes
-        // exactly one insert win. Surface the loser as a clean 400 rather than
-        // a generic 500 so it never looks like a server fault.
+        // If two enrollments race past the pre-check, the unique index lets
+        // only one insert win; report the other as a clean 400, not a 500.
         match db.devices().insert_one(node.clone()).await {
             Ok(_) => Ok(()),
             Err(e) if is_duplicate_key_error(&e) => Err(ServerError::bad_request(
@@ -704,10 +695,9 @@ impl AccessControlled for DeviceDoc {
 mod tests {
     use super::*;
 
-    /// Critical-2 regression: only `owner_scope` / `allowed_scopes` count as
-    /// access-control changes. The device update handler uses this to require
-    /// Admin (not just Editor) before touching ownership or the ACL — otherwise
-    /// an Editor could seize the device or share it with arbitrary scopes.
+    /// Only `owner_scope` / `allowed_scopes` count as access-control changes.
+    /// The device update handler uses this to require Admin (not just Editor)
+    /// before those fields can be modified.
     #[test]
     fn touches_access_control_flags_only_privileged_fields() {
         // Non-privileged fields never trip the gate.
@@ -722,26 +712,24 @@ mod tests {
 
         // Ownership transfer requires Admin.
         let owner = UpdateDeviceBody {
-            owner_scope: Some("user:attacker@evil.com".to_string()),
+            owner_scope: Some("user:someone@example.com".to_string()),
             ..Default::default()
         };
         assert!(owner.touches_access_control());
 
         // ACL change requires Admin.
         let acl = UpdateDeviceBody {
-            allowed_scopes: Some(vec!["org:victim".to_string()]),
+            allowed_scopes: Some(vec!["org:example".to_string()]),
             ..Default::default()
         };
         assert!(acl.touches_access_control());
     }
 
-    /// Critical-1 threat model: `short_id` is only the first 6 hex chars of
-    /// SHA256(device_id) — a 24-bit space where collisions are trivially found
-    /// (here, among sequential ids). Because the relay routes tunnels solely by
-    /// `short_id`, two devices sharing one lets a newcomer hijack the other's
-    /// tunnel. This pins WHY enrollment must reject colliding short_ids
-    /// (`DeviceDoc::create_from` + the unique index); if someone widens the
-    /// namespace enough that this stops finding a collision, revisit that guard.
+    /// `short_id` is the first 6 hex chars of SHA256(device_id) — a 24-bit
+    /// space where distinct ids can map to the same value, which is why
+    /// enrollment enforces uniqueness (`DeviceDoc::create_from` + the unique
+    /// index). If the namespace is ever widened so this no longer finds a
+    /// collision, revisit that guard.
     #[test]
     fn short_ids_collide_and_therefore_must_be_unique() {
         use std::collections::HashMap;
